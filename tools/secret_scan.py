@@ -22,8 +22,12 @@ SETUP_ROUTE_RE=re.compile(r'(?<![A-Za-z0-9_])/(setup-[A-Za-z0-9_-]{16,})(?![A-Za
 ANGLE_PLACEHOLDER_RE=re.compile(r'^<[A-Z0-9_.:-]+>$',re.IGNORECASE); GH_SECRET_PLACEHOLDER_RE=re.compile(r'^\$\{\{\s*secrets\.[A-Z0-9_]+\s*\}\}$',re.IGNORECASE); ENV_PLACEHOLDER_RE=re.compile(r'^\$\{[A-Z_][A-Z0-9_]*\}$',re.IGNORECASE); DOLLAR_PLACEHOLDER_RE=re.compile(r'^\$[A-Z_][A-Z0-9_]*$',re.IGNORECASE)
 SAFE_REFERENCE_RE=re.compile(r'^(?:os\.(?:getenv\([^\r\n]+\)|environ\[[^\r\n]+\])|env\([^\r\n]+\)|config\.get\([^\r\n]+\)|settings\.[A-Z0-9_]+)$',re.IGNORECASE)
 PLACEHOLDER_WORDS={'placeholder','changeme','change-me','example','example-value','replace-me','replace_me','your-value','your_value'}
-SEVEN_Z_SIGNATURE=b"7z\xbc\xaf'\x1c"; RAR_SIGNATURES=(b'Rar!\x1a\x07\x00',b'Rar!\x1a\x07\x01\x00'); GZIP_SIGNATURE=b'\x1f\x8b'; BZIP2_SIGNATURE=b'BZh'; XZ_SIGNATURE=b'\xfd7zXZ\x00'
-UNSUPPORTED_SIGNATURES=(SEVEN_Z_SIGNATURE,*RAR_SIGNATURES,GZIP_SIGNATURE,BZIP2_SIGNATURE,XZ_SIGNATURE)
+SEVEN_Z_SIGNATURE=bytes((0x37,0x7A,0xBC,0xAF,0x27,0x1C))
+RAR_SIGNATURES=(bytes((0x52,0x61,0x72,0x21,0x1A,0x07,0x00)),bytes((0x52,0x61,0x72,0x21,0x1A,0x07,0x01,0x00)))
+GZIP_SIGNATURE=bytes((0x1F,0x8B,0x08))
+BZIP2_HEADER=bytes((0x42,0x5A,0x68)); BZIP2_BLOCK_MAGIC=bytes((0x31,0x41,0x59,0x26,0x53,0x59)); BZIP2_SIGNATURE=BZIP2_HEADER+bytes((0x39,))+BZIP2_BLOCK_MAGIC
+XZ_SIGNATURE=bytes((0xFD,0x37,0x7A,0x58,0x5A,0x00))
+UNSUPPORTED_SIGNATURES=(SEVEN_Z_SIGNATURE,*RAR_SIGNATURES,GZIP_SIGNATURE,XZ_SIGNATURE)
 
 def run_git(repo:Path,*args:str,text:bool=True): return subprocess.run(['git',*args],cwd=repo,check=True,capture_output=True,text=text)
 def _sha256(data:bytes)->str:return hashlib.sha256(data).hexdigest()
@@ -49,8 +53,15 @@ def _probe_tar(data:bytes)->bool:
         with tarfile.open(fileobj=io.BytesIO(data),mode='r:*') as a:a.getmembers()
         return True
     except (tarfile.TarError,OSError,EOFError,ValueError):return False
+def _contains_bzip2_stream_header(data:bytes)->bool:
+    start=0
+    while True:
+        index=data.find(BZIP2_HEADER,start)
+        if index<0:return False
+        if index+10<=len(data) and data[index+3:index+4] in tuple(bytes((n,)) for n in range(0x31,0x3A)) and data[index+4:index+10]==BZIP2_BLOCK_MAGIC:return True
+        start=index+1
 def _contains_unsupported_signature(data:bytes)->bool:
-    return any(data.find(sig)>=0 for sig in UNSUPPORTED_SIGNATURES)
+    return any(data.find(sig)>=0 for sig in UNSUPPORTED_SIGNATURES) or _contains_bzip2_stream_header(data)
 def _magic_archive_kind(data:bytes)->str|None:
     z=_probe_zip(data); t=_probe_tar(data)
     if z and t:return 'ambiguous'
