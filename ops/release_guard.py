@@ -11,26 +11,24 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
 
 PROTECTED_DIR_COMPONENTS = {
-    "var", "runtime", "private", "secrets", "sessions", "data", "uploads",
-    "downloads", "media", "logs", "log", "tmp", "cache", "browser",
-    "browser_profile", "browser_profiles", "profiles", "cookies", "cookie",
-    "venv", ".venv", "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache",
+    "var", "runtime", "private", "secrets", "sessions", "data", "uploads", "downloads",
+    "media", "logs", "log", "tmp", "cache", "browser", "browser_profile", "browser_profiles",
+    "profiles", "cookies", "cookie", "venv", ".venv", "__pycache__", ".pytest_cache",
+    ".mypy_cache", ".ruff_cache",
 }
 PERSISTENT_DIR_COMPONENTS = {
-    "var", "runtime", "private", "secrets", "sessions", "data", "uploads",
-    "downloads", "media", "logs", "log", "browser", "browser_profile",
-    "browser_profiles", "profiles", "cookies", "cookie",
+    "var", "runtime", "private", "secrets", "sessions", "data", "uploads", "downloads",
+    "media", "logs", "log", "browser", "browser_profile", "browser_profiles", "profiles",
+    "cookies", "cookie",
 }
 PROTECTED_EXACT_NAMES = {
-    ".env", "credentials.json", "token.json", "private_config.json",
-    "connection_info.txt", "setup_state.json", "bootstrap.json",
-    "bridge_keys_secret.txt", "tg_session_string_secret.txt", "cookies.txt",
-    "cookies.json",
+    ".env", "credentials.json", "token.json", "private_config.json", "connection_info.txt",
+    "setup_state.json", "bootstrap.json", "bridge_keys_secret.txt", "tg_session_string_secret.txt",
+    "cookies.txt", "cookies.json",
 }
 PROTECTED_SUFFIXES = {
-    ".session", ".session-journal", ".sqlite", ".sqlite3", ".db",
-    ".db-journal", ".db-wal", ".db-shm", ".pem", ".key", ".p12", ".pfx",
-    ".log", ".cookie", ".cookies",
+    ".session", ".session-journal", ".sqlite", ".sqlite3", ".db", ".db-journal", ".db-wal",
+    ".db-shm", ".pem", ".key", ".p12", ".pfx", ".log", ".cookie", ".cookies",
 }
 
 
@@ -49,8 +47,7 @@ def normalize_relative(path: str | Path) -> str:
 def _parts_and_name(path: str | Path) -> tuple[list[str], str]:
     rel = normalize_relative(path)
     pure = PurePosixPath(rel)
-    parts = [part.casefold() for part in pure.parts]
-    return parts, pure.name.casefold()
+    return [part.casefold() for part in pure.parts], pure.name.casefold()
 
 
 def is_protected_relative(path: str | Path) -> bool:
@@ -71,6 +68,22 @@ def is_persistent_relative(path: str | Path) -> bool:
     return any(name.endswith(suffix) for suffix in PROTECTED_SUFFIXES)
 
 
+def is_forbidden_tracked_state_path(path: str | Path) -> bool:
+    _parts, name = _parts_and_name(path)
+    if name.startswith(".env") or name in PROTECTED_EXACT_NAMES:
+        return True
+    return any(name.endswith(suffix) for suffix in PROTECTED_SUFFIXES)
+
+
+def _runtime_conflict(rel: str, entries: list[str]) -> bool:
+    rel_p = PurePosixPath(rel)
+    for entry in entries:
+        ent = PurePosixPath(normalize_relative(entry))
+        if rel_p == ent or ent in rel_p.parents:
+            return True
+    return False
+
+
 def iter_regular_files(root: Path):
     root = root.resolve()
     for path in sorted(root.rglob("*")):
@@ -78,6 +91,34 @@ def iter_regular_files(root: Path):
             raise SafetyError(f"symlink encountered: {path.relative_to(root).as_posix()}")
         if path.is_file():
             yield path
+
+
+def validate_exact_source_payload(source: Path, runtime_entries: list[str]) -> dict:
+    source = source.resolve()
+    files = []
+    for path in iter_regular_files(source):
+        rel = path.relative_to(source).as_posix()
+        if is_forbidden_tracked_state_path(rel):
+            raise SafetyError(f"tracked runtime/private artifact is forbidden: {rel}")
+        if _runtime_conflict(rel, runtime_entries):
+            raise SafetyError(f"tracked source conflicts with persistent runtime binding: {rel}")
+        files.append(rel)
+    return {"files": files, "count": len(files)}
+
+
+def copy_source_without_protected(source: Path, destination: Path) -> None:
+    validate_exact_source_payload(source, [])
+    source = source.resolve()
+    destination.mkdir(parents=True, exist_ok=True)
+    for path in iter_regular_files(source):
+        rel = path.relative_to(source)
+        target = destination / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(path, target)
+
+
+def copy_protected_state(*_args, **_kwargs):
+    raise SafetyError("mutable protected state must not be copied into versioned releases")
 
 
 def sha256_file(path: Path) -> str:
@@ -91,22 +132,6 @@ def sha256_file(path: Path) -> str:
 def sha256_json(payload: dict) -> str:
     data = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(data).hexdigest()
-
-
-def copy_source_without_protected(source: Path, destination: Path) -> None:
-    source = source.resolve()
-    destination.mkdir(parents=True, exist_ok=True)
-    for path in iter_regular_files(source):
-        rel = path.relative_to(source).as_posix()
-        if is_protected_relative(rel):
-            continue
-        target = destination / rel
-        target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(path, target)
-
-
-def copy_protected_state(*_args, **_kwargs):
-    raise SafetyError("mutable protected state must not be copied into versioned releases")
 
 
 def build_manifest(root: Path) -> dict:
@@ -134,10 +159,8 @@ def _canonical_no_alias(path: Path, label: str, *, must_exist: bool = False) -> 
     if must_exist and not lexical.exists():
         raise SafetyError(f"{label} does not exist")
     real = Path(os.path.realpath(lexical))
-    if real != lexical:
+    if real != lexical or lexical.is_symlink():
         raise SafetyError(f"{label} uses a symlink/alias path")
-    if lexical.is_symlink():
-        raise SafetyError(f"{label} must not be a symlink")
     return lexical
 
 
@@ -156,14 +179,9 @@ def _overlap(a: Path, b: Path) -> bool:
         return False
 
 
-def validate_disjoint_topology(
-    named_roots: dict[str, Path],
-    forbidden_pairs: list[tuple[str, str]],
-    *,
-    must_exist: set[str] | None = None,
-) -> dict[str, Path]:
+def validate_disjoint_topology(named_roots: dict[str, Path], forbidden_pairs: list[tuple[str, str]], *, must_exist: set[str] | None = None) -> dict[str, Path]:
     must_exist = must_exist or set()
-    canonical: dict[str, Path] = {}
+    canonical = {}
     for name, path in named_roots.items():
         canonical[name] = _canonical_no_alias(path, name, must_exist=name in must_exist)
     for left, right in forbidden_pairs:
@@ -172,13 +190,7 @@ def validate_disjoint_topology(
     return canonical
 
 
-def validate_recovery_topology(
-    app_root: Path,
-    recovery_root: Path,
-    *,
-    repo_root: Path | None = None,
-    public_root: Path | None = None,
-) -> dict[str, Path]:
+def validate_recovery_topology(app_root: Path, recovery_root: Path, *, repo_root: Path | None = None, public_root: Path | None = None) -> dict[str, Path]:
     roots = {"app_root": app_root, "recovery_root": recovery_root}
     pairs = [("app_root", "recovery_root")]
     if repo_root is not None:
@@ -198,16 +210,7 @@ def _lexical_link_path(path: Path, label: str) -> Path:
     return lexical
 
 
-def validate_deployment_topology(
-    *,
-    repo: Path,
-    active_link: Path,
-    releases_root: Path,
-    backup_root: Path,
-    persistent_state_root: Path,
-    control_root: Path,
-    public_root: Path | None = None,
-) -> dict[str, Path]:
+def validate_deployment_topology(*, repo: Path, active_link: Path, releases_root: Path, backup_root: Path, persistent_state_root: Path, control_root: Path, public_root: Path | None = None) -> dict[str, Path]:
     roots = {
         "repo": repo,
         "releases_root": releases_root,
@@ -215,18 +218,14 @@ def validate_deployment_topology(
         "persistent_state_root": persistent_state_root,
         "control_root": control_root,
     }
-    pairs = []
-    root_names = list(roots)
-    for index, left in enumerate(root_names):
-        for right in root_names[index + 1 :]:
-            pairs.append((left, right))
+    names = list(roots)
+    pairs = [(a, b) for i, a in enumerate(names) for b in names[i + 1 :]]
     if public_root is not None:
         roots["public_root"] = public_root
-        for name in ("repo", "releases_root", "backup_root", "persistent_state_root", "control_root"):
-            pairs.append((name, "public_root"))
+        pairs += [(name, "public_root") for name in names]
     canonical = validate_disjoint_topology(roots, pairs, must_exist={"repo"})
     active_lexical = _lexical_link_path(active_link, "active_link")
-    for name in ("repo", "releases_root", "backup_root", "persistent_state_root", "control_root"):
+    for name in names:
         if _overlap(active_lexical, canonical[name]):
             raise SafetyError(f"unsafe path topology overlap: active_link / {name}")
     canonical["active_link"] = active_lexical
@@ -234,7 +233,7 @@ def validate_deployment_topology(
 
 
 def require_under_control_root(path: Path, control_root: Path, label: str) -> Path:
-    control = _canonical_no_alias(control_root, "control_root")
+    control = _canonical_no_alias(control_root, "control_root", must_exist=True)
     lexical = _lexical_absolute(path)
     if Path(os.path.realpath(lexical.parent)) != lexical.parent:
         raise SafetyError(f"{label} parent uses a symlink/alias path")
@@ -243,6 +242,45 @@ def require_under_control_root(path: Path, control_root: Path, label: str) -> Pa
     except ValueError as exc:
         raise SafetyError(f"{label} must live under private control_root") from exc
     return lexical
+
+
+def _expected_uid() -> int | None:
+    return os.getuid() if hasattr(os, "getuid") else None
+
+
+def _validate_owner_mode(path: Path, label: str, *, allow_exec: bool = False, require_dir: bool = False) -> Path:
+    if path.is_symlink() or (require_dir and not path.is_dir()) or (not require_dir and not path.is_file()):
+        raise SafetyError(f"{label} missing or unsafe")
+    st = path.stat()
+    uid = _expected_uid()
+    if uid is not None and st.st_uid != uid:
+        raise SafetyError(f"{label} owner is unexpected")
+    mode = stat.S_IMODE(st.st_mode)
+    if mode & 0o077:
+        raise SafetyError(f"{label} permissions are too broad")
+    if allow_exec and not (mode & stat.S_IXUSR):
+        raise SafetyError(f"{label} is not owner-executable")
+    return path
+
+
+def validate_private_control_root(control_root: Path) -> Path:
+    root = _canonical_no_alias(control_root, "control_root", must_exist=True)
+    return _validate_owner_mode(root, "control_root", require_dir=True)
+
+
+def validate_private_control_file(path: Path, control_root: Path, label: str, *, executable: bool = False) -> Path:
+    root = validate_private_control_root(control_root)
+    resolved = require_under_control_root(path, root, label)
+    return _validate_owner_mode(resolved, label, allow_exec=executable)
+
+
+def validate_private_control_dir(path: Path, control_root: Path, label: str, *, create: bool = False) -> Path:
+    root = validate_private_control_root(control_root)
+    resolved = require_under_control_root(path, root, label)
+    if create and not resolved.exists():
+        resolved.mkdir(parents=True, mode=0o700)
+        os.chmod(resolved, 0o700)
+    return _validate_owner_mode(resolved, label, require_dir=True)
 
 
 def load_runtime_manifest(path: Path) -> list[str]:
@@ -255,7 +293,7 @@ def load_runtime_manifest(path: Path) -> list[str]:
     raw_paths = payload.get("paths") if isinstance(payload, dict) else None
     if not isinstance(raw_paths, list) or not raw_paths:
         raise SafetyError("runtime manifest must contain protected paths")
-    result: list[str] = []
+    result = []
     for raw in raw_paths:
         rel = normalize_relative(str(raw))
         if not is_persistent_relative(rel):
@@ -303,17 +341,7 @@ def _parse_iso(value: object, label: str) -> datetime:
     return parsed.astimezone(timezone.utc)
 
 
-def load_external_approval(
-    path: Path,
-    *,
-    expected_sha: str,
-    expected_repository: str,
-    expected_ref: str,
-    expected_manifest_sha256: str,
-    expected_ci_run_id: str,
-    expected_audit_id: str,
-    now: datetime | None = None,
-) -> dict:
+def load_external_approval(path: Path, *, expected_sha: str, expected_repository: str, expected_ref: str, expected_manifest_sha256: str, expected_ci_run_id: str, expected_audit_id: str, now: datetime | None = None) -> dict:
     if not path.is_file() or path.is_symlink():
         raise SafetyError("external approval file missing or unsafe")
     st = path.stat()
@@ -353,15 +381,14 @@ def load_external_approval(
 
 
 def consume_external_approval(payload: dict, consumption_root: Path) -> Path:
-    consumption_root = _canonical_no_alias(consumption_root, "approval_consumption_root")
-    consumption_root.mkdir(parents=True, exist_ok=True)
-    token = hashlib.sha256(
-        (str(payload["approval_id"]) + "\0" + str(payload["nonce"])).encode("utf-8")
-    ).hexdigest()
+    if consumption_root.is_symlink():
+        raise SafetyError("approval consumption root is unsafe")
+    consumption_root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    os.chmod(consumption_root, 0o700)
+    token = hashlib.sha256((str(payload["approval_id"]) + "\0" + str(payload["nonce"])).encode()).hexdigest()
     marker = consumption_root / (token + ".consumed.json")
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
     try:
-        fd = os.open(marker, flags, 0o600)
+        fd = os.open(marker, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     except FileExistsError as exc:
         raise SafetyError("external approval was already consumed") from exc
     with os.fdopen(fd, "w", encoding="utf-8") as handle:
@@ -401,13 +428,7 @@ def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def retention_candidates(
-    paths: list[Path],
-    *,
-    active: Path | None,
-    last_known_good: Path | None,
-    keep_newest: int = 5,
-) -> list[Path]:
+def retention_candidates(paths: list[Path], *, active: Path | None, last_known_good: Path | None, keep_newest: int = 5) -> list[Path]:
     existing = [p for p in paths if p.exists()]
     newest = sorted(existing, key=lambda p: p.stat().st_mtime, reverse=True)
     protected = {p.resolve() for p in newest[:keep_newest]}
@@ -418,17 +439,9 @@ def retention_candidates(
     return [p for p in newest[keep_newest:] if p.resolve() not in protected]
 
 
-def apply_retention(
-    paths: list[Path],
-    *,
-    active: Path | None,
-    last_known_good: Path | None,
-    keep_newest: int = 5,
-) -> list[str]:
-    removed: list[str] = []
-    for path in retention_candidates(
-        paths, active=active, last_known_good=last_known_good, keep_newest=keep_newest
-    ):
+def apply_retention(paths: list[Path], *, active: Path | None, last_known_good: Path | None, keep_newest: int = 5) -> list[str]:
+    removed = []
+    for path in retention_candidates(paths, active=active, last_known_good=last_known_good, keep_newest=keep_newest):
         if path.is_symlink():
             raise SafetyError("retention refuses symlink artifact")
         if path.is_dir():
@@ -439,17 +452,10 @@ def apply_retention(
     return removed
 
 
-def apply_backup_retention(
-    backup_root: Path,
-    *,
-    last_known_good: Path | None,
-    keep_newest: int = 5,
-) -> list[str]:
+def apply_backup_retention(backup_root: Path, *, last_known_good: Path | None, keep_newest: int = 5) -> list[str]:
     backups = sorted(backup_root.glob("*.tar.gz"))
-    removable = retention_candidates(
-        backups, active=None, last_known_good=last_known_good, keep_newest=keep_newest
-    )
-    removed: list[str] = []
+    removable = retention_candidates(backups, active=None, last_known_good=last_known_good, keep_newest=keep_newest)
+    removed = []
     for backup in removable:
         if backup.is_symlink():
             raise SafetyError("retention refuses symlink backup")
@@ -460,16 +466,11 @@ def apply_backup_retention(
     return removed
 
 
-def cleanup_stale_staging(
-    releases_root: Path,
-    *,
-    older_than_seconds: int = 86400,
-    now_timestamp: float | None = None,
-) -> list[str]:
+def cleanup_stale_staging(releases_root: Path, *, older_than_seconds: int = 86400, now_timestamp: float | None = None) -> list[str]:
     if not releases_root.exists():
         return []
     now_value = now_timestamp if now_timestamp is not None else datetime.now().timestamp()
-    removed: list[str] = []
+    removed = []
     for path in releases_root.iterdir():
         if not path.name.startswith(".stage_"):
             continue
