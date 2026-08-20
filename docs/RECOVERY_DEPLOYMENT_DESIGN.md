@@ -1,97 +1,158 @@
-# Telegram Bridge recovery and deployment design
+# Telegram Bridge — recovery, release and live-deployment design
 
-Status: **PREPARED FOR INDEPENDENT AUDIT — NOT AUTHORIZED FOR PRODUCTION EXECUTION**.
+Status: **TWO-STREAM DEVELOPMENT / PREPARED FOR INDEPENDENT AUDIT / NO UNAPPROVED PRODUCTION PROMOTION**.
 
-The workflow has three strictly separated phases:
+The project now advances in parallel:
 
-1. private production-baseline recovery;
-2. independent reconciliation/audit;
-3. later versioned deployment after PASS.
+- **Stream A — GitHub / application / code**: application source, security, tests, exact release payload, CI and approval evidence.
+- **Stream B — HOSTiQ / live site**: recovered production baseline, Passenger/Python runtime evidence, controlled deployment, restart, smoke, resume and rollback.
 
-## 1. Recovery-only baseline capture
+The streams are synchronized by exact Git SHA and immutable prepared-release evidence. Green CI alone never authorizes production promotion.
 
-`ops/recovery_capture.py` is recovery-only. Before creating any output it validates path topology so the recovery root cannot equal, contain, or be contained by the live application root; optional repository/public roots are also kept disjoint. Symlink aliases fail closed.
+## Current HOSTiQ evidence boundary
 
-The capture then:
+First-hand recovery evidence dated 2026-08-20 15:27 establishes that the production tree has been recovered, a private backup was created before recovery, and the previously exposed setup route was privately rotated/invalidated. The new route remains private and must never enter GitHub, Drive, chat, CI or documentation.
 
-- creates a private full backup first and writes its SHA-256 companion file;
-- excludes built-in private/runtime/log/cookie/browser/session/database/key/config classes;
-- uses a conservative positive source-file policy for the sanitized candidate; unknown non-source artifacts require private review rather than silently entering the candidate;
-- runs the hardened scanner, including generic credential aliases and content-signature archive detection;
-- writes path/size/SHA-256 manifest evidence;
-- blocks candidate export on scanner findings, disguised/nested archives, unknown source artifacts, unsafe symlinks or other review-required conditions;
-- creates a private candidate archive only after a clean gate;
-- performs no email/automatic transfer, cron installation or deploy-worker installation.
+The recovered evidence also establishes that `passenger_wsgi.py` differs from the old controlled reference and currently uses the normal Passenger entry importing `bridge.app.application`; an empty `install_server.sh` is an additional server file. These HOSTiQ-specific facts must not be overwritten accidentally.
 
-The private full backup never becomes a public/Drive artifact.
+This repository still does **not** contain the complete sanitized recovered application tree. Exact per-file reconciliation therefore remains a server-side/audit task, not something to fabricate from the quarantined legacy ZIP.
 
-## 2. Independent baseline reconciliation
+## Recovery and baseline reconciliation
 
-After recovery capture, stop. The candidate must be sanitized, reconciled against Git and independently audited before application import or deployment. Old setup-gate remediation is also a private operator action and only non-secret completion evidence may return to Drive/GitHub.
+`ops/recovery_capture.py` remains recovery-only. It validates topology before output, makes a private full backup first, applies deterministic private/runtime exclusions plus a conservative source policy, runs the hardened scanner, writes path/size/SHA-256 evidence and never installs cron/deploy workers or transfers archives automatically.
 
-## 3. Future versioned deployment
+`ops/baseline_reconcile.py` compares a sanitized recovered tree to an exact Git ref without recording raw file contents or secrets. It:
 
-`ops/deploy_release.py` remains dry-run unless an authorized private operator explicitly uses `--execute`. Even then it fails closed unless all gates below are satisfied.
+- refuses a recovered tree that fails the hardened scanner;
+- exports the exact Git ref;
+- compares SHA-256 manifests;
+- records same/add/remove/change path sets and manifest hashes;
+- explicitly signals a `passenger_wsgi.py` difference;
+- emits only non-secret reconciliation evidence.
 
-### Immutable release / shared mutable state boundary
+The private full backup remains on HOSTiQ only.
 
-- code plus `.venv` are versioned and immutable per release;
-- mutable Telegram session, runtime, database, job/idempotency, upload/media/log/private-config state has one authoritative persistent root outside all release directories;
-- releases reference approved persistent paths by symlink through a private runtime manifest outside Git;
-- mutable state is never copied into a release and code rollback never restores an older copy of runtime state;
-- the currently active release must already be bound to the same shared state before automated deployment is allowed;
-- schema-changing deployment is blocked by the generic deployer and requires a separate independently audited quiesce/backup/migration/rollback plan.
+## Container and secret guard
 
-### Path topology invariants
+`tools/secret_scan.py` performs current-tree and full-history scanning. Supported containers are probed by parsers before binary allowlisting, so legal prefixed/self-extracting ZIP files cannot fall through as ordinary binaries. ZIP/TAR ambiguity is treated as a polyglot and fails closed. Nested containers are recursively inspected within limits. ZIP Unix symlink/special metadata and TAR non-regular members fail closed. Reviewed binary allowlisting remains exact path + SHA-256 + reason and cannot override protected content.
 
-A central topology validator is used by recovery and deployment. Repository, releases, backups, persistent state and private control roots must be canonical, non-aliased and safely disjoint. The active symlink path must not sit inside those roots. Optional public/web roots cannot contain repository, releases, backups, state or private controls. Dangerous overlap fails before backup, copy, switch, retention or deletion.
+## Exact audited source payload
 
-### Python and dependency invariants
+Git-tracked application source is never silently dropped because a directory happens to be named `data`, `media`, `cache`, `uploads` or another runtime-like word. Legitimate source under those names remains byte-for-byte in the release payload.
 
-- release creation uses an explicitly configured executable and verifies Python 3.11 before creating the venv;
-- the created venv is independently verified as Python 3.11 and non-secret version evidence is recorded;
-- dependencies install only into the staged versioned environment;
-- `requirements.txt` without hash-locked `requirements.lock` blocks deployment;
-- lock installation uses `pip --require-hashes`;
-- compile and application tests are mandatory; missing pytest/tests fail closed.
+A build fails instead when tracked material is itself a forbidden private/runtime artifact (for example `.env`, sessions, databases, logs, keys) or when a tracked path collides with a declared persistent runtime binding. The deployable source identity therefore corresponds to the audited Git commit rather than a silently filtered derivative.
 
-### Approval provenance
+## Deterministic PREPARE → AUDIT/APPROVAL → EXECUTE
 
-The private approval file lives under a private control root outside Git and is permission/owner/freshness checked. Approval binds all of:
+`ops/deploy_release.py` now separates preparation from live execution.
+
+### PREPARE
+
+PREPARE:
+
+1. verifies the requested full SHA is the exact head of the approved Git ref;
+2. exports that exact commit;
+3. validates exact source payload/runtime-binding compatibility;
+4. validates the explicitly configured Python 3.11 executable;
+5. creates a versioned `.venv` and independently verifies it is Python 3.11;
+6. requires hash-locked dependencies when dependencies exist;
+7. compiles and runs the mandatory application tests;
+8. creates an exact payload manifest;
+9. writes deterministic `PREPARED_RELEASE.json` with no runtime timestamp;
+10. returns a stable SHA-256 for the immutable prepared manifest.
+
+The prepared hash can therefore be independently audited and approved before execution.
+
+### AUDIT / APPROVAL
+
+The private approval lives outside Git and binds:
 
 - exact full commit SHA;
 - repository identity;
-- approved ref;
-- deterministic release provenance/manifest SHA-256;
+- exact approved ref;
+- deterministic prepared-release manifest SHA-256;
 - CI run identity;
 - independent audit identity;
-- approval ID and one-time nonce;
-- explicit declaration that no data-schema change is part of the generic deploy.
+- approval ID and nonce;
+- bounded issue/expiry time;
+- explicit `data_schema_change=false` for generic deployment.
 
-Approval is consumed once via an atomic private marker before any live switch. Reuse is rejected.
+The approval is permission/owner checked and single-use.
 
-### Quiesce, restart and verification
+### EXECUTE
 
-Private executable hooks outside Git are mandatory for quiesce, Passenger/WSGI restart/reload, running-release identity, unauthenticated smoke and authenticated smoke. Hook output is suppressed and every hook has a timeout.
+EXECUTE does not rebuild the approval-bound artifact. Before live mutation it verifies:
 
-Deployment order after preflight/approval is:
+- prepared manifest hash;
+- exact current payload hash;
+- repository/ref/SHA binding;
+- exact approved-ref head policy again;
+- unchanged runtime-binding declaration;
+- private control-plane trust anchors.
 
-1. quiesce writes;
-2. back up current immutable release and shared persistent state;
-3. atomically switch the active symlink;
-4. restart/reload Passenger/WSGI;
-5. verify the running release matches the expected non-secret full SHA;
-6. run unauthenticated smoke;
-7. run authenticated smoke.
+Only then can the prepared payload be promoted into a versioned release.
 
-No deployment reaches `DEPLOYED` before restart plus identity verification plus both smokes.
+## Shared mutable state
 
-Rollback restores only the previous immutable code+.venv symlink. Shared mutable state remains authoritative and is deliberately not reverted, preventing post-switch writes from being silently lost. After rollback the previous release is restarted, its running SHA is verified, then both rollback smokes run. Failure produces hard `CRITICAL_ROLLBACK_FAILED` status.
+Versioned releases contain immutable application code + `.venv`. Telegram session/runtime/database/job/idempotency/private mutable state lives in one persistent private root outside releases. Releases bind only declared persistent entries. Code rollback never restores an older mutable-state copy, so post-switch writes remain authoritative.
 
-### Retention
+Schema-changing releases are outside the generic deployer and require a separate audited migration/rollback plan.
 
-Release retention preserves active and last-known-good releases. Backup retention removes archive and `.sha256` companion as one unit. Stale `.stage_*` directories may be cleaned only after age checks and never when an `ACTIVE_LOCK` exists. Symlink artifacts fail closed.
+## Private control-plane trust
 
-## Current block
+The private control root and every deployment trust anchor are canonical/non-symlink, owned by the expected private account where UID checks are available, and not group/world accessible. Executable hooks must be owner-executable. The policy covers:
 
-No active `.cpanel.yml` or Git-controlled auto-deploy arming marker exists in PR #2. No production execution is authorized. Current production source/diff, deployed SHA and live setup-gate remediation remain unverified, so `SECURITY_BLOCK`, `BLOCKED_EXTERNAL` and `DEPLOYMENT_BLOCK` remain.
+- runtime manifest;
+- approval;
+- approval-consumption directory;
+- quiesce hook;
+- resume/unquiesce hook;
+- Passenger restart/reload hook;
+- running-release identity hook;
+- unauthenticated smoke hook;
+- authenticated smoke hook;
+- status file/directory.
+
+Hook output is suppressed and all hooks have timeouts.
+
+## Live lifecycle
+
+Success path:
+
+1. verify immutable prepared release + approval;
+2. quiesce writes/jobs;
+3. back up active immutable release and shared persistent state;
+4. atomically switch complete release;
+5. restart/reload Passenger/WSGI;
+6. verify running full SHA;
+7. unauthenticated smoke;
+8. authenticated smoke;
+9. mandatory resume/unquiesce;
+10. only then write `DEPLOYED`.
+
+Rollback path:
+
+1. restore prior immutable release;
+2. restart/reload;
+3. verify prior running SHA;
+4. run rollback unauthenticated/authenticated smoke;
+5. mandatory rollback resume/unquiesce;
+6. only then write `ROLLED_BACK`.
+
+If failure occurs after quiesce but before a live switch, pre-live recovery also requires restart/identity/smokes and mandatory resume before `PRELIVE_FAILED`. Resume/restart/identity failure becomes a hard critical state rather than a false success.
+
+## Runtime evidence
+
+`ops/runtime_evidence.py` is a read-only, non-secret probe intended to run from the actual application/Passenger runtime context. It records only Python version/implementation, resolved executable and prefixes, venv-active flag, WSGI relative path/hash and application import identity. It explicitly records that no environment values, request data or secret values are collected.
+
+`/usr/bin/python3` reporting 3.6.8 is not accepted as Passenger runtime evidence. Production promotion requires separate evidence from the actual Python App/Passenger context proving the intended Python 3.11 runtime.
+
+## Retention and topology
+
+Repository, releases, backups, shared state, private controls and optional public root must be canonical and safely disjoint. Active-link topology is validated before mutation. Backup archive/hash companions are retained/deleted together. Active and last-known-good releases are preserved. Stale stage directories are removed only after age checks and never while `ACTIVE_LOCK` exists.
+
+## Current production gate
+
+There is no active `.cpanel.yml` or Git-controlled auto-deploy arming marker in PR #2. The historical deployment branch remains superseded/non-deployable.
+
+The old setup-route remediation and production-baseline recovery are no longer treated as unknown; they are recorded in newer first-hand server evidence and require independent Auditor validation. Remaining production gates include exact sanitized baseline reconciliation, actual Passenger/Python runtime evidence, application acceptance, audited prepared release, private deploy controls and live restart/smoke/resume/rollback proof.
