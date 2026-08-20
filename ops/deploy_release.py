@@ -156,6 +156,31 @@ def _safe_venv_symlink(root: Path, link: Path, approved_python_identity: dict | 
     return {"path": rel, "type": "symlink", "target": os.readlink(link)}
 
 
+def _seal_immutable_tree_permissions(root: Path, excluded_paths: list[str] | tuple[str, ...] = ()) -> None:
+    """Remove group/world write from the newly built immutable tree only."""
+    excluded = set(excluded_paths)
+    expected_uid = os.getuid() if hasattr(os, "getuid") else None
+    for path in [root, *sorted(root.rglob("*"))]:
+        rel = "" if path == root else path.relative_to(root).as_posix()
+        if rel and _path_is_excluded(rel, excluded):
+            continue
+        try:
+            st = path.lstat()
+        except OSError as exc:
+            raise SafetyError("immutable release path became unreadable while sealing") from exc
+        if expected_uid is not None and st.st_uid != expected_uid:
+            raise SafetyError("immutable release path owner is unexpected")
+        if path.is_symlink():
+            continue
+        mode = stat.S_IMODE(st.st_mode)
+        sealed = mode & ~0o022
+        if sealed != mode:
+            try:
+                os.chmod(path, sealed)
+            except OSError as exc:
+                raise SafetyError("immutable release permissions could not be sealed") from exc
+
+
 def _validate_immutable_tree_permissions(root: Path, excluded_paths: list[str] | tuple[str, ...] = ()) -> None:
     excluded = set(excluded_paths)
     expected_uid = os.getuid() if hasattr(os, "getuid") else None
@@ -243,6 +268,7 @@ def prepare_versioned_release(*, repo: Path, sha: str, approved_ref: str, reposi
         if not (source / "tests").is_dir():
             raise SafetyError("required test suite is absent")
         run([str(py), "-m", "unittest", "discover", "-s", "tests", "-v"], cwd=source, timeout=300)
+        _seal_immutable_tree_permissions(source)
         _validate_immutable_tree_permissions(source)
         payload_manifest = _payload_manifest_without_meta(source, approved_python_identity)
         prepared = {
