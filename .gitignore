@@ -184,6 +184,14 @@ __marimo__/
 # Telegram Bridge private/runtime artifacts
 BRIDGE_KEYS_SECRET.txt
 TG_SESSION_STRING_SECRET.txt
+HOSTIQ_CPANEL_PASSWORD.txt
+GITHUB_TOKEN.txt
+GITHUB_PAT.txt
+SSH_PRIVATE_KEY
+id_rsa
+id_ed25519
+id_ecdsa
+id_dsa
 OPENAPI_READY.json
 *.session
 *.session-journal
