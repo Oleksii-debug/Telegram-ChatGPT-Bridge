@@ -1,11 +1,19 @@
-# Operations package — audit only
+# Operations package — two-stream audit boundary
 
-Nothing in this directory is authorized for production execution yet.
+Nothing in this directory authorizes an unapproved production promotion.
 
-- `recovery_capture.py` is recovery-only: topology validation, private backup first, conservative source candidate, hardened scan and manifest/hash; no mail, cron or deployment.
-- `release_guard.py` owns protected/private path policy, central topology validation, shared persistent-state bindings, approval provenance/one-time consumption, atomic release switching and pair-aware retention.
-- `deploy_release.py` is a future versioned deployer. It defaults to dry-run. Code+.venv are immutable per release while mutable Telegram/session/runtime/database/private state remains in one shared private root outside releases.
-- Future execution requires approved Python 3.11, external exact-provenance approval, quiesce, restart/reload, running-release identity, unauthenticated smoke and authenticated smoke hooks under a private control root outside Git.
-- Rollback switches only immutable code+.venv; shared mutable state is not reverted. Passenger/WSGI restart plus previous-SHA identity and rollback smoke are mandatory.
+Stream A (GitHub/code):
+- `secret_scan.py` guards current/public history, parser-probes supported containers before allowlisting, rejects SFX/polyglot ambiguity and ZIP/TAR special members.
+- `release_guard.py` owns topology, exact audited payload rules, shared persistent-state bindings, private control-plane trust, approval checks, atomic switching and retention.
+- `deploy_release.py` implements deterministic **PREPARE -> independent AUDIT/APPROVAL -> EXECUTE**. PREPARE builds/tests an immutable exact payload and stable manifest; EXECUTE verifies that exact artifact rather than rebuilding it.
+
+Stream B (HOSTiQ/live):
+- `recovery_capture.py` performs recovery-only backup/sanitized candidate generation; no mail, cron or deployment.
+- `baseline_reconcile.py` produces hash-only non-secret recovered-production vs exact-Git-ref reconciliation evidence.
+- `runtime_evidence.py` collects only non-secret facts from the actual application/Passenger Python runtime. It never serializes environment values, Telegram credentials, sessions or request data.
+
+Future live execution requires a trusted private control root outside Git with runtime manifest, short-lived single-use approval, quiesce, resume/unquiesce, restart/reload, running-SHA identity, unauthenticated smoke and authenticated smoke hooks. Success cannot become `DEPLOYED` until resume succeeds. Rollback/pre-live recovery also require explicit resume.
+
+Immutable code + `.venv` switch together; mutable Telegram/session/runtime/database state remains in one shared private root and is not reverted merely because code is rolled back.
 
 There is intentionally no active `.cpanel.yml` and no repository-controlled auto-deploy enable marker in this package.
