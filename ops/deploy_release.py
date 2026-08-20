@@ -358,8 +358,8 @@ def execute_prepared_release(*, repo: Path, prepared_release: Path, repository_i
         raise SafetyError("active application path must already be an operator-prepared symlink")
     previous_target=active_link.resolve(strict=True)
     previous_sha=_active_release_sha(active_link)
-    validate_persistent_bindings(previous_target,persistent_state_root,runtime_entries)
     _preflight_persistent_sources(persistent_state_root,runtime_entries)
+    validate_persistent_bindings(previous_target,persistent_state_root,runtime_entries)
     final_release=_materialize_final_release(prepared_release,releases_root,sha,persistent_state_root,runtime_entries)
 
     try:
