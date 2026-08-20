@@ -27,6 +27,8 @@ jobs:
           tools/secret_scan.py
           ops/release_guard.py
           ops/recovery_capture.py
+          ops/deploy_release_legacy.py
+          ops/deployment_hardening.py
           ops/deploy_release.py
           ops/baseline_reconcile.py
           ops/runtime_evidence.py
@@ -35,6 +37,7 @@ jobs:
           tests/test_audit_round5.py
           tests/test_audit_round6.py
           tests/test_audit_round7.py
+          tests/test_audit_round8.py
           tests/test_baseline_reconcile.py
           tests/test_runtime_evidence.py
       - name: Guard and deployment regression tests including real Python 3.11 PREPARE
