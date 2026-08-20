@@ -1,0 +1,16 @@
+HOSTiQ production baseline recovery request
+
+Hello. Please help us recover and automate the existing Python application at tg-api.rukadopomogy.org.ua without overwriting its current working state.
+
+Known application details:
+- application root: /home/rukadopo/telegram_bridge
+- Python: 3.11
+- startup file: passenger_wsgi.py
+- WSGI entry point: application
+- public source repository: https://github.com/Oleksii-debug/Telegram-ChatGPT-Bridge
+
+Before any Git-based deployment, please provide the exact application file(s), dependency/environment changes, Passenger configuration changes, or other server-side changes your support made when resolving the previous HTTP 500 incident. If possible, please also create a server-side backup and provide a sanitized source diff or sanitized archive of the current application code only. Do not include Telegram sessions, API hashes, bearer tokens, setup routes/keys, passwords, private config, runtime databases, logs containing private Telegram data, or WordPress files.
+
+We also need a one-time noninteractive deployment path for future audited `main` releases. The deployment must: create a backup, update application code only, preserve `var/`, session/private config and server secrets, install requirements in the correct Python 3.11 environment, restart Passenger, run a basic health/smoke check, roll back on failure, and record the deployed Git commit SHA. Please do not modify the WordPress site at rukadopomogy.org.ua.
+
+The account owner is blind and uses NVDA, so please perform the server-side configuration directly where possible instead of requiring recurring manual cPanel steps.

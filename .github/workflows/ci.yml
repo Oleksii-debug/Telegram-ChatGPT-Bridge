@@ -1,0 +1,28 @@
+name: Recovery Guard
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  repository-guard:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+      - name: Compile guard tooling
+        run: python -m py_compile tools/secret_scan.py
+      - name: Telegram Bridge secret scan
+        run: python tools/secret_scan.py
+      - name: Verify recovery marker
+        run: test -f RECOVERY_BASELINE.md && grep -q 'DO NOT MERGE / DO NOT DEPLOY' RECOVERY_BASELINE.md
