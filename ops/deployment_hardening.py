@@ -179,7 +179,19 @@ def quarantine(final,releases,j):
     qroot.mkdir(mode=0o700,exist_ok=True); os.chmod(qroot,0o700)
     base=f"{j['sha']}-{str(j['transaction_id'])[:16]}"; dst=qroot/base; i=0
     while dst.exists() or dst.is_symlink(): i+=1; dst=qroot/f"{base}-{i}"
-    os.replace(final,dst); return dst
+    # Linux may require owner-write on the moved directory itself when changing its parent.
+    # Open only the candidate root for the rename, then restore its exact mode at destination.
+    source_mode=stat.S_IMODE(final.lstat().st_mode)
+    try:
+        os.chmod(final,source_mode|stat.S_IWUSR)
+        os.replace(final,dst)
+        os.chmod(dst,source_mode)
+    except OSError as e:
+        if final.exists() and not final.is_symlink():
+            try: os.chmod(final,source_mode)
+            except OSError: pass
+        raise fail("release quarantine move failed") from e
+    return dst
 
 def recover_previous(previous_sha,restart,identity,unauth,auth,resume,prefix):
     C().run_private_hook(restart,f"{prefix} restart/reload",timeout=90); C().verify_running_release(identity,previous_sha)
