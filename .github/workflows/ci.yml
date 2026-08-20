@@ -27,8 +27,6 @@ jobs:
           tools/secret_scan.py
           ops/release_guard.py
           ops/recovery_capture.py
-          ops/deploy_release_legacy.py
-          ops/deployment_hardening.py
           ops/deploy_release.py
           ops/baseline_reconcile.py
           ops/runtime_evidence.py
@@ -38,8 +36,19 @@ jobs:
           tests/test_audit_round6.py
           tests/test_audit_round7.py
           tests/test_audit_round8.py
+          tests/test_audit_round9.py
           tests/test_baseline_reconcile.py
           tests/test_runtime_evidence.py
+      - name: Verify single deploy-capable entrypoint
+        run: |
+          test -f ops/deploy_release.py
+          test ! -e ops/deploy_release_legacy.py
+          test ! -e ops/deployment_hardening.py
+          test "$(grep -RIl --include='*.py' 'def execute_prepared_release' ops | wc -l)" -eq 1
+          python - <<'PY'
+          from ops import deploy_release
+          assert deploy_release._supported_deploy_entrypoint() == 'ops.deploy_release'
+          PY
       - name: Guard and deployment regression tests including real Python 3.11 PREPARE
         run: |
           umask 022
