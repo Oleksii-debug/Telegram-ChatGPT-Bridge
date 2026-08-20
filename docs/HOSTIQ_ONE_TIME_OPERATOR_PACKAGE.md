@@ -2,42 +2,72 @@
 
 Status: **PREPARED, NOT EXECUTED**.
 
-This package is for an authorized application developer/server operator who already has legitimate private HOSTiQ access. It is not a recurring cPanel procedure for the account owner. It must not be used to overwrite production with legacy or unreconciled code.
+This package is for an authorized application developer/server operator who already has legitimate private HOSTiQ access. It is not a recurring cPanel procedure for the account owner and must not overwrite production with legacy or unreconciled code.
 
-Known non-secret production identifiers:
+Known non-secret identifiers:
 
 - domain: `tg-api.rukadopomogy.org.ua`;
 - current known application root: `/home/rukadopo/telegram_bridge`;
-- Python: 3.11;
+- approved runtime family: Python 3.11;
 - WSGI startup file: `passenger_wsgi.py`;
 - WSGI entry point: `application`.
 
-## Required order
+## Recovery-only order
 
-1. Record operator/start time without recording credentials.
-2. Run the recovery-only capture path first. It must create the private full backup before any modification. It must not install cron, deployment workers or send mail.
-3. Privately identify and disable/rotate/invalidate the old setup/auth gate associated with the previously exposed legacy reference. Never copy old or replacement values into GitHub, Drive, chat, ticket text or logs.
-4. Verify the obsolete gate now produces controlled denial/not-found/auth failure. Record only the completion time and non-secret result.
-5. Keep the captured candidate and private full backup server-side. Do not upload the private full backup anywhere.
-6. Confirm the candidate scanner is clean and its manifest/hash are present. If contaminated, stop and retain only private evidence.
-7. Return only sanitized/non-secret recovery evidence to the Developer/Auditor workflow.
-8. Stop. Do not deploy application code until the recovered baseline is reconciled and independently audited.
-9. After independent deployment PASS only, prepare the one-time symlink release layout required by `ops/deploy_release.py`, with the active path pointing to a complete release directory that contains both code and `.venv`.
-10. Place the exact-SHA approval file and authenticated/unauthenticated smoke hooks outside the Git repository. They may contain private server-side logic but must not print credentials or message contents.
-11. Execute the versioned deployer only for the independently approved full SHA. A failed preflight must not change live state; failed post-switch smoke must restore the prior complete release.
+1. Record operator/start time without credentials.
+2. Choose canonical private recovery, repository and control roots outside the live app and public web roots. Validate topology before creating artifacts.
+3. Run recovery-only capture. Private full backup must be created first. No mail, cron, deployment worker or public transfer is permitted.
+4. Privately identify and disable/rotate/invalidate the old setup/auth gate associated with the quarantined legacy reference. Never copy old or replacement values to GitHub, Drive, chat, tickets or logs.
+5. Verify the obsolete gate produces controlled denial/not-found/auth failure and record only non-secret result/time.
+6. Keep the private full backup and candidate server-side. If scanner/source-policy findings exist, stop for private review.
+7. Return only sanitized candidate manifest/hash and other non-secret evidence to Developer/Auditor.
+8. Stop before application deployment until the recovered baseline is reconciled and independently audited.
+
+## One-time migration to the future release layout
+
+Only after independent approval of the recovered production baseline:
+
+1. quiesce application writes through a private hook;
+2. create a private backup of mutable/session/database/runtime state;
+3. create one persistent private state root outside releases, repository, backups, public web roots and Git;
+4. migrate approved mutable state to that root exactly once under an audited migration plan;
+5. create a private runtime manifest listing only approved protected relative mount points;
+6. make the current versioned release reference the persistent state root rather than owning copies;
+7. verify current release behavior and restart Passenger/WSGI before enabling later automated versioned deployment.
+
+The generic deployer refuses a schema-changing release. Any data/schema migration needs a separate audited migration and rollback design.
+
+## Future deployment controls after independent PASS
+
+The private control root must contain non-repository approval/runtime-manifest/quiesce/restart/running-identity/auth-smoke/unauth-smoke controls. They must not print secrets or private Telegram content.
+
+The approval must be short-lived, permission-restricted and bind the exact SHA, repository/ref, release provenance hash, CI run and audit identity. It is single-use.
+
+The deployer must:
+
+- use the explicitly approved Python 3.11 executable;
+- stage code and a new `.venv` without mutating the live environment;
+- require hash-locked dependencies and mandatory tests;
+- verify the active release already uses the shared persistent state;
+- quiesce writes and back up both current code release and persistent state before switch;
+- switch the complete code+.venv release atomically;
+- restart Passenger/WSGI, verify the running full SHA, then run unauthenticated and authenticated smoke;
+- on failure, restore the prior code+.venv symlink, restart it, verify its SHA and rerun rollback smoke;
+- never roll shared mutable state back merely because code rolled back;
+- expose hard failure status if restart/rollback verification fails.
 
 ## Evidence to return — never secret values
 
 - execution start/end timestamp;
 - private backup created: yes/no and private location category only;
 - old setup gate remediated: yes/no;
-- obsolete gate verification result without route/key;
-- sanitized candidate manifest identifier and SHA-256;
-- sanitized candidate archive identifier and SHA-256 if scanner clean;
+- obsolete gate controlled-rejection result without route/key;
+- sanitized candidate manifest/archive identifiers and SHA-256 when clean;
 - Python/Passenger/WSGI facts;
 - dependency manifest/hash information;
 - exact prior HTTP 500 repair description if recoverable;
-- production modified beyond gate remediation: yes/no;
+- persistent-state migration completed: yes/no, without private paths/values beyond approved non-secret category labels;
+- production modified beyond authorized recovery/migration step: yes/no;
 - deployed Git SHA if genuinely mapped, otherwise `UNKNOWN`.
 
 If no authorized private server operator/access exists, stop and keep `BLOCKED_EXTERNAL`. Do not ask the account owner to paste secrets or perform recurring manual deployment work.
