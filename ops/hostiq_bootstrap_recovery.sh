@@ -8,6 +8,7 @@ ROOT="$HOME_DIR/telegram_bridge_recovery"
 OPS="$HOME_DIR/telegram_bridge_ops"
 STATUS="$HOME_DIR/nika_bridge_bootstrap.status"
 REPORT_TO="oleksiy.az.09@gmail.com"
+STAGED_WORKER="$HOME_DIR/nika_bridge_auto_deploy.sh"
 TS="$(date '+%Y%m%d_%H%M%S')"
 OUT="$ROOT/$TS"
 FULL="$OUT/telegram_bridge_PRIVATE_FULL_$TS.tar.gz"
@@ -122,9 +123,11 @@ chmod 600 "$SAFE_TAR" "$REPORT" "$QUAR" "$INCLUDED"
 sha256sum "$SAFE_TAR" >"$SAFE_TAR.sha256"
 chmod 600 "$SAFE_TAR.sha256"
 
-# 3. Install recurring deploy poller only if the separate audited worker was staged.
-if [ -f "$OPS/auto_deploy.sh" ]; then
+# 3. Install the staged deploy worker OUTSIDE production. It remains fail-closed until GitHub main explicitly arms it.
+if [ -f "$STAGED_WORKER" ]; then
+  cp "$STAGED_WORKER" "$OPS/auto_deploy.sh"
   chmod 700 "$OPS/auto_deploy.sh"
+  rm -f "$STAGED_WORKER"
   CRON_LINE='*/5 * * * * bash /home/rukadopo/telegram_bridge_ops/auto_deploy.sh >/dev/null 2>&1'
   if ! crontab -l 2>/dev/null | grep -Fq '/home/rukadopo/telegram_bridge_ops/auto_deploy.sh'; then
     ( crontab -l 2>/dev/null || true; printf '%s\n' "$CRON_LINE" ) | crontab -
