@@ -30,6 +30,7 @@ jobs:
           ops/deploy_release.py
           tests/test_secret_scan.py
           tests/test_recovery_ops.py
+          tests/test_audit_round5.py
       - name: Guard and deployment regression tests
         run: python -m unittest discover -s tests -v
       - name: Current-tree secret scan
