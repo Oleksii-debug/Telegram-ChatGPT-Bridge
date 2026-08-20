@@ -34,6 +34,7 @@ jobs:
           tests/test_recovery_ops.py
           tests/test_audit_round5.py
           tests/test_audit_round6.py
+          tests/test_audit_round7.py
           tests/test_baseline_reconcile.py
           tests/test_runtime_evidence.py
       - name: Guard and deployment regression tests including real Python 3.11 PREPARE
