@@ -1,4 +1,4 @@
-HOSTiQ production baseline recovery request
+HOSTiQ production baseline and setup-gate recovery request
 
 Hello. Please help us recover and automate the existing Python application at tg-api.rukadopomogy.org.ua without overwriting its current working state.
 
@@ -9,8 +9,24 @@ Known application details:
 - WSGI entry point: application
 - public source repository: https://github.com/Oleksii-debug/Telegram-ChatGPT-Bridge
 
-Before any Git-based deployment, please provide the exact application file(s), dependency/environment changes, Passenger configuration changes, or other server-side changes your support made when resolving the previous HTTP 500 incident. If possible, please also create a server-side backup and provide a sanitized source diff or sanitized archive of the current application code only. Do not include Telegram sessions, API hashes, bearer tokens, setup routes/keys, passwords, private config, runtime databases, logs containing private Telegram data, or WordPress files.
+SECURITY REQUEST — PLEASE HANDLE PRIVATELY
+A previous private legacy reference contained a concrete security-sensitive setup route/key reference. Please do not send us the old value or any replacement secret value. If any corresponding setup gate is still configured or usable on the live HOSTiQ application, please privately invalidate, rotate or disable the exposed old gate before further deployment work. Please reply only with non-secret confirmation that the old gate is no longer usable, the completion date/time, and—if you can safely test it—confirmation that an obsolete setup request now receives a controlled denial/not-found response without exposing stack traces or private data. Do not place any route/key value in email, GitHub, Google Drive, support logs returned to us, or other public/shared material.
 
-We also need a one-time noninteractive deployment path for future audited `main` releases. The deployment must: create a backup, update application code only, preserve `var/`, session/private config and server secrets, install requirements in the correct Python 3.11 environment, restart Passenger, run a basic health/smoke check, roll back on failure, and record the deployed Git commit SHA. Please do not modify the WordPress site at rukadopomogy.org.ua.
+PRODUCTION BASELINE REQUEST
+Before any Git-based deployment, please provide the exact application file(s), dependency/environment changes, Passenger configuration changes, or other server-side changes your support made when resolving the previous HTTP 500 incident. If possible, please create a server-side backup and provide a sanitized source diff or sanitized archive of the current application code only. Do not include Telegram sessions, API hashes, bearer tokens, setup routes/keys, passwords, private config, runtime databases, logs containing private Telegram data, or WordPress files.
+
+FUTURE NONINTERACTIVE DEPLOYMENT
+We also need a one-time noninteractive deployment path for future independently audited `main` releases. The deployment must:
+1. create a timestamped backup before changing production;
+2. update application code only;
+3. preserve `var/`, Telegram session/private config and server-side secrets;
+4. install requirements in the correct Python 3.11 environment;
+5. validate imports/startup before restart;
+6. restart Passenger;
+7. run basic health plus safe authenticated/unauthenticated smoke checks without returning private Telegram content;
+8. roll back automatically or immediately on failed required checks;
+9. record the deployed Git commit SHA and deployment result.
+
+Please do not modify the WordPress site at rukadopomogy.org.ua.
 
 The account owner is blind and uses NVDA, so please perform the server-side configuration directly where possible instead of requiring recurring manual cPanel steps.
