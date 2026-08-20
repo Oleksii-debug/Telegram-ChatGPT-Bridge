@@ -28,9 +28,11 @@ jobs:
           ops/release_guard.py
           ops/recovery_capture.py
           ops/deploy_release.py
+          ops/baseline_reconcile.py
           tests/test_secret_scan.py
           tests/test_recovery_ops.py
           tests/test_audit_round5.py
+          tests/test_baseline_reconcile.py
       - name: Guard and deployment regression tests
         run: python -m unittest discover -s tests -v
       - name: Current-tree secret scan
