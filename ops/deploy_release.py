@@ -7,9 +7,10 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import tarfile
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from ops.release_guard import (
     SafetyError, apply_backup_retention, apply_retention, atomic_switch_link,
@@ -27,13 +28,19 @@ PREPARED_META = "PREPARED_RELEASE.json"
 
 
 def run(command: list[str], *, cwd: Path | None = None, timeout: int = 300) -> None:
-    subprocess.run(command, cwd=cwd, check=True, timeout=timeout,
-                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    try:
+        subprocess.run(command, cwd=cwd, check=True, timeout=timeout,
+                       stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    except (subprocess.SubprocessError, OSError) as exc:
+        raise SafetyError("required subprocess failed") from exc
 
 
 def command_output(command: list[str], *, cwd: Path | None = None, timeout: int = 60) -> str:
-    return subprocess.run(command, cwd=cwd, check=True, timeout=timeout,
-                          stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True).stdout.strip()
+    try:
+        return subprocess.run(command, cwd=cwd, check=True, timeout=timeout,
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True).stdout.strip()
+    except (subprocess.SubprocessError, OSError) as exc:
+        raise SafetyError("required subprocess could not be verified") from exc
 
 
 def _canonical_python(python_executable: str) -> Path:
@@ -51,25 +58,52 @@ def _canonical_python(python_executable: str) -> Path:
     return executable
 
 
-def validate_python_311(python_executable: str) -> str:
-    executable = _canonical_python(python_executable)
+def _python_version(executable: Path) -> str:
+    return command_output([str(executable), "-c",
+        "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}')"])
+
+
+def _python_identity(executable: Path) -> dict:
     try:
-        version = command_output([str(executable), "-c", "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}')"])
-    except (subprocess.SubprocessError, OSError) as exc:
-        raise SafetyError("approved Python interpreter could not be verified") from exc
+        resolved = executable.resolve(strict=True)
+        st = resolved.stat()
+    except OSError as exc:
+        raise SafetyError("approved Python interpreter identity is unavailable") from exc
+    if not resolved.is_file() or not os.access(resolved, os.X_OK):
+        raise SafetyError("approved Python interpreter identity is unsafe")
+    version = _python_version(resolved)
     if not version.startswith("3.11."):
         raise SafetyError("release requires approved Python 3.11")
-    return version
+    return {
+        "canonical_path": str(resolved), "version": version, "sha256": sha256_file(resolved),
+        "size": st.st_size, "uid": getattr(st, "st_uid", None), "gid": getattr(st, "st_gid", None),
+        "mode": stat.S_IMODE(st.st_mode),
+    }
+
+
+def _validated_python_identity(identity: object) -> dict:
+    if not isinstance(identity, dict):
+        raise SafetyError("approved Python interpreter identity is missing")
+    path = str(identity.get("canonical_path", ""))
+    digest = str(identity.get("sha256", ""))
+    version = str(identity.get("version", ""))
+    if not path or not Path(path).is_absolute() or not re.fullmatch(r"[0-9a-f]{64}", digest) or not version.startswith("3.11."):
+        raise SafetyError("approved Python interpreter identity is invalid")
+    actual = _python_identity(Path(path))
+    if actual != identity:
+        raise SafetyError("approved Python interpreter identity changed after PREPARE")
+    return actual
+
+
+def validate_python_311(python_executable: str) -> str:
+    return _python_identity(_canonical_python(python_executable))["version"]
 
 
 def verify_approved_ref_policy(repo: Path, sha: str, approved_ref: str) -> str:
     if not FULL_SHA_RE.fullmatch(sha) or not SAFE_REF_RE.fullmatch(approved_ref or ""):
         raise SafetyError("invalid SHA/ref policy input")
-    try:
-        commit = command_output(["git", "rev-parse", "--verify", f"{sha}^{{commit}}"], cwd=repo)
-        ref_commit = command_output(["git", "rev-parse", "--verify", f"{approved_ref}^{{commit}}"], cwd=repo)
-    except subprocess.SubprocessError as exc:
-        raise SafetyError("approved Git ref/commit cannot be resolved") from exc
+    commit = command_output(["git", "rev-parse", "--verify", f"{sha}^{{commit}}"], cwd=repo)
+    ref_commit = command_output(["git", "rev-parse", "--verify", f"{approved_ref}^{{commit}}"], cwd=repo)
     if commit != sha:
         raise SafetyError("requested SHA is not an exact full commit")
     if ref_commit != sha:
@@ -92,7 +126,16 @@ def git_export(repo: Path, sha: str, destination: Path) -> None:
         raise SafetyError("git archive extraction failed")
 
 
-def _safe_venv_symlink(root: Path, link: Path, approved_python_real: Path | None) -> dict:
+def _path_is_excluded(rel: str, excluded: set[str]) -> bool:
+    rel_path = PurePosixPath(rel)
+    for entry in excluded:
+        entry_path = PurePosixPath(entry)
+        if rel_path == entry_path or entry_path in rel_path.parents:
+            return True
+    return False
+
+
+def _safe_venv_symlink(root: Path, link: Path, approved_python_identity: dict | None) -> dict:
     rel = link.relative_to(root).as_posix()
     if not rel.startswith(".venv/"):
         raise SafetyError("prepared payload contains unexpected symlink")
@@ -101,28 +144,49 @@ def _safe_venv_symlink(root: Path, link: Path, approved_python_real: Path | None
         venv_root = (root / ".venv").resolve(strict=True)
     except OSError as exc:
         raise SafetyError("prepared venv symlink is broken") from exc
-    inside_venv = resolved == venv_root or venv_root in resolved.parents
-    approved_external = approved_python_real is not None and resolved == approved_python_real
-    if not inside_venv and not approved_external:
-        if not rel.startswith(".venv/bin/") or not resolved.is_file() or not os.access(resolved, os.X_OK):
-            raise SafetyError("prepared venv symlink escapes approved venv/Python boundary")
-        try:
-            version = command_output([str(resolved), "-c", "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')"])
-        except (subprocess.SubprocessError, OSError) as exc:
-            raise SafetyError("prepared venv external symlink target is not verifiable Python") from exc
-        if version != "3.11":
-            raise SafetyError("prepared venv external symlink target is not Python 3.11")
+    if resolved == venv_root or venv_root in resolved.parents:
+        return {"path": rel, "type": "symlink", "target": os.readlink(link)}
+    if not rel.startswith(".venv/bin/"):
+        raise SafetyError("prepared venv symlink escapes approved venv/Python boundary")
+    expected = _validated_python_identity(approved_python_identity)
+    if resolved != Path(expected["canonical_path"]):
+        raise SafetyError("prepared venv external symlink target is not the approved Python interpreter")
+    if _python_identity(resolved) != expected:
+        raise SafetyError("prepared venv external Python identity changed")
     return {"path": rel, "type": "symlink", "target": os.readlink(link)}
 
 
-def _payload_manifest_without_meta(root: Path, approved_python_real: Path | None = None) -> dict:
+def _validate_immutable_tree_permissions(root: Path, excluded_paths: list[str] | tuple[str, ...] = ()) -> None:
+    excluded = set(excluded_paths)
+    expected_uid = os.getuid() if hasattr(os, "getuid") else None
+    for path in [root, *sorted(root.rglob("*"))]:
+        rel = "" if path == root else path.relative_to(root).as_posix()
+        if rel and _path_is_excluded(rel, excluded):
+            continue
+        try:
+            st = path.lstat()
+        except OSError as exc:
+            raise SafetyError("immutable release path became unreadable") from exc
+        if expected_uid is not None and st.st_uid != expected_uid:
+            raise SafetyError("immutable release path owner is unexpected")
+        if path.is_symlink():
+            continue
+        if stat.S_IMODE(st.st_mode) & 0o022:
+            raise SafetyError("immutable release path is group/world writable")
+
+
+def _payload_manifest_without_meta(root: Path, approved_python_identity: dict | None = None,
+                                   excluded_paths: list[str] | tuple[str, ...] = ()) -> dict:
+    excluded = set(excluded_paths)
     items = []
     for p in sorted(root.rglob("*")):
+        rel = p.relative_to(root).as_posix()
+        if _path_is_excluded(rel, excluded):
+            continue
         if p.is_symlink():
-            items.append(_safe_venv_symlink(root, p, approved_python_real))
+            items.append(_safe_venv_symlink(root, p, approved_python_identity))
             continue
         if p.is_file():
-            rel = p.relative_to(root).as_posix()
             if rel == PREPARED_META:
                 continue
             items.append({"path": rel, "type": "file", "size": p.stat().st_size, "sha256": sha256_file(p)})
@@ -135,7 +199,10 @@ def _install_locked_requirements(py: Path, source: Path, input_name: str, lock_n
     if source_file.exists() and not lock.exists():
         raise SafetyError(f"{input_name} exists without {lock_name}; dependencies are not immutable")
     if lock.exists():
-        run([str(py), "-m", "pip", "install", "--require-hashes", "-r", str(lock)], cwd=source, timeout=600)
+        try:
+            run([str(py), "-m", "pip", "install", "--require-hashes", "-r", str(lock)], cwd=source, timeout=600)
+        except SafetyError as exc:
+            raise SafetyError(f"hash-locked dependency installation failed: {lock_name}") from exc
         return sha256_file(lock)
     return None
 
@@ -144,8 +211,9 @@ def prepare_versioned_release(*, repo: Path, sha: str, approved_ref: str, reposi
                               releases_root: Path, python_executable: str,
                               runtime_entries: list[str]) -> tuple[Path, dict, str]:
     verify_approved_ref_policy(repo, sha, approved_ref)
-    configured_version = validate_python_311(python_executable)
     approved_python_real = _canonical_python(python_executable)
+    approved_python_identity = _python_identity(approved_python_real)
+    configured_version = approved_python_identity["version"]
     releases_root.mkdir(parents=True, exist_ok=True)
     prepared_root = releases_root / ".prepared"
     prepared_root.mkdir(parents=True, exist_ok=True)
@@ -166,7 +234,7 @@ def prepare_versioned_release(*, repo: Path, sha: str, approved_ref: str, reposi
             py = venv_dir / "Scripts/python.exe"
         if not py.exists():
             raise SafetyError("versioned Python environment was not created")
-        built_version = command_output([str(py), "-c", "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}')"])
+        built_version = _python_version(py)
         if not built_version.startswith("3.11."):
             raise SafetyError("versioned environment is not Python 3.11")
         app_lock_hash = _install_locked_requirements(py, source, "requirements.txt", "requirements.lock")
@@ -175,20 +243,17 @@ def prepare_versioned_release(*, repo: Path, sha: str, approved_ref: str, reposi
         if not (source / "tests").is_dir():
             raise SafetyError("required test suite is absent")
         run([str(py), "-m", "unittest", "discover", "-s", "tests", "-v"], cwd=source, timeout=300)
-        payload_manifest = _payload_manifest_without_meta(source, approved_python_real)
+        _validate_immutable_tree_permissions(source)
+        payload_manifest = _payload_manifest_without_meta(source, approved_python_identity)
         prepared = {
-            "schema_version": 2,
-            "repository": repository_id,
-            "approved_ref": approved_ref,
-            "sha": sha,
-            "configured_python_version": configured_version,
-            "python_version": built_version,
+            "schema_version": 2, "repository": repository_id, "approved_ref": approved_ref, "sha": sha,
+            "configured_python_version": configured_version, "python_version": built_version,
+            "approved_python_identity": approved_python_identity,
             "source_manifest_sha256": source_manifest_sha,
             "requirements_lock_sha256": app_lock_hash,
             "requirements_test_lock_sha256": test_lock_hash,
             "payload_manifest_sha256": sha256_json(payload_manifest),
-            "runtime_entries": sorted(runtime_entries),
-            "persistent_state_mode": "shared_external",
+            "runtime_entries": sorted(runtime_entries), "persistent_state_mode": "shared_external",
         }
         prepared_hash = sha256_json(prepared)
         write_json_atomic(source / PREPARED_META, prepared, mode=0o644)
@@ -217,7 +282,9 @@ def verify_prepared_release(prepared_release: Path, expected_manifest_hash: str)
         raise SafetyError("prepared release metadata invalid") from exc
     if sha256_json(meta) != expected_manifest_hash:
         raise SafetyError("prepared release manifest hash mismatch")
-    payload = _payload_manifest_without_meta(prepared_release)
+    identity = _validated_python_identity(meta.get("approved_python_identity")) if meta.get("approved_python_identity") else None
+    _validate_immutable_tree_permissions(prepared_release)
+    payload = _payload_manifest_without_meta(prepared_release, identity)
     if sha256_json(payload) != meta.get("payload_manifest_sha256"):
         raise SafetyError("prepared release payload changed after approval")
     return meta
@@ -294,7 +361,10 @@ def _validate_control_plane(*, control_root: Path, runtime_manifest: Path, appro
 
 
 def _preflight_persistent_sources(state_root: Path, runtime_entries: list[str]) -> None:
-    state_root = state_root.resolve(strict=True)
+    try:
+        state_root = state_root.resolve(strict=True)
+    except OSError as exc:
+        raise SafetyError("persistent state root missing or unsafe") from exc
     for rel in runtime_entries:
         source = state_root / rel
         if not source.exists() or source.is_symlink():
@@ -318,6 +388,29 @@ def _materialize_final_release(prepared_release: Path, releases_root: Path, sha:
     except Exception:
         shutil.rmtree(stage, ignore_errors=True)
         raise
+
+
+def _verify_final_materialized_release(final_release: Path, prepared_meta: dict,
+                                       expected_manifest_hash: str, runtime_entries: list[str]) -> None:
+    meta_path = final_release / PREPARED_META
+    try:
+        final_meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise SafetyError("final release metadata is invalid") from exc
+    if final_meta != prepared_meta or sha256_json(final_meta) != expected_manifest_hash:
+        raise SafetyError("final release metadata differs from approved prepared metadata")
+    identity = _validated_python_identity(prepared_meta.get("approved_python_identity")) if prepared_meta.get("approved_python_identity") else None
+    _validate_immutable_tree_permissions(final_release, runtime_entries)
+    payload = _payload_manifest_without_meta(final_release, identity, runtime_entries)
+    if sha256_json(payload) != prepared_meta.get("payload_manifest_sha256"):
+        raise SafetyError("final materialized immutable payload differs from approved prepared payload")
+
+
+def _best_effort_status(path: Path, status: dict) -> None:
+    try:
+        write_json_atomic(path, status)
+    except Exception:
+        pass
 
 
 def execute_prepared_release(*, repo: Path, prepared_release: Path, repository_id: str,
@@ -361,20 +454,38 @@ def execute_prepared_release(*, repo: Path, prepared_release: Path, repository_i
     _preflight_persistent_sources(persistent_state_root,runtime_entries)
     validate_persistent_bindings(previous_target,persistent_state_root,runtime_entries)
     final_release=_materialize_final_release(prepared_release,releases_root,sha,persistent_state_root,runtime_entries)
+    try:
+        validate_persistent_bindings(final_release,persistent_state_root,runtime_entries)
+        _verify_final_materialized_release(final_release,prepared,expected_hash,runtime_entries)
+    except Exception:
+        shutil.rmtree(final_release,ignore_errors=True)
+        raise
+
+    status={"sha":sha,"repository":repository_id,"approved_ref":approved_ref,"state":"READY_TO_COMMIT",
+            "release_manifest_sha256":expected_hash,"approval_id":str(approval["approval_id"]),"ready_at":utc_now_iso()}
+    try:
+        write_json_atomic(status_file,status)
+        _verify_final_materialized_release(final_release,prepared,expected_hash,runtime_entries)
+    except Exception as exc:
+        shutil.rmtree(final_release,ignore_errors=True)
+        status.update({"state":"PRECOMMIT_FAILED","completed_at":utc_now_iso()})
+        _best_effort_status(status_file,status)
+        raise SafetyError("pre-commit deployment checkpoint/integrity verification failed") from exc
 
     try:
         consume_external_approval(approval,approval_consumption_root)
     except Exception:
         shutil.rmtree(final_release,ignore_errors=True)
+        status.update({"state":"APPROVAL_COMMIT_FAILED","completed_at":utc_now_iso()})
+        _best_effort_status(status_file,status)
         raise
 
-    status={"sha":sha,"repository":repository_id,"approved_ref":approved_ref,"started_at":utc_now_iso(),
-            "state":"STARTED","release_manifest_sha256":expected_hash,"approval_id":str(approval["approval_id"])}
-    write_json_atomic(status_file,status)
     previous=None; quiesce_attempted=False; code_backup=None; state_backup=None
     try:
         quiesce_attempted=True
         run_private_hook(quiesce_hook,"quiesce",timeout=90)
+        status.update({"state":"STARTED","started_at":utc_now_iso()})
+        write_json_atomic(status_file,status)
         code_backup=backup_active(active_link,backup_root/"code",sha)
         state_backup=backup_persistent_state(persistent_state_root,backup_root/"state",sha)
         previous=atomic_switch_link(active_link,final_release)
@@ -398,16 +509,19 @@ def execute_prepared_release(*, repo: Path, prepared_release: Path, repository_i
                 run_private_hook(unauth_hook,"unauthenticated rollback smoke",timeout=60); run_private_hook(auth_hook,"authenticated rollback smoke",timeout=60); run_private_hook(resume_hook,"rollback resume/unquiesce",timeout=90)
                 status.update({"state":"ROLLED_BACK","completed_at":utc_now_iso(),"persistent_state_restored":False,
                                "persistent_state_note":"shared mutable state remains authoritative and is not reverted by code rollback"})
-                write_json_atomic(status_file,status); return 20
+                _best_effort_status(status_file,status); return 20
             except Exception as rollback_exc:
-                status.update({"state":"CRITICAL_ROLLBACK_FAILED","rollback_failure_type":type(rollback_exc).__name__,"completed_at":utc_now_iso()}); write_json_atomic(status_file,status); return 70
+                status.update({"state":"CRITICAL_ROLLBACK_FAILED","rollback_failure_type":type(rollback_exc).__name__,"completed_at":utc_now_iso()})
+                _best_effort_status(status_file,status); return 70
         if quiesce_attempted:
             try:
                 run_private_hook(restart_hook,"prelive recovery restart/reload",timeout=90); verify_running_release(identity_hook,previous_sha)
                 run_private_hook(unauth_hook,"prelive recovery unauthenticated smoke",timeout=60); run_private_hook(auth_hook,"prelive recovery authenticated smoke",timeout=60); run_private_hook(resume_hook,"prelive resume/unquiesce",timeout=90)
             except Exception as recovery_exc:
-                status.update({"state":"CRITICAL_PRELIVE_RECOVERY_FAILED","recovery_failure_type":type(recovery_exc).__name__,"completed_at":utc_now_iso()}); write_json_atomic(status_file,status); return 71
-        status.update({"state":"PRELIVE_FAILED","completed_at":utc_now_iso()}); write_json_atomic(status_file,status); return 10
+                status.update({"state":"CRITICAL_PRELIVE_RECOVERY_FAILED","recovery_failure_type":type(recovery_exc).__name__,"completed_at":utc_now_iso()})
+                _best_effort_status(status_file,status); return 71
+        status.update({"state":"PRELIVE_FAILED","completed_at":utc_now_iso()})
+        _best_effort_status(status_file,status); return 10
 
 
 def main(argv=None) -> int:
@@ -418,7 +532,8 @@ def main(argv=None) -> int:
         parser.add_argument("--"+name)
     args=parser.parse_args(argv)
     try:
-        control=Path(args.control_root); validate_private_control_root(control); runtime=Path(args.runtime_manifest); validate_private_control_file(runtime,control,"runtime manifest"); entries=load_runtime_manifest(runtime)
+        control=Path(args.control_root); validate_private_control_root(control)
+        runtime=Path(args.runtime_manifest); validate_private_control_file(runtime,control,"runtime manifest"); entries=load_runtime_manifest(runtime)
         if args.mode=="prepare":
             if not args.sha or not args.python_executable: raise SafetyError("prepare requires sha and python executable")
             path,meta,digest=prepare_versioned_release(repo=Path(args.repo),sha=args.sha,approved_ref=args.approved_ref,
@@ -435,5 +550,6 @@ def main(argv=None) -> int:
             public_root=Path(args.public_root) if args.public_root else None)
     except SafetyError as exc:
         print(f"DEPLOYMENT_BLOCKED: {type(exc).__name__}"); return 2
+
 
 if __name__=="__main__": raise SystemExit(main())
