@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Future fail-closed versioned deployer. Production execution is not authorized."""
+"""Audited PREPARE -> APPROVE -> EXECUTE deployment primitives. Production execution is gated."""
 from __future__ import annotations
 
 import argparse
@@ -12,52 +12,28 @@ import tarfile
 from pathlib import Path
 
 from ops.release_guard import (
-    SafetyError,
-    apply_backup_retention,
-    apply_retention,
-    atomic_switch_link,
-    attach_persistent_state,
-    build_manifest,
-    cleanup_stale_staging,
-    consume_external_approval,
-    copy_source_without_protected,
-    load_external_approval,
-    load_runtime_manifest,
-    require_under_control_root,
-    restore_link,
-    sha256_file,
-    sha256_json,
-    utc_now_iso,
-    validate_deployment_topology,
-    validate_persistent_bindings,
-    write_json_atomic,
+    SafetyError, apply_backup_retention, apply_retention, atomic_switch_link,
+    attach_persistent_state, build_manifest, cleanup_stale_staging,
+    consume_external_approval, load_external_approval, load_runtime_manifest,
+    restore_link, sha256_file, sha256_json, validate_deployment_topology,
+    validate_exact_source_payload, validate_persistent_bindings,
+    validate_private_control_dir, validate_private_control_file,
+    validate_private_control_root, write_json_atomic, utc_now_iso,
 )
 
 FULL_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+SAFE_REF_RE = re.compile(r"^(?:refs/heads/)?[A-Za-z0-9._/-]+$")
+PREPARED_META = "PREPARED_RELEASE.json"
 
 
 def run(command: list[str], *, cwd: Path | None = None, timeout: int = 300) -> None:
-    subprocess.run(
-        command,
-        cwd=cwd,
-        check=True,
-        timeout=timeout,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-    )
+    subprocess.run(command, cwd=cwd, check=True, timeout=timeout,
+                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
 
 
 def command_output(command: list[str], *, cwd: Path | None = None, timeout: int = 60) -> str:
-    return subprocess.run(
-        command,
-        cwd=cwd,
-        check=True,
-        timeout=timeout,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-    ).stdout.strip()
+    return subprocess.run(command, cwd=cwd, check=True, timeout=timeout,
+                          stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True).stdout.strip()
 
 
 def validate_python_311(python_executable: str) -> str:
@@ -65,9 +41,7 @@ def validate_python_311(python_executable: str) -> str:
     if not executable.is_file() or executable.is_symlink() or not os.access(executable, os.X_OK):
         raise SafetyError("approved Python executable is missing or unsafe")
     try:
-        version = command_output(
-            [str(executable), "-c", "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}')"]
-        )
+        version = command_output([str(executable), "-c", "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}')"])
     except (subprocess.SubprocessError, OSError) as exc:
         raise SafetyError("approved Python interpreter could not be verified") from exc
     if not version.startswith("3.11."):
@@ -75,18 +49,29 @@ def validate_python_311(python_executable: str) -> str:
     return version
 
 
+def verify_approved_ref_policy(repo: Path, sha: str, approved_ref: str) -> str:
+    if not FULL_SHA_RE.fullmatch(sha) or not SAFE_REF_RE.fullmatch(approved_ref or ""):
+        raise SafetyError("invalid SHA/ref policy input")
+    try:
+        commit = command_output(["git", "rev-parse", "--verify", f"{sha}^{{commit}}"], cwd=repo)
+        ref_commit = command_output(["git", "rev-parse", "--verify", f"{approved_ref}^{{commit}}"], cwd=repo)
+    except subprocess.SubprocessError as exc:
+        raise SafetyError("approved Git ref/commit cannot be resolved") from exc
+    if commit != sha:
+        raise SafetyError("requested SHA is not an exact full commit")
+    if ref_commit != sha:
+        raise SafetyError("approved SHA is not the exact head of approved ref")
+    return ref_commit
+
+
 def git_export(repo: Path, sha: str, destination: Path) -> None:
     if not repo.joinpath(".git").exists():
         raise SafetyError("release repository is not a Git checkout")
-    resolved = command_output(
-        ["git", "rev-parse", "--verify", f"{sha}^{{commit}}"], cwd=repo
-    )
+    resolved = command_output(["git", "rev-parse", "--verify", f"{sha}^{{commit}}"], cwd=repo)
     if resolved != sha or not FULL_SHA_RE.fullmatch(sha):
         raise SafetyError("requested SHA is not exact full commit")
     archive = subprocess.Popen(["git", "archive", sha], cwd=repo, stdout=subprocess.PIPE)
-    extract = subprocess.run(
-        ["tar", "-x", "-C", str(destination)], stdin=archive.stdout, check=False
-    )
+    extract = subprocess.run(["tar", "-x", "-C", str(destination)], stdin=archive.stdout, check=False)
     if archive.stdout:
         archive.stdout.close()
     rc = archive.wait()
@@ -99,109 +84,114 @@ def _requirements_lock_hash(release_root: Path) -> str | None:
     return sha256_file(lock) if lock.exists() else None
 
 
-def build_versioned_release(
-    *,
-    repo: Path,
-    sha: str,
-    releases_root: Path,
-    python_executable: str,
-    persistent_state_root: Path,
-    runtime_entries: list[str],
-    repository_id: str,
-    approved_ref: str,
-) -> tuple[Path, dict, str]:
-    python_version = validate_python_311(python_executable)
+def _payload_manifest_without_meta(root: Path) -> dict:
+    items = []
+    for p in sorted(root.rglob("*")):
+        if p.is_symlink():
+            raise SafetyError("prepared payload contains unexpected symlink")
+        if p.is_file():
+            rel = p.relative_to(root).as_posix()
+            if rel == PREPARED_META:
+                continue
+            items.append({"path": rel, "size": p.stat().st_size, "sha256": sha256_file(p)})
+    return {"files": items, "count": len(items)}
+
+
+def prepare_versioned_release(*, repo: Path, sha: str, approved_ref: str, repository_id: str,
+                              releases_root: Path, python_executable: str,
+                              runtime_entries: list[str]) -> tuple[Path, dict, str]:
+    verify_approved_ref_policy(repo, sha, approved_ref)
+    configured_version = validate_python_311(python_executable)
     releases_root.mkdir(parents=True, exist_ok=True)
-    final_release = releases_root / sha
-    if final_release.exists():
-        raise SafetyError("release directory already exists")
-    stage_parent = releases_root / (".stage_" + sha)
-    if stage_parent.exists() or stage_parent.is_symlink():
-        raise SafetyError("staging directory already exists")
-    source = stage_parent / "source"
-    release_temp = stage_parent / "release"
+    prepared_root = releases_root / ".prepared"
+    prepared_root.mkdir(parents=True, exist_ok=True)
+    stage = releases_root / (".stage_prepare_" + sha)
+    if stage.exists() or stage.is_symlink():
+        raise SafetyError("prepare staging directory already exists")
+    source = stage / "release"
     source.mkdir(parents=True)
-    release_temp.mkdir(parents=True)
-    (stage_parent / "ACTIVE_LOCK").write_text("building\n", encoding="utf-8")
+    (stage / "ACTIVE_LOCK").write_text("preparing\n", encoding="utf-8")
     try:
         git_export(repo, sha, source)
-        copy_source_without_protected(source, release_temp)
-        source_manifest = build_manifest(release_temp)
-        source_manifest_sha256 = sha256_json(source_manifest)
-
-        requirements = release_temp / "requirements.txt"
-        lock = release_temp / "requirements.lock"
+        validate_exact_source_payload(source, runtime_entries)
+        source_manifest = build_manifest(source)
+        source_manifest_sha = sha256_json(source_manifest)
+        requirements = source / "requirements.txt"
+        lock = source / "requirements.lock"
         if requirements.exists() and not lock.exists():
-            raise SafetyError(
-                "requirements.txt exists without requirements.lock; dependency release is not immutable"
-            )
-
-        venv_dir = release_temp / ".venv"
+            raise SafetyError("requirements.txt exists without requirements.lock; dependency release is not immutable")
+        venv_dir = source / ".venv"
         run([python_executable, "-m", "venv", str(venv_dir)], timeout=300)
         py = venv_dir / "bin/python"
         if not py.exists():
             py = venv_dir / "Scripts/python.exe"
         if not py.exists():
             raise SafetyError("versioned Python environment was not created")
-        built_version = command_output(
-            [str(py), "-c", "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}')"]
-        )
+        built_version = command_output([str(py), "-c", "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}')"])
         if not built_version.startswith("3.11."):
             raise SafetyError("versioned environment is not Python 3.11")
-
         if lock.exists():
-            run(
-                [str(py), "-m", "pip", "install", "--require-hashes", "-r", str(lock)],
-                cwd=release_temp,
-                timeout=600,
-            )
-        run([str(py), "-m", "compileall", "-q", str(release_temp)], cwd=release_temp)
-        if not (release_temp / "tests").is_dir():
+            run([str(py), "-m", "pip", "install", "--require-hashes", "-r", str(lock)], cwd=source, timeout=600)
+        run([str(py), "-m", "compileall", "-q", str(source)], cwd=source)
+        if not (source / "tests").is_dir():
             raise SafetyError("required test suite is absent")
         try:
-            run([str(py), "-c", "import pytest"], cwd=release_temp)
+            run([str(py), "-c", "import pytest"], cwd=source)
         except subprocess.CalledProcessError as exc:
             raise SafetyError("pytest is unavailable in staged environment") from exc
-        run(
-            [str(py), "-m", "pytest", "-q", str(release_temp / "tests")],
-            cwd=release_temp,
-            timeout=300,
-        )
-
-        attach_persistent_state(release_temp, persistent_state_root, runtime_entries)
-        provenance = {
+        run([str(py), "-m", "pytest", "-q", str(source / "tests")], cwd=source, timeout=300)
+        payload_manifest = _payload_manifest_without_meta(source)
+        payload_manifest_sha = sha256_json(payload_manifest)
+        prepared = {
+            "schema_version": 1,
             "repository": repository_id,
             "approved_ref": approved_ref,
             "sha": sha,
+            "configured_python_version": configured_version,
             "python_version": built_version,
-            "source_manifest_sha256": source_manifest_sha256,
-            "requirements_lock_sha256": _requirements_lock_hash(release_temp),
+            "source_manifest_sha256": source_manifest_sha,
+            "requirements_lock_sha256": _requirements_lock_hash(source),
+            "payload_manifest_sha256": payload_manifest_sha,
+            "runtime_entries": sorted(runtime_entries),
             "persistent_state_mode": "shared_external",
-            "generated_at": utc_now_iso(),
         }
-        provenance_hash = sha256_json(provenance)
-        write_json_atomic(release_temp / "RELEASE_PROVENANCE.json", provenance, mode=0o644)
-        (stage_parent / "ACTIVE_LOCK").unlink(missing_ok=True)
-        os.replace(release_temp, final_release)
-        shutil.rmtree(stage_parent, ignore_errors=True)
-        return final_release, provenance, provenance_hash
+        prepared_hash = sha256_json(prepared)
+        write_json_atomic(source / PREPARED_META, prepared, mode=0o644)
+        destination = prepared_root / f"{sha}-{prepared_hash[:16]}"
+        if destination.exists() or destination.is_symlink():
+            raise SafetyError("prepared release already exists")
+        (stage / "ACTIVE_LOCK").unlink(missing_ok=True)
+        os.replace(source, destination)
+        shutil.rmtree(stage, ignore_errors=True)
+        return destination, prepared, prepared_hash
     except Exception:
-        (stage_parent / "ACTIVE_LOCK").unlink(missing_ok=True)
-        shutil.rmtree(stage_parent, ignore_errors=True)
+        (stage / "ACTIVE_LOCK").unlink(missing_ok=True)
+        shutil.rmtree(stage, ignore_errors=True)
         raise
 
 
-def run_private_hook(path: Path, name: str, *, timeout: int = 60, args: list[str] | None = None) -> None:
-    if not path.is_file() or path.is_symlink() or not os.access(path, os.X_OK):
-        raise SafetyError(f"required {name} hook is missing or unsafe")
+def verify_prepared_release(prepared_release: Path, expected_manifest_hash: str) -> dict:
+    if not prepared_release.is_dir() or prepared_release.is_symlink():
+        raise SafetyError("prepared release missing or unsafe")
+    meta_path = prepared_release / PREPARED_META
+    if not meta_path.is_file() or meta_path.is_symlink():
+        raise SafetyError("prepared release metadata missing")
     try:
-        subprocess.run(
-            [str(path), *(args or [])],
-            check=True,
-            timeout=timeout,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise SafetyError("prepared release metadata invalid") from exc
+    if sha256_json(meta) != expected_manifest_hash:
+        raise SafetyError("prepared release manifest hash mismatch")
+    payload = _payload_manifest_without_meta(prepared_release)
+    if sha256_json(payload) != meta.get("payload_manifest_sha256"):
+        raise SafetyError("prepared release payload changed after approval")
+    return meta
+
+
+def run_private_hook(path: Path, name: str, *, timeout: int = 60, args: list[str] | None = None) -> None:
+    try:
+        subprocess.run([str(path), *(args or [])], check=True, timeout=timeout,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except subprocess.TimeoutExpired as exc:
         raise SafetyError(f"required {name} hook timed out") from exc
     except subprocess.CalledProcessError as exc:
@@ -211,18 +201,13 @@ def run_private_hook(path: Path, name: str, *, timeout: int = 60, args: list[str
 def verify_running_release(identity_hook: Path, expected_sha: str) -> None:
     if not FULL_SHA_RE.fullmatch(expected_sha):
         raise SafetyError("expected running release identity is not a full SHA")
-    run_private_hook(
-        identity_hook,
-        "running-release identity",
-        timeout=45,
-        args=[expected_sha],
-    )
+    run_private_hook(identity_hook, "running-release identity", timeout=45, args=[expected_sha])
 
 
 def _write_hash_pair(archive: Path) -> None:
-    hash_path = Path(str(archive) + ".sha256")
-    hash_path.write_text(sha256_file(archive) + "  " + archive.name + "\n", encoding="utf-8")
-    os.chmod(hash_path, 0o600)
+    hp = Path(str(archive) + ".sha256")
+    hp.write_text(sha256_file(archive) + "  " + archive.name + "\n", encoding="utf-8")
+    os.chmod(hp, 0o600)
 
 
 def backup_active(active_link: Path, backup_root: Path, sha: str) -> Path:
@@ -256,31 +241,38 @@ def _active_release_sha(active_link: Path) -> str:
     return target.name
 
 
-def deploy(
-    *,
-    repo: Path,
-    sha: str,
-    repository_id: str,
-    approved_ref: str,
-    ci_run_id: str,
-    audit_id: str,
-    active_link: Path,
-    releases_root: Path,
-    backup_root: Path,
-    persistent_state_root: Path,
-    runtime_manifest: Path,
-    control_root: Path,
-    approval_file: Path,
-    approval_consumption_root: Path,
-    quiesce_hook: Path,
-    restart_hook: Path,
-    identity_hook: Path,
-    unauth_hook: Path,
-    auth_hook: Path,
-    status_file: Path,
-    python_executable: str,
-    public_root: Path | None = None,
-) -> int:
+def _validate_control_plane(*, control_root: Path, runtime_manifest: Path, approval_file: Path,
+                            approval_consumption_root: Path, quiesce_hook: Path, resume_hook: Path,
+                            restart_hook: Path, identity_hook: Path, unauth_hook: Path, auth_hook: Path,
+                            status_file: Path) -> None:
+    validate_private_control_root(control_root)
+    validate_private_control_file(runtime_manifest, control_root, "runtime manifest")
+    validate_private_control_file(approval_file, control_root, "approval")
+    for path, label in (
+        (quiesce_hook, "quiesce hook"),
+        (resume_hook, "resume hook"),
+        (restart_hook, "restart hook"),
+        (identity_hook, "identity hook"),
+        (unauth_hook, "unauthenticated smoke hook"),
+        (auth_hook, "authenticated smoke hook"),
+    ):
+        validate_private_control_file(path, control_root, label, executable=True)
+    validate_private_control_dir(approval_consumption_root, control_root, "approval consumption root", create=True)
+    if status_file.exists():
+        validate_private_control_file(status_file, control_root, "status file")
+    else:
+        validate_private_control_dir(status_file.parent, control_root, "status parent")
+
+
+def execute_prepared_release(*, repo: Path, prepared_release: Path, repository_id: str,
+                             approved_ref: str, ci_run_id: str, audit_id: str,
+                             active_link: Path, releases_root: Path, backup_root: Path,
+                             persistent_state_root: Path, runtime_manifest: Path,
+                             control_root: Path, approval_file: Path,
+                             approval_consumption_root: Path, quiesce_hook: Path,
+                             resume_hook: Path, restart_hook: Path, identity_hook: Path,
+                             unauth_hook: Path, auth_hook: Path, status_file: Path,
+                             public_root: Path | None = None) -> int:
     topology = validate_deployment_topology(
         repo=repo,
         active_link=active_link,
@@ -296,122 +288,102 @@ def deploy(
     persistent_state_root = topology["persistent_state_root"]
     control_root = topology["control_root"]
     active_link = topology["active_link"]
-
-    for path, label in (
-        (runtime_manifest, "runtime manifest"),
-        (approval_file, "approval"),
-        (approval_consumption_root, "approval consumption root"),
-        (quiesce_hook, "quiesce hook"),
-        (restart_hook, "restart hook"),
-        (identity_hook, "running-release identity hook"),
-        (unauth_hook, "unauthenticated smoke hook"),
-        (auth_hook, "authenticated smoke hook"),
-        (status_file, "status file"),
-    ):
-        require_under_control_root(path, control_root, label)
-
+    _validate_control_plane(
+        control_root=control_root,
+        runtime_manifest=runtime_manifest,
+        approval_file=approval_file,
+        approval_consumption_root=approval_consumption_root,
+        quiesce_hook=quiesce_hook,
+        resume_hook=resume_hook,
+        restart_hook=restart_hook,
+        identity_hook=identity_hook,
+        unauth_hook=unauth_hook,
+        auth_hook=auth_hook,
+        status_file=status_file,
+    )
+    runtime_entries = load_runtime_manifest(runtime_manifest)
+    try:
+        approval_raw = json.loads(approval_file.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise SafetyError("external approval file is invalid") from exc
+    expected_hash = str(approval_raw.get("release_manifest_sha256", ""))
+    if not re.fullmatch(r"[0-9a-f]{64}", expected_hash):
+        raise SafetyError("approval prepared-manifest hash is invalid")
+    prepared = verify_prepared_release(prepared_release, expected_hash)
+    sha = str(prepared.get("sha", ""))
+    verify_approved_ref_policy(repo, sha, approved_ref)
+    if prepared.get("repository") != repository_id or prepared.get("approved_ref") != approved_ref:
+        raise SafetyError("prepared release repository/ref mismatch")
+    if sorted(runtime_entries) != prepared.get("runtime_entries"):
+        raise SafetyError("prepared runtime binding manifest changed")
+    approval = load_external_approval(
+        approval_file,
+        expected_sha=sha,
+        expected_repository=repository_id,
+        expected_ref=approved_ref,
+        expected_manifest_sha256=expected_hash,
+        expected_ci_run_id=ci_run_id,
+        expected_audit_id=audit_id,
+    )
+    consume_external_approval(approval, approval_consumption_root)
     if not active_link.is_symlink():
         raise SafetyError("active application path must already be an operator-prepared symlink")
-    runtime_entries = load_runtime_manifest(runtime_manifest)
     previous_target = active_link.resolve(strict=True)
     previous_sha = _active_release_sha(active_link)
     validate_persistent_bindings(previous_target, persistent_state_root, runtime_entries)
-    cleanup_stale_staging(releases_root, older_than_seconds=86400)
-
+    final_release = releases_root / sha
+    if final_release.exists() or final_release.is_symlink():
+        raise SafetyError("target release already exists")
+    os.replace(prepared_release, final_release)
+    attach_persistent_state(final_release, persistent_state_root, runtime_entries)
+    validate_persistent_bindings(final_release, persistent_state_root, runtime_entries)
     status = {
         "sha": sha,
         "repository": repository_id,
         "approved_ref": approved_ref,
         "started_at": utc_now_iso(),
         "state": "STARTED",
+        "release_manifest_sha256": expected_hash,
+        "approval_id": str(approval["approval_id"]),
     }
     write_json_atomic(status_file, status)
     previous = None
-    quiesced = False
-    approval_consumed = False
-    code_backup: Path | None = None
-    state_backup: Path | None = None
+    quiesce_attempted = False
+    code_backup = None
+    state_backup = None
     try:
-        new_release, provenance, provenance_hash = build_versioned_release(
-            repo=repo,
-            sha=sha,
-            releases_root=releases_root,
-            python_executable=python_executable,
-            persistent_state_root=persistent_state_root,
-            runtime_entries=runtime_entries,
-            repository_id=repository_id,
-            approved_ref=approved_ref,
-        )
-        approval = load_external_approval(
-            approval_file,
-            expected_sha=sha,
-            expected_repository=repository_id,
-            expected_ref=approved_ref,
-            expected_manifest_sha256=provenance_hash,
-            expected_ci_run_id=ci_run_id,
-            expected_audit_id=audit_id,
-        )
-        consume_external_approval(approval, approval_consumption_root)
-        approval_consumed = True
-        status.update(
-            {
-                "approval_id": str(approval["approval_id"]),
-                "release_manifest_sha256": provenance_hash,
-                "python_version": provenance["python_version"],
-            }
-        )
-        write_json_atomic(status_file, status)
-
+        quiesce_attempted = True
         run_private_hook(quiesce_hook, "quiesce", timeout=90)
-        quiesced = True
         code_backup = backup_active(active_link, backup_root / "code", sha)
-        state_backup = backup_persistent_state(
-            persistent_state_root, backup_root / "state", sha
-        )
-        status.update({"code_backup_created": True, "state_backup_created": True})
-        write_json_atomic(status_file, status)
-
-        previous = atomic_switch_link(active_link, new_release)
+        state_backup = backup_persistent_state(persistent_state_root, backup_root / "state", sha)
+        previous = atomic_switch_link(active_link, final_release)
         run_private_hook(restart_hook, "restart/reload", timeout=90)
         verify_running_release(identity_hook, sha)
         run_private_hook(unauth_hook, "unauthenticated smoke", timeout=60)
         run_private_hook(auth_hook, "authenticated smoke", timeout=60)
-        quiesced = False
-
+        run_private_hook(resume_hook, "resume/unquiesce", timeout=90)
         removed_releases = apply_retention(
-            [p for p in releases_root.iterdir() if p.is_dir() and not p.name.startswith(".stage_")],
-            active=new_release,
+            [p for p in releases_root.iterdir() if p.is_dir() and not p.name.startswith(".")],
+            active=final_release,
             last_known_good=previous,
             keep_newest=5,
         )
-        removed_code_backups = apply_backup_retention(
-            backup_root / "code", last_known_good=code_backup, keep_newest=5
-        )
-        removed_state_backups = apply_backup_retention(
-            backup_root / "state", last_known_good=state_backup, keep_newest=5
-        )
+        removed_code = apply_backup_retention(backup_root / "code", last_known_good=code_backup, keep_newest=5)
+        removed_state = apply_backup_retention(backup_root / "state", last_known_good=state_backup, keep_newest=5)
         cleanup_stale_staging(releases_root, older_than_seconds=86400)
-        status.update(
-            {
-                "state": "DEPLOYED",
-                "completed_at": utc_now_iso(),
-                "release_root": str(new_release),
-                "persistent_state_mode": "shared_external",
-                "retention_removed_release_count": len(removed_releases),
-                "retention_removed_code_backup_count": len(removed_code_backups),
-                "retention_removed_state_backup_count": len(removed_state_backups),
-            }
-        )
+        status.update({
+            "state": "DEPLOYED",
+            "completed_at": utc_now_iso(),
+            "release_root": str(final_release),
+            "persistent_state_mode": "shared_external",
+            "retention_removed_release_count": len(removed_releases),
+            "retention_removed_code_backup_count": len(removed_code),
+            "retention_removed_state_backup_count": len(removed_state),
+        })
         write_json_atomic(status_file, status)
         return 0
     except Exception as exc:
-        status.update(
-            {
-                "failure_type": type(exc).__name__,
-                "rollback_attempted": previous is not None,
-                "approval_consumed": approval_consumed,
-            }
-        )
+        status.update({"failure_type": type(exc).__name__, "rollback_attempted": previous is not None})
         if previous is not None:
             try:
                 restore_link(active_link, previous)
@@ -419,40 +391,36 @@ def deploy(
                 verify_running_release(identity_hook, previous_sha)
                 run_private_hook(unauth_hook, "unauthenticated rollback smoke", timeout=60)
                 run_private_hook(auth_hook, "authenticated rollback smoke", timeout=60)
-                status.update(
-                    {
-                        "state": "ROLLED_BACK",
-                        "completed_at": utc_now_iso(),
-                        "persistent_state_restored": False,
-                        "persistent_state_note": "shared mutable state remains authoritative and is not reverted by code rollback",
-                    }
-                )
+                run_private_hook(resume_hook, "rollback resume/unquiesce", timeout=90)
+                status.update({
+                    "state": "ROLLED_BACK",
+                    "completed_at": utc_now_iso(),
+                    "persistent_state_restored": False,
+                    "persistent_state_note": "shared mutable state remains authoritative and is not reverted by code rollback",
+                })
                 write_json_atomic(status_file, status)
                 return 20
             except Exception as rollback_exc:
-                status.update(
-                    {
-                        "state": "CRITICAL_ROLLBACK_FAILED",
-                        "rollback_failure_type": type(rollback_exc).__name__,
-                        "completed_at": utc_now_iso(),
-                    }
-                )
+                status.update({
+                    "state": "CRITICAL_ROLLBACK_FAILED",
+                    "rollback_failure_type": type(rollback_exc).__name__,
+                    "completed_at": utc_now_iso(),
+                })
                 write_json_atomic(status_file, status)
                 return 70
-        if quiesced:
+        if quiesce_attempted:
             try:
                 run_private_hook(restart_hook, "prelive recovery restart/reload", timeout=90)
                 verify_running_release(identity_hook, previous_sha)
                 run_private_hook(unauth_hook, "prelive recovery unauthenticated smoke", timeout=60)
                 run_private_hook(auth_hook, "prelive recovery authenticated smoke", timeout=60)
+                run_private_hook(resume_hook, "prelive resume/unquiesce", timeout=90)
             except Exception as recovery_exc:
-                status.update(
-                    {
-                        "state": "CRITICAL_PRELIVE_RECOVERY_FAILED",
-                        "recovery_failure_type": type(recovery_exc).__name__,
-                        "completed_at": utc_now_iso(),
-                    }
-                )
+                status.update({
+                    "state": "CRITICAL_PRELIVE_RECOVERY_FAILED",
+                    "recovery_failure_type": type(recovery_exc).__name__,
+                    "completed_at": utc_now_iso(),
+                })
                 write_json_atomic(status_file, status)
                 return 71
         status.update({"state": "PRELIVE_FAILED", "completed_at": utc_now_iso()})
@@ -462,26 +430,59 @@ def deploy(
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser()
-    for name in (
-        "repo", "sha", "repository-id", "approved-ref", "ci-run-id", "audit-id",
-        "active-link", "releases-root", "backup-root", "persistent-state-root",
-        "runtime-manifest", "control-root", "approval-file", "approval-consumption-root",
-        "quiesce-hook", "restart-hook", "identity-hook", "unauth-smoke-hook",
-        "auth-smoke-hook", "status-file", "python-executable",
-    ):
+    parser.add_argument("mode", choices=("prepare", "execute"))
+    for name in ("repo", "repository-id", "approved-ref", "releases-root", "runtime-manifest", "control-root"):
         parser.add_argument("--" + name, required=True)
+    parser.add_argument("--sha")
+    parser.add_argument("--python-executable")
+    parser.add_argument("--prepared-release")
+    parser.add_argument("--ci-run-id")
+    parser.add_argument("--audit-id")
+    parser.add_argument("--active-link")
+    parser.add_argument("--backup-root")
+    parser.add_argument("--persistent-state-root")
+    parser.add_argument("--approval-file")
+    parser.add_argument("--approval-consumption-root")
+    parser.add_argument("--quiesce-hook")
+    parser.add_argument("--resume-hook")
+    parser.add_argument("--restart-hook")
+    parser.add_argument("--identity-hook")
+    parser.add_argument("--unauth-smoke-hook")
+    parser.add_argument("--auth-smoke-hook")
+    parser.add_argument("--status-file")
     parser.add_argument("--public-root")
-    parser.add_argument("--execute", action="store_true")
     args = parser.parse_args(argv)
-    if not args.execute:
-        print(
-            "DRY_RUN_ONLY: pass --execute only after independent audit and private operator authorization"
-        )
-        return 0
     try:
-        return deploy(
+        control = Path(args.control_root)
+        validate_private_control_root(control)
+        runtime = Path(args.runtime_manifest)
+        validate_private_control_file(runtime, control, "runtime manifest")
+        entries = load_runtime_manifest(runtime)
+        if args.mode == "prepare":
+            if not args.sha or not args.python_executable:
+                raise SafetyError("prepare requires sha and python executable")
+            path, meta, digest = prepare_versioned_release(
+                repo=Path(args.repo),
+                sha=args.sha,
+                approved_ref=args.approved_ref,
+                repository_id=args.repository_id,
+                releases_root=Path(args.releases_root),
+                python_executable=args.python_executable,
+                runtime_entries=entries,
+            )
+            print(json.dumps({"state": "PREPARED_FOR_AUDIT", "prepared_release": str(path), "release_manifest_sha256": digest, "sha": meta["sha"]}, sort_keys=True))
+            return 0
+        required = (
+            "prepared_release", "ci_run_id", "audit_id", "active_link", "backup_root",
+            "persistent_state_root", "approval_file", "approval_consumption_root",
+            "quiesce_hook", "resume_hook", "restart_hook", "identity_hook",
+            "unauth_smoke_hook", "auth_smoke_hook", "status_file",
+        )
+        if any(not getattr(args, name) for name in required):
+            raise SafetyError("execute is missing required private deployment arguments")
+        return execute_prepared_release(
             repo=Path(args.repo),
-            sha=args.sha,
+            prepared_release=Path(args.prepared_release),
             repository_id=args.repository_id,
             approved_ref=args.approved_ref,
             ci_run_id=args.ci_run_id,
@@ -490,17 +491,17 @@ def main(argv=None) -> int:
             releases_root=Path(args.releases_root),
             backup_root=Path(args.backup_root),
             persistent_state_root=Path(args.persistent_state_root),
-            runtime_manifest=Path(args.runtime_manifest),
-            control_root=Path(args.control_root),
+            runtime_manifest=runtime,
+            control_root=control,
             approval_file=Path(args.approval_file),
             approval_consumption_root=Path(args.approval_consumption_root),
             quiesce_hook=Path(args.quiesce_hook),
+            resume_hook=Path(args.resume_hook),
             restart_hook=Path(args.restart_hook),
             identity_hook=Path(args.identity_hook),
             unauth_hook=Path(args.unauth_smoke_hook),
             auth_hook=Path(args.auth_smoke_hook),
             status_file=Path(args.status_file),
-            python_executable=args.python_executable,
             public_root=Path(args.public_root) if args.public_root else None,
         )
     except SafetyError as exc:
