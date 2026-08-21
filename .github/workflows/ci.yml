@@ -47,6 +47,7 @@ jobs:
           tests/test_acceptance_harness.py
           tests/test_acceptance_contracts.py
           tests/test_dev1_round1.py
+          tests/test_dev1_round2.py
           tests/test_baseline_reconcile.py
           tests/test_runtime_evidence.py
       - name: Verify single deploy-capable entrypoint
