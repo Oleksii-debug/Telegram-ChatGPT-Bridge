@@ -71,7 +71,9 @@ class DownloadManager:
         self.staging_dir = staging_dir.resolve()
         self.limits = limits or DownloadLimits()
         self.staging_dir.mkdir(parents=True, exist_ok=True)
-        self.lock_dir = self.staging_dir / ".locks"
+        # Persistent lock control belongs beside the private checkpoint DB, not
+        # inside ephemeral staging. This preserves staging-cleanup invariants.
+        self.lock_dir = self.checkpoints.db_path.parent / ".download-locks"
         self.lock_dir.mkdir(parents=True, exist_ok=True)
         for directory in (self.staging_dir, self.lock_dir):
             try:
@@ -201,9 +203,6 @@ class DownloadManager:
             mime = item.mime_type or mimetypes.guess_type(name)[0] or "application/octet-stream"
             return self.files.add(final, name=name, mime_type=mime)
         finally:
-            # ``resolved`` continues to refer to the old staging path after
-            # Path.replace(); therefore cleanup never deletes the final file
-            # that was successfully registered under files.root.
             for candidate in {path for path in (target, returned, resolved) if path is not None}:
                 try:
                     if candidate.exists() and candidate.is_file():

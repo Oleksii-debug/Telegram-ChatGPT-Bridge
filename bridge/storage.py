@@ -19,6 +19,7 @@ from .errors import BridgeError
 from .validation import validate_file_ref
 
 _JOB_ID_RE = re.compile(r"^[A-Za-z0-9_-]{16,128}$")
+_ITEM_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 _CODE_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 
 
@@ -161,8 +162,6 @@ class FileRecordStore:
         try:
             Path(record.path).unlink(missing_ok=True)
         except OSError:
-            # A removed DB row is safer than retaining a public reference to an
-            # unverifiable path. Private cleanup can retry separately.
             pass
         return cursor.rowcount == 1
 
@@ -248,7 +247,7 @@ class CheckpointStore:
                 raise BridgeError("Download checkpoint is corrupt", status=500, code="checkpoint_corrupt") from exc
             if (
                 not isinstance(item.item_id, str)
-                or not re.fullmatch(r"[0-9a-f]{32}", item.item_id)
+                or not _ITEM_ID_RE.fullmatch(item.item_id)
                 or item.item_id in item_ids
                 or not isinstance(item.chat, str)
                 or not item.chat
