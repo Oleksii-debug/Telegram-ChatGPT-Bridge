@@ -23,6 +23,7 @@ from .backend import ReadBackend, UnavailableReadBackend
 from .downloads import DownloadManager
 from .errors import BridgeError, HiddenNotFound
 from .models import MessageRecord
+from .routes import known_path, resolve_route
 from .security import BearerGuard, FileSigner, RateLimiter, RejectingRateLimiter
 from .storage import CheckpointStore, DownloadItem, FileRecordStore
 from .validation import (
@@ -38,6 +39,10 @@ from .validation import (
 JSON_TYPE = "application/json; charset=utf-8"
 
 
+class _DuplicateJsonKey(ValueError):
+    pass
+
+
 @dataclass(frozen=True)
 class ReadAppConfig:
     auth_secret: str | None = None
@@ -46,9 +51,25 @@ class ReadAppConfig:
     public_base_url: str = ""
     api_prefix: str = "/api/v1"
     max_json_bytes: int = 256 * 1024
+    max_json_depth: int = 8
+    max_json_nodes: int = 2_048
     max_limit: int = 200
     max_search_scan: int = 2_000
     signed_file_ttl_seconds: int = 600
+
+    def __post_init__(self) -> None:
+        if not self.api_prefix.startswith("/") or self.api_prefix.endswith("/") or ".." in self.api_prefix.split("/"):
+            raise ValueError("invalid API prefix")
+        for name, value, low, high in (
+            ("max_json_bytes", self.max_json_bytes, 1_024, 2 * 1024 * 1024),
+            ("max_json_depth", self.max_json_depth, 2, 32),
+            ("max_json_nodes", self.max_json_nodes, 32, 20_000),
+            ("max_limit", self.max_limit, 1, 1_000),
+            ("max_search_scan", self.max_search_scan, 1, 20_000),
+            ("signed_file_ttl_seconds", self.signed_file_ttl_seconds, 30, 3_600),
+        ):
+            if isinstance(value, bool) or not isinstance(value, int) or not low <= value <= high:
+                raise ValueError(f"{name} is outside the safe range")
 
     @classmethod
     def from_env(cls) -> "ReadAppConfig":
@@ -84,6 +105,10 @@ class BridgeApplication:
         if self.config.private_root is not None:
             private = self.config.private_root.resolve()
             private.mkdir(parents=True, exist_ok=True)
+            try:
+                os.chmod(private, 0o700)
+            except OSError:
+                pass
             self.files = FileRecordStore(private / "state" / "files.sqlite3", private / "files")
             self.checkpoints = CheckpointStore(private / "state" / "downloads.sqlite3")
             self.downloads = DownloadManager(
@@ -120,9 +145,17 @@ class BridgeApplication:
         ]
         headers.extend(extra_headers)
         phrase = {
-            200: "OK", 400: "Bad Request", 404: "Not Found", 405: "Method Not Allowed",
-            413: "Payload Too Large", 415: "Unsupported Media Type", 429: "Too Many Requests",
-            500: "Internal Server Error", 502: "Bad Gateway", 503: "Service Unavailable", 504: "Gateway Timeout",
+            200: "OK",
+            400: "Bad Request",
+            404: "Not Found",
+            405: "Method Not Allowed",
+            413: "Payload Too Large",
+            415: "Unsupported Media Type",
+            429: "Too Many Requests",
+            500: "Internal Server Error",
+            502: "Bad Gateway",
+            503: "Service Unavailable",
+            504: "Gateway Timeout",
         }.get(status, "Error")
         start_response(f"{status} {phrase}", headers)
         return [raw]
@@ -134,13 +167,8 @@ class BridgeApplication:
         self.audit.write("request_error", request_id=request_id, status=error.status, error_code=error.code)
         return self._respond(start_response, error.status, error.public_payload(request_id), extra_headers=extra)
 
-    def _require_auth_and_rate(self, environ: dict[str, Any]) -> None:
-        if self.auth is None:
-            raise HiddenNotFound()
-        self.auth.require(environ)
-        # Never use credentials, IP addresses, chat names, or message text as
-        # public evidence. This actor is a coarse authenticated API bucket.
-        decision = self.rate_limiter.check("authenticated-read-api")
+    def _check_rate(self, actor_class: str) -> None:
+        decision = self.rate_limiter.check(actor_class)
         if not decision.allowed:
             raise BridgeError(
                 "Rate limit exceeded",
@@ -149,6 +177,42 @@ class BridgeApplication:
                 retry_after_seconds=decision.retry_after_seconds or 1,
             )
 
+    def _require_auth_and_rate(self, environ: dict[str, Any]) -> None:
+        if self.auth is None:
+            raise HiddenNotFound()
+        self.auth.require(environ)
+        # Actor classes are fixed non-private buckets. Credentials, addresses,
+        # chat names and message contents are never rate-limit keys/evidence.
+        self._check_rate("authenticated-read-api")
+
+    def _validate_json_tree(self, value: Any, *, depth: int = 0, counter: list[int] | None = None) -> None:
+        if counter is None:
+            counter = [0]
+        counter[0] += 1
+        if counter[0] > self.config.max_json_nodes:
+            raise BridgeError("JSON structure is too large", status=413, code="json_node_limit")
+        if depth > self.config.max_json_depth:
+            raise BridgeError("JSON nesting is too deep", status=413, code="json_depth_limit")
+        if isinstance(value, dict):
+            for key, child in value.items():
+                if not isinstance(key, str):
+                    raise BridgeError("JSON object keys must be strings", code="invalid_json_shape")
+                self._validate_json_tree(child, depth=depth + 1, counter=counter)
+        elif isinstance(value, list):
+            for child in value:
+                self._validate_json_tree(child, depth=depth + 1, counter=counter)
+        elif value is not None and not isinstance(value, (str, int, float, bool)):
+            raise BridgeError("Unsupported JSON value", code="invalid_json_shape")
+
+    @staticmethod
+    def _no_duplicate_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key, value in pairs:
+            if key in result:
+                raise _DuplicateJsonKey(key)
+            result[key] = value
+        return result
+
     def _read_json(self, environ: dict[str, Any]) -> dict[str, Any]:
         content_type = str(environ.get("CONTENT_TYPE") or "").split(";", 1)[0].strip().casefold()
         if content_type != "application/json":
@@ -156,11 +220,10 @@ class BridgeApplication:
         raw_length = environ.get("CONTENT_LENGTH")
         if raw_length in (None, ""):
             raise BridgeError("Content-Length is required", code="invalid_content_length")
-        else:
-            try:
-                length = int(str(raw_length))
-            except ValueError as exc:
-                raise BridgeError("Invalid Content-Length", code="invalid_content_length") from exc
+        try:
+            length = int(str(raw_length))
+        except ValueError as exc:
+            raise BridgeError("Invalid Content-Length", code="invalid_content_length") from exc
         if length < 0:
             raise BridgeError("Invalid Content-Length", code="invalid_content_length")
         if length > self.config.max_json_bytes:
@@ -176,9 +239,12 @@ class BridgeApplication:
         except UnicodeDecodeError as exc:
             raise BridgeError("Request body must be valid UTF-8", code="invalid_utf8") from exc
         try:
-            value = json.loads(text or "{}")
+            value = json.loads(text or "{}", object_pairs_hook=self._no_duplicate_object)
+        except _DuplicateJsonKey as exc:
+            raise BridgeError("Duplicate JSON object key", code="duplicate_field") from exc
         except json.JSONDecodeError as exc:
             raise BridgeError("Malformed JSON", code="malformed_json") from exc
+        self._validate_json_tree(value)
         return require_dict(value)
 
     @staticmethod
@@ -208,9 +274,9 @@ class BridgeApplication:
         if not all((self.files, self.checkpoints, self.downloads, self.archives)):
             raise BridgeError("Private storage is not configured", status=503, code="private_storage_unconfigured")
 
-    def _handle_post(self, path: str, body: dict[str, Any]) -> dict[str, Any]:
+    def _handle_post(self, operation_id: str, body: dict[str, Any]) -> dict[str, Any]:
         p = self.config.api_prefix
-        if path == f"{p}/dialogs/list":
+        if operation_id == "dialogs.list":
             self._only(body, {"limit", "cursor", "query", "unread_only"})
             page = self.backend.list_dialogs(
                 limit=self._limit(body),
@@ -220,7 +286,7 @@ class BridgeApplication:
             )
             return self._page_payload(page, include_text=False)
 
-        if path == f"{p}/history/read":
+        if operation_id == "history.read":
             self._only(body, {"chat", "limit", "cursor"})
             page = self.backend.history(
                 chat=entity_ref(body.get("chat")),
@@ -229,7 +295,7 @@ class BridgeApplication:
             )
             return self._page_payload(page, include_text=True)
 
-        if path == f"{p}/search":
+        if operation_id == "search.read":
             self._only(body, {"chat", "sender", "text", "date_from", "date_to", "limit", "cursor", "scan_limit"})
             chat = entity_ref(body.get("chat")) if body.get("chat") not in (None, "") else None
             sender = entity_ref(body.get("sender"), field="sender") if body.get("sender") not in (None, "") else None
@@ -245,55 +311,76 @@ class BridgeApplication:
                 limit=self._limit(body),
                 cursor=bounded_text(body.get("cursor"), field="cursor", maximum=1024) or None,
                 scan_limit=bounded_int(
-                    body.get("scan_limit"), field="scan_limit", default=min(500, self.config.max_search_scan),
-                    minimum=1, maximum=self.config.max_search_scan,
+                    body.get("scan_limit"),
+                    field="scan_limit",
+                    default=min(500, self.config.max_search_scan),
+                    minimum=1,
+                    maximum=self.config.max_search_scan,
                 ),
             )
             return self._page_payload(page, include_text=True)
 
-        if path == f"{p}/media/metadata":
+        if operation_id == "media.metadata":
             self._only(body, {"chat", "message_id"})
             record = self.backend.get_message(
                 chat=entity_ref(body.get("chat")),
                 message_id=bounded_int(body.get("message_id"), field="message_id", default=0, minimum=1, maximum=2**63 - 1),
             )
-            return {"message_id": record.id, "chat_id": record.chat_id, "timestamp": record.timestamp, "media": [m.to_dict() for m in record.media]}
+            return {
+                "message_id": record.id,
+                "chat_id": record.chat_id,
+                "timestamp": record.timestamp,
+                "media": [media.to_dict() for media in record.media],
+            }
 
-        if path in {f"{p}/downloads/single", f"{p}/downloads/bulk"}:
+        if operation_id in {"downloads.single", "downloads.bulk"}:
             self._ensure_storage()
             raws: list[dict[str, Any]]
-            if path.endswith("/single"):
+            if operation_id == "downloads.single":
                 self._only(body, {"chat", "message_id", "file_ref", "name", "mime_type", "expected_size", "expected_sha256"})
                 raws = [body]
             else:
                 self._only(body, {"items"})
-                if not isinstance(body.get("items"), list) or len(body["items"]) > 100:
-                    raise BridgeError("items must be a bounded list", code="invalid_list", details={"field": "items", "limit": 100})
-                raws = [require_dict(x, "item") for x in body["items"]]
+                if not isinstance(body.get("items"), list) or not body["items"] or len(body["items"]) > 100:
+                    raise BridgeError("items must be a non-empty bounded list", code="invalid_list", details={"field": "items", "limit": 100})
+                raws = [require_dict(item, "item") for item in body["items"]]
             items: list[DownloadItem] = []
             for raw in raws:
                 self._only(raw, {"chat", "message_id", "file_ref", "name", "mime_type", "expected_size", "expected_sha256"})
                 chat = entity_ref(raw.get("chat"))
-                mid = bounded_int(raw.get("message_id"), field="message_id", default=0, minimum=1, maximum=2**63 - 1)
+                message_id = bounded_int(raw.get("message_id"), field="message_id", default=0, minimum=1, maximum=2**63 - 1)
                 source_ref = validate_file_ref(raw.get("file_ref"))
-                name = bounded_text(raw.get("name"), field="name", maximum=180) or f"message-{mid}.bin"
+                name = bounded_text(raw.get("name"), field="name", maximum=180) or f"message-{message_id}.bin"
                 mime = bounded_text(raw.get("mime_type"), field="mime_type", maximum=160) or "application/octet-stream"
-                size = None if raw.get("expected_size") is None else bounded_int(raw.get("expected_size"), field="expected_size", default=0, minimum=0, maximum=100 * 1024 * 1024)
+                size = None if raw.get("expected_size") is None else bounded_int(
+                    raw.get("expected_size"), field="expected_size", default=0, minimum=0, maximum=100 * 1024 * 1024
+                )
                 digest = bounded_text(raw.get("expected_sha256"), field="expected_sha256", maximum=64) or None
-                if digest and (len(digest) != 64 or any(c not in "0123456789abcdefABCDEF" for c in digest)):
+                if digest and (len(digest) != 64 or any(char not in "0123456789abcdefABCDEF" for char in digest)):
                     raise BridgeError("expected_sha256 is invalid", code="invalid_hash")
-                items.append(DownloadItem(self._item_id(chat, mid, source_ref), chat, mid, source_ref, name, mime, size, digest.lower() if digest else None))
+                items.append(
+                    DownloadItem(
+                        self._item_id(chat, message_id, source_ref),
+                        chat,
+                        message_id,
+                        source_ref,
+                        name,
+                        mime,
+                        size,
+                        digest.lower() if digest else None,
+                    )
+                )
             assert self.downloads is not None
-            return self.downloads.start_single(items[0]) if path.endswith("/single") else self.downloads.start_bulk(items)
+            return self.downloads.start_single(items[0]) if operation_id == "downloads.single" else self.downloads.start_bulk(items)
 
-        if path == f"{p}/downloads/resume":
+        if operation_id == "downloads.resume":
             self._only(body, {"job_id"})
             self._ensure_storage()
             job_id = bounded_text(body.get("job_id"), field="job_id", maximum=128, allow_empty=False)
             assert self.downloads is not None
             return self.downloads.resume(job_id)
 
-        if path == f"{p}/archives/create":
+        if operation_id == "archives.create":
             self._only(body, {"file_refs", "name"})
             self._ensure_storage()
             refs = body.get("file_refs")
@@ -304,7 +391,7 @@ class BridgeApplication:
             assert self.archives is not None
             return self.archives.build(safe_refs, archive_name=name).public_metadata()
 
-        if path == f"{p}/files/get":
+        if operation_id == "files.metadata":
             self._only(body, {"file_ref"})
             self._ensure_storage()
             ref = validate_file_ref(body.get("file_ref"))
@@ -315,19 +402,19 @@ class BridgeApplication:
             payload = record.public_metadata()
             payload["download_path"] = f"{p}/files/{ref}"
             if self.signer is not None and self.config.public_base_url:
-                url, exp = self.signer.issue(
+                url, expires_at = self.signer.issue(
                     base_url=self.config.public_base_url,
                     route_prefix=f"{p}/files",
                     file_ref=ref,
                     ttl_seconds=self.config.signed_file_ttl_seconds,
                 )
                 payload["signed_url"] = url
-                payload["expires_at"] = exp
+                payload["expires_at"] = expires_at
             return payload
 
         raise HiddenNotFound()
 
-    def _serve_file(self, environ: dict[str, Any], start_response: Callable, path: str) -> list[bytes]:
+    def _serve_file(self, environ: dict[str, Any], start_response: Callable, path: str, request_id: str) -> Iterable[bytes]:
         self._ensure_storage()
         prefix = f"{self.config.api_prefix}/files/"
         ref = validate_file_ref(path[len(prefix) :])
@@ -338,11 +425,19 @@ class BridgeApplication:
                 authorized = True
             except HiddenNotFound:
                 authorized = False
+
         if not authorized and self.signer is not None:
             query = parse_qs(str(environ.get("QUERY_STRING") or ""), keep_blank_values=True)
-            authorized = self.signer.verify(ref, (query.get("exp") or [None])[0], (query.get("sig") or [None])[0])
+            if set(query) != {"exp", "sig"} or len(query["exp"]) != 1 or len(query["sig"]) != 1:
+                raise HiddenNotFound()
+            authorized = self.signer.verify(ref, query["exp"][0], query["sig"][0])
         if not authorized:
             raise HiddenNotFound()
+
+        # Signed references do not bypass abuse protection. This fixed actor
+        # class leaks no private file identifier into limiter state/evidence.
+        self._check_rate("private-file-read")
+
         assert self.files is not None
         record = self.files.get(ref)
         if record is None:
@@ -354,56 +449,74 @@ class BridgeApplication:
             ("Content-Length", str(size)),
             ("Cache-Control", "private, no-store"),
             ("X-Content-Type-Options", "nosniff"),
+            ("Referrer-Policy", "no-referrer"),
             ("Content-Disposition", "attachment"),
         ]
+        self.audit.write("request_ok", request_id=request_id, route="files.content", method="GET", status=200)
         start_response("200 OK", headers)
-        def body_iter():
-            with path_obj.open("rb") as fh:
+
+        def body_iter() -> Iterable[bytes]:
+            with path_obj.open("rb") as handle:
                 while True:
-                    chunk = fh.read(1024 * 1024)
+                    chunk = handle.read(1024 * 1024)
                     if not chunk:
                         break
                     yield chunk
+
         return body_iter()
 
-    def __call__(self, environ: dict[str, Any], start_response: Callable) -> list[bytes]:
+    def __call__(self, environ: dict[str, Any], start_response: Callable) -> Iterable[bytes]:
         request_id = self._request_id()
         method = str(environ.get("REQUEST_METHOD") or "GET").upper()
         path = str(environ.get("PATH_INFO") or "/")
         try:
-            if path == "/health":
-                if method != "GET":
+            spec = resolve_route(method, path, self.config.api_prefix)
+            if spec is None:
+                # Keep the one public health endpoint explicit about wrong
+                # method; protected path/method mismatches remain hidden.
+                if path == "/health" and known_path(path, self.config.api_prefix):
                     raise BridgeError("Method not allowed", status=405, code="method_not_allowed")
+                raise HiddenNotFound()
+
+            if spec.operation_id == "health.get":
                 components = {
                     "auth": "configured" if self.auth else "unconfigured",
                     "backend": "configured" if not isinstance(self.backend, UnavailableReadBackend) else "unconfigured",
                     "storage": "configured" if self.files else "unconfigured",
                     "rate_limit": "configured" if not isinstance(self.rate_limiter, RejectingRateLimiter) else "unconfigured",
                 }
-                ready = all(v == "configured" for v in components.values())
-                return self._respond(start_response, 200, {"ok": True, "service": "telegram-bridge", "ready": ready, "components": components})
+                ready = all(value == "configured" for value in components.values())
+                return self._respond(
+                    start_response,
+                    200,
+                    {"ok": True, "service": "telegram-bridge", "ready": ready, "components": components},
+                )
 
-            if method == "GET" and path.startswith(f"{self.config.api_prefix}/files/"):
-                return self._serve_file(environ, start_response, path)
+            if spec.operation_id == "files.content":
+                return self._serve_file(environ, start_response, path, request_id)
 
-            if method != "POST" or not path.startswith(f"{self.config.api_prefix}/"):
+            if spec.access != "protected" or method != "POST":
                 raise HiddenNotFound()
             self._require_auth_and_rate(environ)
             body = self._read_json(environ)
-            result = self._handle_post(path, body)
-            self.audit.write("request_ok", request_id=request_id, route=path, method=method, status=200)
+            result = self._handle_post(spec.operation_id, body)
+            self.audit.write("request_ok", request_id=request_id, route=spec.operation_id, method=method, status=200)
             return self._respond(start_response, 200, {"ok": True, "request_id": request_id, "data": result})
         except BridgeError as exc:
             return self._error(start_response, exc, request_id)
         except Exception:
             # Raw exception messages are deliberately not surfaced or audited.
-            return self._error(start_response, BridgeError("Internal server error", status=500, code="internal_error"), request_id)
+            return self._error(
+                start_response,
+                BridgeError("Internal server error", status=500, code="internal_error"),
+                request_id,
+            )
 
 
 _default_app: BridgeApplication | None = None
 
 
-def application(environ: dict[str, Any], start_response: Callable) -> list[bytes]:
+def application(environ: dict[str, Any], start_response: Callable) -> Iterable[bytes]:
     """Passenger/WSGI entry point. Construction is local-only and lazy."""
     global _default_app
     if _default_app is None:
@@ -411,6 +524,9 @@ def application(environ: dict[str, Any], start_response: Callable) -> list[bytes
             _default_app = BridgeApplication()
         except Exception:
             raw = b'{"ok":false,"error":{"code":"startup_configuration_error","message":"Application configuration is invalid"}}'
-            start_response("500 Internal Server Error", [("Content-Type", JSON_TYPE), ("Content-Length", str(len(raw))), ("Cache-Control", "no-store")])
+            start_response(
+                "500 Internal Server Error",
+                [("Content-Type", JSON_TYPE), ("Content-Length", str(len(raw))), ("Cache-Control", "no-store")],
+            )
             return [raw]
     return _default_app(environ, start_response)

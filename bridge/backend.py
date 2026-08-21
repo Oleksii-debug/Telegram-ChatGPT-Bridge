@@ -2,16 +2,18 @@
 
 The adapter imports Telethon lazily and performs no network activity at module
 import or application construction time. A client factory can be injected for
-credential-free deterministic tests.
+credential-free deterministic tests. Every adapter operation owns a bounded
+client lifecycle when the supplied client exposes connect/auth/disconnect hooks.
 """
 
 from __future__ import annotations
 
 import asyncio
 import hashlib
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Awaitable, Callable, Iterable, Protocol, Sequence
+from typing import Any, AsyncIterator, Awaitable, Callable, Protocol
 
 from .errors import BridgeError
 from .models import DialogRecord, EntityRef, MediaRecord, MessageRecord, Page, decode_cursor, encode_cursor, stable_message_sort
@@ -45,15 +47,19 @@ class UnavailableReadBackend:
     def list_dialogs(self, **kwargs: Any) -> Page:
         del kwargs
         self._unavailable()
+
     def history(self, **kwargs: Any) -> Page:
         del kwargs
         self._unavailable()
+
     def search(self, **kwargs: Any) -> Page:
         del kwargs
         self._unavailable()
+
     def get_message(self, **kwargs: Any) -> MessageRecord:
         del kwargs
         self._unavailable()
+
     def download_media(self, **kwargs: Any) -> dict[str, Any]:
         del kwargs
         self._unavailable()
@@ -66,13 +72,25 @@ class TelethonReadConfig:
     search_scan_limit: int = 5_000
     flood_wait_cap_seconds: int = 30
 
+    def __post_init__(self) -> None:
+        for name, value, low, high in (
+            ("request_timeout_seconds", self.request_timeout_seconds, 1, 120),
+            ("dialog_scan_limit", self.dialog_scan_limit, 1, 20_000),
+            ("search_scan_limit", self.search_scan_limit, 1, 50_000),
+            ("flood_wait_cap_seconds", self.flood_wait_cap_seconds, 1, 300),
+        ):
+            if isinstance(value, bool) or not isinstance(value, int) or not low <= value <= high:
+                raise ValueError(f"{name} is outside the safe range")
+
 
 class TelethonReadBackend:
-    """Thin adapter that maps Telethon-like objects into stable API records.
+    """Map Telethon-like objects into stable read-side API records.
 
-    ``client_factory`` returns an async context-manager compatible client or an
-    awaitable client. Tests may inject a fake object and never import Telethon.
-    Production may inject a factory that builds an authorized user client.
+    ``client_factory`` returns a client or awaitable client. If that client
+    exposes ``connect()``, ``is_user_authorized()`` or ``disconnect()``, the
+    adapter calls those hooks for every bounded operation. Clients without the
+    hooks are treated as externally managed, which keeps deterministic fakes
+    and later server-side session factories easy to integrate.
     """
 
     def __init__(
@@ -83,6 +101,47 @@ class TelethonReadBackend:
     ) -> None:
         self.client_factory = client_factory
         self.config = config or TelethonReadConfig()
+
+    @staticmethod
+    async def _maybe_await(value: Any) -> Any:
+        return await value if hasattr(value, "__await__") else value
+
+    async def _make_client(self) -> Any:
+        return await self._maybe_await(self.client_factory())
+
+    @asynccontextmanager
+    async def _client_session(self) -> AsyncIterator[Any]:
+        """Bound connect/auth/disconnect to one operation and always clean up.
+
+        Cleanup errors are deliberately not surfaced because they must never
+        replace the original read error or expose backend exception text. A
+        fresh client is requested for the next operation.
+        """
+        client = await self._make_client()
+        try:
+            connect = getattr(client, "connect", None)
+            if callable(connect):
+                await self._maybe_await(connect())
+
+            checker = getattr(client, "is_user_authorized", None)
+            if checker is not None:
+                state = checker() if callable(checker) else checker
+                authorized = await self._maybe_await(state)
+                if authorized is not True:
+                    raise BridgeError(
+                        "Telegram user session is not authorized",
+                        status=503,
+                        code="telegram_not_authorized",
+                        details={"retryable": False},
+                    )
+            yield client
+        finally:
+            disconnect = getattr(client, "disconnect", None)
+            if callable(disconnect):
+                try:
+                    await self._maybe_await(disconnect())
+                except Exception:
+                    pass
 
     @staticmethod
     def _entity_kind(entity: Any) -> str:
@@ -106,6 +165,32 @@ class TelethonReadBackend:
         username = getattr(entity, "username", None)
         return full or (str(username) if username else str(getattr(entity, "id", "unknown")))
 
+    @staticmethod
+    def _optional_text(value: Any) -> str | None:
+        if value is None or value == "":
+            return None
+        return str(value)
+
+    @staticmethod
+    def _optional_int(value: Any, *, minimum: int = 0) -> int | None:
+        if value is None or value == "":
+            return None
+        try:
+            result = int(value)
+        except (TypeError, ValueError, OverflowError):
+            return None
+        return result if result >= minimum else None
+
+    @staticmethod
+    def _optional_float(value: Any, *, minimum: float = 0.0) -> float | None:
+        if value is None or value == "":
+            return None
+        try:
+            result = float(value)
+        except (TypeError, ValueError, OverflowError):
+            return None
+        return result if result >= minimum else None
+
     @classmethod
     def _dialog_record(cls, dialog: Any) -> DialogRecord:
         entity = getattr(dialog, "entity", dialog)
@@ -114,14 +199,14 @@ class TelethonReadBackend:
             id=str(getattr(entity, "id", "")),
             kind=cls._entity_kind(entity),
             title=cls._entity_title(entity),
-            username=(str(getattr(entity, "username", "")) or None),
+            username=cls._optional_text(getattr(entity, "username", None)),
             unread_count=max(0, int(getattr(dialog, "unread_count", 0) or 0)),
             pinned=bool(getattr(dialog, "pinned", False)),
             last_message_at=date.isoformat() if isinstance(date, datetime) else None,
         )
 
-    @staticmethod
-    def _media_records(message: Any) -> tuple[MediaRecord, ...]:
+    @classmethod
+    def _media_records(cls, message: Any) -> tuple[MediaRecord, ...]:
         file_obj = getattr(message, "file", None)
         media = getattr(message, "media", None)
         if media is None and file_obj is None:
@@ -142,6 +227,7 @@ class TelethonReadBackend:
             kind = "document"
         else:
             kind = "other"
+
         msg_id = int(getattr(message, "id", 0) or 0)
         media_id = (
             getattr(getattr(message, "document", None), "id", None)
@@ -149,21 +235,25 @@ class TelethonReadBackend:
             or getattr(file_obj, "id", None)
             or 0
         )
-        # Deterministic across process restarts; Python's randomized ``hash``
-        # must never be used for externally visible logical identifiers.
-        chat_hint = getattr(message, "chat_id", None) or getattr(getattr(message, "peer_id", None), "channel_id", None) or getattr(getattr(message, "peer_id", None), "chat_id", None) or getattr(getattr(message, "peer_id", None), "user_id", None) or 0
+        chat_hint = (
+            getattr(message, "chat_id", None)
+            or getattr(getattr(message, "peer_id", None), "channel_id", None)
+            or getattr(getattr(message, "peer_id", None), "chat_id", None)
+            or getattr(getattr(message, "peer_id", None), "user_id", None)
+            or 0
+        )
         digest = hashlib.sha256(f"v1:{chat_hint}:{msg_id}:{kind}:{media_id}".encode("ascii", "strict")).hexdigest()[:20]
         file_ref = f"tg_{msg_id}_{digest}"
         return (
             MediaRecord(
                 type=kind,
                 file_ref=file_ref,
-                name=(str(getattr(file_obj, "name", "")) or None),
-                mime_type=(str(getattr(file_obj, "mime_type", "")) or None),
-                size=(int(getattr(file_obj, "size", 0)) or None) if file_obj is not None else None,
-                duration_seconds=(float(getattr(file_obj, "duration", 0) or 0) or None) if file_obj is not None else None,
-                width=(int(getattr(file_obj, "width", 0) or 0) or None) if file_obj is not None else None,
-                height=(int(getattr(file_obj, "height", 0) or 0) or None) if file_obj is not None else None,
+                name=cls._optional_text(getattr(file_obj, "name", None)) if file_obj is not None else None,
+                mime_type=cls._optional_text(getattr(file_obj, "mime_type", None)) if file_obj is not None else None,
+                size=cls._optional_int(getattr(file_obj, "size", None)) if file_obj is not None else None,
+                duration_seconds=cls._optional_float(getattr(file_obj, "duration", None)) if file_obj is not None else None,
+                width=cls._optional_int(getattr(file_obj, "width", None), minimum=1) if file_obj is not None else None,
+                height=cls._optional_int(getattr(file_obj, "height", None), minimum=1) if file_obj is not None else None,
             ),
         )
 
@@ -173,8 +263,7 @@ class TelethonReadBackend:
         getter = getattr(message, "get_sender", None)
         if callable(getter):
             try:
-                maybe = getter()
-                sender_obj = await maybe if hasattr(maybe, "__await__") else maybe
+                sender_obj = await cls._maybe_await(getter())
             except Exception:
                 sender_obj = None
         sender_id = getattr(message, "sender_id", None)
@@ -184,13 +273,16 @@ class TelethonReadBackend:
                 id=str(getattr(sender_obj, "id", sender_id or "")),
                 kind=cls._entity_kind(sender_obj),
                 display_name=cls._entity_title(sender_obj),
-                username=(str(getattr(sender_obj, "username", "")) or None),
+                username=cls._optional_text(getattr(sender_obj, "username", None)),
             )
         elif sender_id is not None:
             sender = EntityRef(id=str(sender_id), kind="unknown")
+
         date = getattr(message, "date", None)
         if not isinstance(date, datetime):
             date = datetime.fromtimestamp(0, tz=timezone.utc)
+        elif date.tzinfo is None:
+            date = date.replace(tzinfo=timezone.utc)
         reply = getattr(getattr(message, "reply_to", None), "reply_to_msg_id", None)
         return MessageRecord(
             id=int(getattr(message, "id", 0) or 0),
@@ -220,12 +312,6 @@ class TelethonReadBackend:
         nxt = offset + limit
         return encode_cursor({"v": 1, "scope": scope, "offset": nxt}) if nxt < total else None
 
-    async def _make_client(self) -> Any:
-        value = self.client_factory()
-        if hasattr(value, "__await__"):
-            value = await value
-        return value
-
     def _run(self, coro: Awaitable[Any]) -> Any:
         try:
             return asyncio.run(asyncio.wait_for(coro, timeout=self.config.request_timeout_seconds))
@@ -253,8 +339,18 @@ class TelethonReadBackend:
             return [item async for item in iterator]
         return list(iterator)
 
-    async def _iter_messages(self, client: Any, entity: Any, limit: int) -> list[Any]:
-        iterator = client.iter_messages(entity, limit=limit)
+    async def _iter_messages(self, client: Any, entity: Any, limit: int, *, search: str = "") -> list[Any]:
+        kwargs: dict[str, Any] = {"limit": limit}
+        if search:
+            kwargs["search"] = search
+        try:
+            iterator = client.iter_messages(entity, **kwargs)
+        except TypeError:
+            # Simple deterministic fakes may intentionally expose only the
+            # minimal iter_messages(entity, limit) contract. Filtering remains
+            # deterministic below; real Telethon clients receive server-side
+            # search hints when supported.
+            iterator = client.iter_messages(entity, limit=limit)
         if hasattr(iterator, "__aiter__"):
             return [item async for item in iterator]
         return list(iterator)
@@ -262,41 +358,39 @@ class TelethonReadBackend:
     async def _resolve(self, client: Any, ref: str) -> Any:
         try:
             target: Any = int(ref) if ref.lstrip("-").isdigit() else ref.lstrip("@")
-            maybe = client.get_entity(target)
-            return await maybe if hasattr(maybe, "__await__") else maybe
+            return await self._maybe_await(client.get_entity(target))
+        except BridgeError:
+            raise
         except Exception as exc:
             raise BridgeError("Chat not found", status=404, code="chat_not_found") from exc
 
     def list_dialogs(self, *, limit: int, cursor: str | None, query: str, unread_only: bool) -> Page:
         async def work() -> Page:
-            client = await self._make_client()
-            dialogs = await self._iter_dialogs(client, self.config.dialog_scan_limit)
-            records = [self._dialog_record(d) for d in dialogs]
-            needle = normalize_search_text(query.strip())
-            if needle:
-                records = [d for d in records if needle in f"{d.title} {d.username or ''} {d.id}".casefold()]
-            if unread_only:
-                records = [d for d in records if d.unread_count > 0]
-            records.sort(key=lambda d: ((d.last_message_at or ""), d.id), reverse=True)
-            offset = self._cursor_offset(cursor, "dialogs")
-            page = records[offset : offset + limit]
-            next_cursor = self._next_cursor("dialogs", offset, limit, len(records))
-            return Page(tuple(page), next_cursor, min(len(dialogs), self.config.dialog_scan_limit))
+            async with self._client_session() as client:
+                dialogs = await self._iter_dialogs(client, self.config.dialog_scan_limit)
+                records = [self._dialog_record(d) for d in dialogs]
+                needle = normalize_search_text(query.strip())
+                if needle:
+                    records = [d for d in records if needle in normalize_search_text(f"{d.title} {d.username or ''} {d.id}")]
+                if unread_only:
+                    records = [d for d in records if d.unread_count > 0]
+                records.sort(key=lambda d: ((d.last_message_at or ""), d.id), reverse=True)
+                offset = self._cursor_offset(cursor, "dialogs")
+                page = records[offset : offset + limit]
+                return Page(tuple(page), self._next_cursor("dialogs", offset, limit, len(records)), min(len(dialogs), self.config.dialog_scan_limit))
 
         return self._run(work())
 
     def history(self, *, chat: str, limit: int, cursor: str | None) -> Page:
         async def work() -> Page:
-            client = await self._make_client()
-            entity = await self._resolve(client, chat)
-            offset = self._cursor_offset(cursor, "history")
-            messages = await self._iter_messages(client, entity, min(self.config.search_scan_limit, limit + 1 + offset))
-            chat_id = str(getattr(entity, "id", chat))
-            records = [await self._message_record(m, chat_id) for m in messages]
-            records = stable_message_sort(records, reverse=True)
-            page = records[offset : offset + limit]
-            next_cursor = self._next_cursor("history", offset, limit, len(records))
-            return Page(tuple(page), next_cursor, len(messages))
+            async with self._client_session() as client:
+                entity = await self._resolve(client, chat)
+                offset = self._cursor_offset(cursor, "history")
+                messages = await self._iter_messages(client, entity, min(self.config.search_scan_limit, limit + 1 + offset))
+                chat_id = str(getattr(entity, "id", chat))
+                records = stable_message_sort([await self._message_record(m, chat_id) for m in messages], reverse=True)
+                page = records[offset : offset + limit]
+                return Page(tuple(page), self._next_cursor("history", offset, limit, len(records)), len(messages))
 
         return self._run(work())
 
@@ -312,63 +406,62 @@ class TelethonReadBackend:
         scan_limit: int,
     ) -> Page:
         async def work() -> Page:
-            client = await self._make_client()
-            entity = await self._resolve(client, chat) if chat else None
-            messages = await self._iter_messages(client, entity, min(scan_limit, self.config.search_scan_limit))
-            chat_id = str(getattr(entity, "id", chat or "global"))
-            records = [await self._message_record(m, chat_id) for m in messages]
-            needle = normalize_search_text(text.strip())
-            sender_cf = normalize_search_text(sender.strip()) if sender else ""
-            filtered: list[MessageRecord] = []
-            for record in records:
-                stamp = datetime.fromisoformat(record.timestamp.replace("Z", "+00:00"))
-                if not dates.contains(stamp):
-                    continue
-                if needle and needle not in normalize_search_text(record.text):
-                    continue
-                if sender_cf:
-                    s = record.sender
-                    # Stable ID and username are filter keys; mutable display
-                    # names are metadata only and never identifiers.
-                    hay = "" if s is None else f"{s.id} {s.username or ''}".casefold()
-                    if sender_cf not in hay:
+            async with self._client_session() as client:
+                entity = await self._resolve(client, chat) if chat else None
+                messages = await self._iter_messages(
+                    client,
+                    entity,
+                    min(scan_limit, self.config.search_scan_limit),
+                    search=text.strip(),
+                )
+                chat_id = str(getattr(entity, "id", chat or "global"))
+                records = [await self._message_record(m, chat_id) for m in messages]
+                needle = normalize_search_text(text.strip())
+                sender_cf = normalize_search_text(sender.strip()) if sender else ""
+                filtered: list[MessageRecord] = []
+                for record in records:
+                    stamp = datetime.fromisoformat(record.timestamp.replace("Z", "+00:00"))
+                    if not dates.contains(stamp):
                         continue
-                filtered.append(record)
-            filtered = stable_message_sort(filtered, reverse=True)
-            offset = self._cursor_offset(cursor, "search")
-            page = filtered[offset : offset + limit]
-            next_cursor = self._next_cursor("search", offset, limit, len(filtered))
-            return Page(tuple(page), next_cursor, len(messages))
+                    if needle and needle not in normalize_search_text(record.text):
+                        continue
+                    if sender_cf:
+                        stable = record.sender
+                        hay = "" if stable is None else normalize_search_text(f"{stable.id} {stable.username or ''}")
+                        if sender_cf not in hay:
+                            continue
+                    filtered.append(record)
+                filtered = stable_message_sort(filtered, reverse=True)
+                offset = self._cursor_offset(cursor, "search")
+                page = filtered[offset : offset + limit]
+                return Page(tuple(page), self._next_cursor("search", offset, limit, len(filtered)), len(messages))
 
         return self._run(work())
 
     def get_message(self, *, chat: str, message_id: int) -> MessageRecord:
         async def work() -> MessageRecord:
-            client = await self._make_client()
-            entity = await self._resolve(client, chat)
-            getter = client.get_messages(entity, ids=message_id)
-            msg = await getter if hasattr(getter, "__await__") else getter
-            if msg is None:
-                raise BridgeError("Message not found", status=404, code="message_not_found")
-            return await self._message_record(msg, str(getattr(entity, "id", chat)))
+            async with self._client_session() as client:
+                entity = await self._resolve(client, chat)
+                msg = await self._maybe_await(client.get_messages(entity, ids=message_id))
+                if msg is None:
+                    raise BridgeError("Message not found", status=404, code="message_not_found")
+                return await self._message_record(msg, str(getattr(entity, "id", chat)))
 
         return self._run(work())
 
     def download_media(self, *, chat: str, message_id: int, file_ref: str, destination: str) -> dict[str, Any]:
         async def work() -> dict[str, Any]:
-            client = await self._make_client()
-            entity = await self._resolve(client, chat)
-            getter = client.get_messages(entity, ids=message_id)
-            msg = await getter if hasattr(getter, "__await__") else getter
-            if msg is None:
-                raise BridgeError("Message not found", status=404, code="message_not_found")
-            media = self._media_records(msg)
-            if not media or all(item.file_ref != file_ref for item in media):
-                raise BridgeError("File reference does not match message", status=404, code="file_not_found")
-            result = client.download_media(msg, file=destination)
-            path = await result if hasattr(result, "__await__") else result
-            if not path:
-                raise BridgeError("Telegram media download failed", status=502, code="media_download_failed")
-            return {"path": str(path)}
+            async with self._client_session() as client:
+                entity = await self._resolve(client, chat)
+                msg = await self._maybe_await(client.get_messages(entity, ids=message_id))
+                if msg is None:
+                    raise BridgeError("Message not found", status=404, code="message_not_found")
+                media = self._media_records(msg)
+                if not media or all(item.file_ref != file_ref for item in media):
+                    raise BridgeError("File reference does not match message", status=404, code="file_not_found")
+                path = await self._maybe_await(client.download_media(msg, file=destination))
+                if not path:
+                    raise BridgeError("Telegram media download failed", status=502, code="media_download_failed")
+                return {"path": str(path)}
 
         return self._run(work())

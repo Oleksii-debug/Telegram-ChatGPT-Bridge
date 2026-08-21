@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import secrets
 import sqlite3
 import stat
@@ -16,6 +17,9 @@ from typing import Any, Iterator
 
 from .errors import BridgeError
 from .validation import validate_file_ref
+
+_JOB_ID_RE = re.compile(r"^[A-Za-z0-9_-]{16,128}$")
+_CODE_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 
 
 @dataclass(frozen=True)
@@ -50,8 +54,8 @@ class FileRecordStore:
                 os.chmod(directory, 0o700)
             except OSError:
                 pass
-        with self._connect() as con:
-            con.execute(
+        with self._connect() as connection:
+            connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS files (
                     file_ref TEXT PRIMARY KEY,
@@ -64,17 +68,17 @@ class FileRecordStore:
                 )
                 """
             )
-            con.commit()
+            connection.commit()
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
-        con = sqlite3.connect(str(self.db_path), timeout=8.0)
+        connection = sqlite3.connect(str(self.db_path), timeout=8.0)
         try:
-            con.execute("PRAGMA journal_mode=WAL")
-            con.execute("PRAGMA synchronous=FULL")
-            yield con
+            connection.execute("PRAGMA journal_mode=WAL")
+            connection.execute("PRAGMA synchronous=FULL")
+            yield connection
         finally:
-            con.close()
+            connection.close()
 
     def _relative_path(self, path: Path) -> str:
         try:
@@ -85,35 +89,34 @@ class FileRecordStore:
             raise BridgeError("Unsafe file topology", status=500, code="unsafe_file_topology")
         resolved = path.resolve(strict=True)
         try:
-            rel = resolved.relative_to(self.root)
+            relative = resolved.relative_to(self.root)
         except ValueError as exc:
             raise BridgeError("File is outside private storage", status=500, code="unsafe_file_path") from exc
-        st = os.lstat(resolved)
-        if not stat.S_ISREG(st.st_mode) or resolved.is_symlink() or st.st_nlink != 1:
+        resolved_stat = os.lstat(resolved)
+        if not stat.S_ISREG(resolved_stat.st_mode) or resolved.is_symlink() or resolved_stat.st_nlink != 1:
             raise BridgeError("Unsafe file topology", status=500, code="unsafe_file_topology")
-        return rel.as_posix()
+        return relative.as_posix()
 
     @staticmethod
     def _hash(path: Path) -> str:
         digest = hashlib.sha256()
-        with path.open("rb") as fh:
-            for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
                 digest.update(chunk)
         return digest.hexdigest()
 
     def add(self, path: Path, *, name: str, mime_type: str = "application/octet-stream") -> FileRecord:
-        rel = self._relative_path(path)
+        relative = self._relative_path(path)
         size = path.stat().st_size
         sha256 = self._hash(path)
         now = int(time.time())
-        # 32 URL-safe characters (~192 bits) and no relationship to server path.
         file_ref = secrets.token_urlsafe(24)
-        with self._connect() as con:
-            con.execute(
+        with self._connect() as connection:
+            connection.execute(
                 "INSERT INTO files(file_ref,rel_path,name,mime_type,size,sha256,created_at) VALUES (?,?,?,?,?,?,?)",
-                (file_ref, rel, name[:180], mime_type[:160], size, sha256, now),
+                (file_ref, relative, name[:180], mime_type[:160], size, sha256, now),
             )
-            con.commit()
+            connection.commit()
         return FileRecord(file_ref, str(path.resolve()), name[:180], mime_type[:160], size, sha256, now)
 
     def get(self, file_ref: str) -> FileRecord | None:
@@ -121,8 +124,8 @@ class FileRecordStore:
             safe_ref = validate_file_ref(file_ref)
         except BridgeError:
             return None
-        with self._connect() as con:
-            row = con.execute(
+        with self._connect() as connection:
+            row = connection.execute(
                 "SELECT rel_path,name,mime_type,size,sha256,created_at FROM files WHERE file_ref=?",
                 (safe_ref,),
             ).fetchone()
@@ -130,22 +133,38 @@ class FileRecordStore:
             return None
         candidate = (self.root / row[0]).resolve()
         try:
-            rel = candidate.relative_to(self.root)
+            relative = candidate.relative_to(self.root)
         except ValueError:
             return None
-        if rel.as_posix() != row[0]:
+        if relative.as_posix() != row[0]:
             return None
         try:
-            st = os.lstat(candidate)
+            candidate_stat = os.lstat(candidate)
         except OSError:
             return None
-        if not stat.S_ISREG(st.st_mode) or candidate.is_symlink() or st.st_nlink != 1:
+        if not stat.S_ISREG(candidate_stat.st_mode) or candidate.is_symlink() or candidate_stat.st_nlink != 1:
             return None
-        if st.st_size != int(row[3]):
+        if candidate_stat.st_size != int(row[3]):
             return None
         if not secrets.compare_digest(self._hash(candidate), str(row[4])):
             return None
         return FileRecord(safe_ref, str(candidate), row[1], row[2], int(row[3]), row[4], int(row[5]))
+
+    def delete(self, file_ref: str) -> bool:
+        """Remove a registered private file and its registry row safely."""
+        record = self.get(file_ref)
+        if record is None:
+            return False
+        with self._connect() as connection:
+            cursor = connection.execute("DELETE FROM files WHERE file_ref=?", (record.file_ref,))
+            connection.commit()
+        try:
+            Path(record.path).unlink(missing_ok=True)
+        except OSError:
+            # A removed DB row is safer than retaining a public reference to an
+            # unverifiable path. Private cleanup can retry separately.
+            pass
+        return cursor.rowcount == 1
 
 
 @dataclass(frozen=True)
@@ -173,8 +192,8 @@ class CheckpointStore:
             os.chmod(self.db_path.parent, 0o700)
         except OSError:
             pass
-        with self._connect() as con:
-            con.execute(
+        with self._connect() as connection:
+            connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS download_jobs (
                     job_id TEXT PRIMARY KEY,
@@ -184,34 +203,42 @@ class CheckpointStore:
                 )
                 """
             )
-            con.commit()
+            connection.commit()
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
-        con = sqlite3.connect(str(self.db_path), timeout=8.0)
+        connection = sqlite3.connect(str(self.db_path), timeout=8.0)
         try:
-            con.execute("PRAGMA journal_mode=WAL")
-            con.execute("PRAGMA synchronous=FULL")
-            yield con
+            connection.execute("PRAGMA journal_mode=WAL")
+            connection.execute("PRAGMA synchronous=FULL")
+            yield connection
         finally:
-            con.close()
+            connection.close()
 
     @staticmethod
     def _canonical(payload: dict[str, Any]) -> bytes:
         return json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+    @staticmethod
+    def _safe_job_id(value: Any) -> str:
+        if not isinstance(value, str) or not _JOB_ID_RE.fullmatch(value):
+            raise BridgeError("Download checkpoint is corrupt", status=500, code="checkpoint_corrupt")
+        return value
 
     def _validate(self, payload: dict[str, Any]) -> None:
         if set(payload) != {"schema", "job_id", "status", "items", "results", "failures"}:
             raise BridgeError("Download checkpoint is corrupt", status=500, code="checkpoint_corrupt")
         if payload["schema"] != self.SCHEMA:
             raise BridgeError("Download checkpoint schema is unsupported", status=500, code="checkpoint_schema")
+        self._safe_job_id(payload["job_id"])
         if payload["status"] not in {"pending", "running", "partial", "complete", "failed"}:
             raise BridgeError("Download checkpoint is corrupt", status=500, code="checkpoint_corrupt")
-        if not isinstance(payload["items"], list) or len(payload["items"]) > 500:
+        if not isinstance(payload["items"], list) or not payload["items"] or len(payload["items"]) > 500:
             raise BridgeError("Download checkpoint is corrupt", status=500, code="checkpoint_corrupt")
         if not isinstance(payload["results"], dict) or not isinstance(payload["failures"], dict):
             raise BridgeError("Download checkpoint is corrupt", status=500, code="checkpoint_corrupt")
-        ids: set[str] = set()
+
+        item_ids: set[str] = set()
         for raw in payload["items"]:
             if not isinstance(raw, dict):
                 raise BridgeError("Download checkpoint is corrupt", status=500, code="checkpoint_corrupt")
@@ -219,10 +246,48 @@ class CheckpointStore:
                 item = DownloadItem(**raw)
             except (TypeError, ValueError) as exc:
                 raise BridgeError("Download checkpoint is corrupt", status=500, code="checkpoint_corrupt") from exc
-            if item.item_id in ids or not item.item_id:
+            if (
+                not isinstance(item.item_id, str)
+                or not re.fullmatch(r"[0-9a-f]{32}", item.item_id)
+                or item.item_id in item_ids
+                or not isinstance(item.chat, str)
+                or not item.chat
+                or isinstance(item.message_id, bool)
+                or not isinstance(item.message_id, int)
+                or item.message_id <= 0
+            ):
                 raise BridgeError("Download checkpoint is corrupt", status=500, code="checkpoint_corrupt")
-            ids.add(item.item_id)
-        if not set(payload["results"]).issubset(ids) or not set(payload["failures"]).issubset(ids):
+            try:
+                validate_file_ref(item.source_file_ref)
+            except BridgeError as exc:
+                raise BridgeError("Download checkpoint is corrupt", status=500, code="checkpoint_corrupt") from exc
+            if item.expected_size is not None and (
+                isinstance(item.expected_size, bool) or not isinstance(item.expected_size, int) or item.expected_size < 0
+            ):
+                raise BridgeError("Download checkpoint is corrupt", status=500, code="checkpoint_corrupt")
+            if item.expected_sha256 is not None and not re.fullmatch(r"[0-9a-f]{64}", item.expected_sha256):
+                raise BridgeError("Download checkpoint is corrupt", status=500, code="checkpoint_corrupt")
+            item_ids.add(item.item_id)
+
+        if not set(payload["results"]).issubset(item_ids) or not set(payload["failures"]).issubset(item_ids):
+            raise BridgeError("Download checkpoint is corrupt", status=500, code="checkpoint_corrupt")
+        if set(payload["results"]) & set(payload["failures"]):
+            raise BridgeError("Download checkpoint is corrupt", status=500, code="checkpoint_corrupt")
+        for file_ref in payload["results"].values():
+            try:
+                validate_file_ref(file_ref)
+            except BridgeError as exc:
+                raise BridgeError("Download checkpoint is corrupt", status=500, code="checkpoint_corrupt") from exc
+        for info in payload["failures"].values():
+            if not isinstance(info, dict) or set(info) != {"code", "status", "retryable"}:
+                raise BridgeError("Download checkpoint is corrupt", status=500, code="checkpoint_corrupt")
+            if not isinstance(info["code"], str) or not _CODE_RE.fullmatch(info["code"]):
+                raise BridgeError("Download checkpoint is corrupt", status=500, code="checkpoint_corrupt")
+            if isinstance(info["status"], bool) or not isinstance(info["status"], int) or not 400 <= info["status"] <= 599:
+                raise BridgeError("Download checkpoint is corrupt", status=500, code="checkpoint_corrupt")
+            if not isinstance(info["retryable"], bool):
+                raise BridgeError("Download checkpoint is corrupt", status=500, code="checkpoint_corrupt")
+        if payload["status"] == "complete" and set(payload["results"]) != item_ids:
             raise BridgeError("Download checkpoint is corrupt", status=500, code="checkpoint_corrupt")
 
     def create(self, items: list[DownloadItem]) -> str:
@@ -245,8 +310,8 @@ class CheckpointStore:
         raw = self._canonical(payload)
         digest = hashlib.sha256(raw).hexdigest()
         now = int(time.time())
-        with self._connect() as con:
-            con.execute(
+        with self._connect() as connection:
+            connection.execute(
                 """
                 INSERT INTO download_jobs(job_id,payload_json,payload_sha256,updated_at)
                 VALUES (?,?,?,?)
@@ -257,13 +322,13 @@ class CheckpointStore:
                 """,
                 (payload["job_id"], raw.decode("utf-8"), digest, now),
             )
-            con.commit()
+            connection.commit()
 
     def load(self, job_id: str) -> dict[str, Any]:
-        if not isinstance(job_id, str) or len(job_id) > 128:
+        if not isinstance(job_id, str) or not _JOB_ID_RE.fullmatch(job_id):
             raise BridgeError("Download job not found", status=404, code="job_not_found")
-        with self._connect() as con:
-            row = con.execute(
+        with self._connect() as connection:
+            row = connection.execute(
                 "SELECT payload_json,payload_sha256 FROM download_jobs WHERE job_id=?", (job_id,)
             ).fetchone()
         if not row:
@@ -278,4 +343,6 @@ class CheckpointStore:
         if not isinstance(payload, dict):
             raise BridgeError("Download checkpoint is corrupt", status=500, code="checkpoint_corrupt")
         self._validate(payload)
+        if payload["job_id"] != job_id:
+            raise BridgeError("Download checkpoint identity mismatch", status=500, code="checkpoint_corrupt")
         return payload

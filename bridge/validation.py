@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Iterable
+from typing import Any
 
 from .errors import BridgeError
 
@@ -23,19 +23,17 @@ def require_dict(value: Any, field: str = "body") -> dict[str, Any]:
 def bounded_int(value: Any, *, field: str, default: int, minimum: int, maximum: int) -> int:
     if value is None:
         return default
-    if isinstance(value, bool):
+    # JSON-facing integer fields are intentionally strict. Floats and numeric
+    # strings are rejected rather than silently truncated/coerced.
+    if isinstance(value, bool) or not isinstance(value, int):
         raise BridgeError(f"{field} must be an integer", code="invalid_integer", details={"field": field})
-    try:
-        parsed = int(value)
-    except (TypeError, ValueError) as exc:
-        raise BridgeError(f"{field} must be an integer", code="invalid_integer", details={"field": field}) from exc
-    if parsed < minimum or parsed > maximum:
+    if value < minimum or value > maximum:
         raise BridgeError(
             f"{field} is outside the allowed range",
             code="invalid_range",
             details={"field": field, "limit": maximum},
         )
-    return parsed
+    return value
 
 
 def bounded_text(value: Any, *, field: str, maximum: int = MAX_TEXT_QUERY, allow_empty: bool = True) -> str:
@@ -49,14 +47,14 @@ def bounded_text(value: Any, *, field: str, maximum: int = MAX_TEXT_QUERY, allow
         raise BridgeError(f"{field} is too long", code="text_too_long", details={"field": field, "limit": maximum})
     if not allow_empty and not value.strip():
         raise BridgeError(f"{field} is required", code="field_required", details={"field": field})
-    if any(ord(ch) == 0 for ch in value):
+    if any(ord(character) == 0 or 0xD800 <= ord(character) <= 0xDFFF for character in value):
         raise BridgeError(f"{field} contains invalid characters", code="invalid_text", details={"field": field})
     return value
 
 
 def entity_ref(value: Any, *, field: str = "chat") -> str:
     raw = bounded_text(value, field=field, maximum=MAX_ENTITY_REF, allow_empty=False).strip()
-    if any(ch in raw for ch in "\r\n\x00"):
+    if any(character in raw for character in "\r\n\x00"):
         raise BridgeError(f"{field} is invalid", code="invalid_entity", details={"field": field})
     return raw
 
@@ -74,15 +72,15 @@ def string_list(value: Any, *, field: str, allowed: set[str] | None = None) -> t
         return ()
     if not isinstance(value, list) or len(value) > MAX_LIST_ITEMS:
         raise BridgeError(f"{field} must be a bounded list", code="invalid_list", details={"field": field, "limit": MAX_LIST_ITEMS})
-    out: list[str] = []
+    output: list[str] = []
     for item in value:
         if not isinstance(item, str) or not item or len(item) > 64:
             raise BridgeError(f"{field} contains an invalid value", code="invalid_list", details={"field": field})
         normalized = item.casefold()
         if allowed is not None and normalized not in allowed:
             raise BridgeError(f"{field} contains an unsupported value", code="invalid_list", details={"field": field})
-        out.append(normalized)
-    return tuple(dict.fromkeys(out))
+        output.append(normalized)
+    return tuple(dict.fromkeys(output))
 
 
 def parse_datetime(value: Any, *, field: str) -> datetime | None:
@@ -94,12 +92,12 @@ def parse_datetime(value: Any, *, field: str) -> datetime | None:
     if raw.endswith("Z"):
         raw = raw[:-1] + "+00:00"
     try:
-        dt = datetime.fromisoformat(raw)
+        parsed = datetime.fromisoformat(raw)
     except ValueError as exc:
         raise BridgeError(f"{field} must be ISO 8601", code="invalid_date", details={"field": field}) from exc
-    if dt.tzinfo is None:
+    if parsed.tzinfo is None:
         raise BridgeError(f"{field} must include a timezone", code="timezone_required", details={"field": field})
-    return dt.astimezone(timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 @dataclass(frozen=True)
@@ -107,8 +105,8 @@ class DateRange:
     start: datetime | None
     end: datetime | None
 
-    def contains(self, dt: datetime) -> bool:
-        current = dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+    def contains(self, value: datetime) -> bool:
+        current = value if value.tzinfo else value.replace(tzinfo=timezone.utc)
         current = current.astimezone(timezone.utc)
         # Contract: both endpoints are inclusive.
         if self.start is not None and current < self.start:
@@ -131,8 +129,6 @@ def normalize_search_text(value: str) -> str:
 
 def validate_file_ref(value: Any) -> str:
     raw = bounded_text(value, field="file_ref", maximum=128, allow_empty=False)
-    # Opaque references are URL-safe base64-ish identifiers only; paths and
-    # platform separators are rejected before storage lookup.
     if not re.fullmatch(r"[A-Za-z0-9_-]{16,128}", raw):
         raise BridgeError("Invalid file reference", status=404, code="file_not_found")
     return raw
