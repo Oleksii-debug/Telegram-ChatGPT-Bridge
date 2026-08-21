@@ -2,9 +2,9 @@
 """Machine-readable acceptance planning, auth-gate and evidence helpers.
 
 Planning states describe harness readiness only. They are never product PASS.
-Real PASS/FAIL/BLOCKED evidence requires an exact code SHA, an environment class
-and a compact non-secret evidence reference. Public evidence uses a positive,
-typed fact schema; arbitrary prose/private Telegram content is not accepted.
+Real PASS/FAIL/BLOCKED evidence requires an exact code SHA, a semantic environment
+class and a structured non-secret evidence reference. Public evidence uses a
+positive typed schema; arbitrary prose/private Telegram content is not accepted.
 """
 from __future__ import annotations
 
@@ -89,39 +89,30 @@ _ROWS = [
     ("K4", "Ask for a draft/preview reply; no message is sent before explicit commit.", "EXTERNALLY_BLOCKED"),
     ("K5", "Explicitly commit a test message to a safe destination and verify exactly one send.", "EXTERNALLY_BLOCKED"),
 ]
-ACCEPTANCE_MATRIX = [
-    {"criterion": criterion, "description": description, "plan_status": status}
-    for criterion, description, status in _ROWS
-]
+ACCEPTANCE_MATRIX = [{"criterion": c, "description": d, "plan_status": s} for c, d, s in _ROWS]
 CRITERIA = {item["criterion"]: item for item in ACCEPTANCE_MATRIX}
 
 COMMON_FACT_KEYS = {
     "success", "count", "duration_ms", "timeout_ms", "retry_count", "attempt",
     "return_code", "http_status", "status_code", "state", "reason_code",
     "reason_codes", "checks", "contract_status", "error_type", "error_present",
+    "retry_after_seconds", "raw_text_absent",
 }
 GROUP_FACT_KEYS = {
     "A": {"observed_sha", "restart_safe", "state_preserved"},
     "B": {"authorized", "findings_count", "tree_scan_passed", "history_scan_passed", "artifact_count", "rate_limit_remaining", "file_count", "scan_scope"},
     "C": {"auth_state", "state_preserved", "restart_safe", "recoverable"},
     "D": {"result_count", "page_count", "identifier_hashes"},
-    "E": {"file_count", "file_hashes", "file_sha256", "deduplicated", "recoverable", "private_serving_enforced", "media_kind"},
-    "F": {"preview_only", "commit_single_use", "audit_recorded", "operation_kind", "payload_sha256", "identifier_sha256", "preview_state", "commit_state", "deduplicated"},
-    "G": {"state_preserved", "restart_safe", "recoverable", "job_state", "job_checkpoint", "deduplicated"},
-    "H": {"schema_valid", "authorized", "preview_only", "commit_single_use", "operation_kind"},
-    "I": {"keyboard_operable", "labels_present", "accessible_names_present", "heading_order_valid", "tab_order_valid", "mouse_only_absent"},
+    "E": {"file_count", "file_hashes", "file_sha256", "deduplicated", "recoverable", "private_serving_enforced", "media_kind", "path_sha256"},
+    "F": {"preview_only", "commit_single_use", "audit_recorded", "operation_kind", "payload_sha256", "identifier_sha256", "request_sha256", "preview_state", "commit_state", "deduplicated"},
+    "G": {"state_preserved", "restart_safe", "recoverable", "job_state", "job_checkpoint", "deduplicated", "request_sha256"},
+    "H": {"schema_valid", "authorized", "preview_only", "commit_single_use", "operation_kind", "route_registry_matched", "structured_errors_valid"},
+    "I": {"keyboard_operable", "labels_present", "accessible_names_present", "heading_order_valid", "tab_order_valid", "mouse_only_absent", "status_messages_accessible", "error_associations_valid", "focus_reachable", "focusable_count", "findings_count"},
     "J": {"backup_created", "backup_sha256", "state_preserved", "persistent_state_preserved", "persistent_entries_count", "previous_sha", "candidate_sha", "deployed_sha", "observed_sha", "rollback_state", "quiesced", "resumed", "manifest_sha256"},
     "K": {"result_count", "file_count", "preview_only", "commit_single_use", "operation_kind", "identifier_sha256", "success"},
 }
-CRITERION_FACT_KEYS = {
-    criterion: COMMON_FACT_KEYS | GROUP_FACT_KEYS[criterion[0]]
-    for criterion in CRITERIA
-}
-
-RESULT_KEYS = {
-    "schema_version", "criterion", "code_sha", "environment_class",
-    "result", "evidence_ref", "facts",
-}
+CRITERION_FACT_KEYS = {criterion: COMMON_FACT_KEYS | GROUP_FACT_KEYS[criterion[0]] for criterion in CRITERIA}
+RESULT_KEYS = {"schema_version", "criterion", "code_sha", "environment_class", "result", "evidence_ref", "facts"}
 
 
 def validate_matrix() -> None:
@@ -157,9 +148,7 @@ def validate_result_payload(payload: Any) -> dict[str, Any]:
     if payload.get("result") not in RESULT_STATUSES:
         raise ValueError("invalid result status")
     privacy.validate_evidence_ref(payload.get("evidence_ref"))
-    payload["facts"] = privacy.validate_facts(
-        payload.get("facts"), allowed_keys=CRITERION_FACT_KEYS[criterion]
-    )
+    payload["facts"] = privacy.validate_facts(payload.get("facts"), allowed_keys=CRITERION_FACT_KEYS[criterion])
     privacy.validate_aggregate_payload(payload)
     return payload
 
@@ -179,7 +168,6 @@ def build_result(*, criterion: str, code_sha: str, environment_class: str,
 
 
 def serialize_result(payload: dict[str, Any]) -> str:
-    # Revalidate independently so callers cannot hand us a mutated/prebuilt unsafe dict.
     validated = validate_result_payload(dict(payload))
     return json.dumps(validated, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
@@ -189,18 +177,10 @@ def evaluate_telegram_auth_gate(*, sanitized_application_source_ready: bool,
                                 server_setup_ready: bool,
                                 setup_session_is_first_human_blocker: bool,
                                 synthetic_only: bool = False) -> dict[str, Any]:
-    """Compute when one-time human Telegram authorization is genuinely required.
-
-    No credential values are accepted by this function. It is a control-plane policy,
-    not a Telegram login implementation.
-    """
-    inputs = (
-        sanitized_application_source_ready, passenger_runtime_verified,
-        server_setup_ready, setup_session_is_first_human_blocker, synthetic_only,
-    )
+    inputs = (sanitized_application_source_ready, passenger_runtime_verified, server_setup_ready,
+              setup_session_is_first_human_blocker, synthetic_only)
     if any(not isinstance(item, bool) for item in inputs):
         raise ValueError("Telegram auth gate inputs must be booleans")
-
     reasons: list[str] = []
     if synthetic_only:
         reasons.append("SYNTHETIC_TEST_ONLY")
@@ -212,14 +192,12 @@ def evaluate_telegram_auth_gate(*, sanitized_application_source_ready: bool,
         reasons.append("SERVER_SETUP_NOT_READY")
     if not setup_session_is_first_human_blocker:
         reasons.append("HUMAN_INPUT_NOT_FIRST_BLOCKER")
-
     if reasons:
         return {"state": AUTH_NOT_YET_REQUIRED, "reason_codes": reasons}
     return {"state": AUTH_REQUIRED, "reason_codes": ["SERVER_SETUP_FIRST_HUMAN_BLOCKER"]}
 
 
 def current_planning_auth_gate() -> dict[str, Any]:
-    """Current handoff facts: source/runtime remain earlier blockers, so user auth is premature."""
     return evaluate_telegram_auth_gate(
         sanitized_application_source_ready=False,
         passenger_runtime_verified=False,
