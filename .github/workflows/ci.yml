@@ -38,6 +38,7 @@ jobs:
           tests/test_audit_round7.py
           tests/test_audit_round8.py
           tests/test_audit_round9.py
+          tests/test_audit_round10.py
           tests/test_acceptance_harness.py
           tests/test_baseline_reconcile.py
           tests/test_runtime_evidence.py
