@@ -1,9 +1,10 @@
 # -*- coding: utf-8 -*-
-"""Machine-readable acceptance planning/evidence helpers for Telegram Bridge.
+"""Machine-readable acceptance planning, auth-gate and evidence helpers.
 
-This module does not claim product PASS. Planning states describe harness readiness only.
-Real PASS/FAIL/BLOCKED evidence is emitted separately and must name an exact code SHA,
-environment class and non-secret evidence reference.
+Planning states describe harness readiness only. They are never product PASS.
+Real PASS/FAIL/BLOCKED evidence requires an exact code SHA, an environment class
+and a compact non-secret evidence reference. Public evidence uses a positive,
+typed fact schema; arbitrary prose/private Telegram content is not accepted.
 """
 from __future__ import annotations
 
@@ -11,111 +12,116 @@ import json
 import re
 from typing import Any
 
+from ops import evidence_privacy as privacy
+
 PLAN_STATUSES = {"IMPLEMENTED_TEST", "READY_FOR_REAL_SOURCE", "EXTERNALLY_BLOCKED", "NOT_IMPLEMENTED"}
 RESULT_STATUSES = {"PASS", "FAIL", "BLOCKED"}
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
-SAFE_ENV_RE = re.compile(r"^[A-Za-z0-9._-]{1,80}$")
-SAFE_REF_RE = re.compile(r"^[A-Za-z0-9._:/#-]{1,240}$")
-FORBIDDEN_KEYS = {
-    "token", "bearer", "authorization", "api_hash", "api_id", "session",
-    "session_string", "password", "2fa", "phone", "login_code", "code",
-    "nonce", "setup_route", "message_body", "message_text", "file_content",
-    "private_content", "media_content", "cookie", "cookies",
-}
+AUTH_NOT_YET_REQUIRED = "USER_TELEGRAM_AUTH_NOT_YET_REQUIRED"
+AUTH_REQUIRED = "USER_TELEGRAM_AUTH_REQUIRED"
 
-ACCEPTANCE_MATRIX = [
-    {"criterion": "A1", "description": "Python 3.11 compile/import checks pass.", "plan_status": "READY_FOR_REAL_SOURCE"},
-    {"criterion": "A2", "description": "WSGI application imports successfully.", "plan_status": "READY_FOR_REAL_SOURCE"},
-    {"criterion": "A3", "description": "Health endpoint responds within timeout.", "plan_status": "READY_FOR_REAL_SOURCE"},
-    {"criterion": "A4", "description": "Invalid route does not leak stack traces/secrets.", "plan_status": "READY_FOR_REAL_SOURCE"},
-    {"criterion": "A5", "description": "Restart preserves private session/config.", "plan_status": "READY_FOR_REAL_SOURCE"},
-    {"criterion": "B1", "description": "Protected endpoints reject missing bearer/auth.", "plan_status": "READY_FOR_REAL_SOURCE"},
-    {"criterion": "B2", "description": "Wrong token cannot retrieve Telegram content.", "plan_status": "READY_FOR_REAL_SOURCE"},
-    {"criterion": "B3", "description": "Logs do not contain API hash, session, 2FA, bearer token, message bodies or private file contents.", "plan_status": "READY_FOR_REAL_SOURCE"},
-    {"criterion": "B4", "description": "Repository/history/PR/Actions artifacts contain no secrets.", "plan_status": "IMPLEMENTED_TEST"},
-    {"criterion": "B5", "description": "Path traversal attempts are rejected.", "plan_status": "READY_FOR_REAL_SOURCE"},
-    {"criterion": "B6", "description": "File IDs cannot be used to read arbitrary server files.", "plan_status": "READY_FOR_REAL_SOURCE"},
-    {"criterion": "B7", "description": "Malformed JSON/parameters return controlled errors.", "plan_status": "READY_FOR_REAL_SOURCE"},
-    {"criterion": "B8", "description": "Rate limits prevent obvious abuse.", "plan_status": "READY_FOR_REAL_SOURCE"},
-    {"criterion": "C1", "description": "One-time setup is keyboard/NVDA accessible.", "plan_status": "READY_FOR_REAL_SOURCE"},
-    {"criterion": "C2", "description": "Setup route is protected/one-time and disabled/rotated after successful setup as designed.", "plan_status": "READY_FOR_REAL_SOURCE"},
-    {"criterion": "C3", "description": "Code request/auth flow handles Telegram errors safely.", "plan_status": "READY_FOR_REAL_SOURCE"},
-    {"criterion": "C4", "description": "2FA flow works when required.", "plan_status": "READY_FOR_REAL_SOURCE"},
-    {"criterion": "C5", "description": "Restart does not lose the authorized session.", "plan_status": "READY_FOR_REAL_SOURCE"},
-    {"criterion": "C6", "description": "FloodWait/RPC failures are handled without corrupting state.", "plan_status": "READY_FOR_REAL_SOURCE"},
-    {"criterion": "D1", "description": "List dialogs works.", "plan_status": "READY_FOR_REAL_SOURCE"},
-    {"criterion": "D2", "description": "Read history returns correct ordering and pagination.", "plan_status": "READY_FOR_REAL_SOURCE"},
-    {"criterion": "D3", "description": "Global/scoped search works.", "plan_status": "READY_FOR_REAL_SOURCE"},
-    {"criterion": "D4", "description": "Filters by chat/person/text/date behave correctly.", "plan_status": "READY_FOR_REAL_SOURCE"},
-    {"criterion": "D5", "description": "Unicode/Cyrillic text remains intact.", "plan_status": "READY_FOR_REAL_SOURCE"},
-    {"criterion": "D6", "description": "Empty/no-result cases are controlled.", "plan_status": "READY_FOR_REAL_SOURCE"},
-    {"criterion": "E1", "description": "Metadata listing works for documents/media/voice/photo where supported.", "plan_status": "READY_FOR_REAL_SOURCE"},
-    {"criterion": "E2", "description": "Single-file download works and validates expected file.", "plan_status": "READY_FOR_REAL_SOURCE"},
-    {"criterion": "E3", "description": "Bulk download applies requested filters and does not duplicate files.", "plan_status": "READY_FOR_REAL_SOURCE"},
-    {"criterion": "E4", "description": "ZIP generation produces a valid archive.", "plan_status": "READY_FOR_REAL_SOURCE"},
-    {"criterion": "E5", "description": "Interrupted/failed download leaves recoverable state and useful error.", "plan_status": "READY_FOR_REAL_SOURCE"},
-    {"criterion": "E6", "description": "Downloaded private files are not exposed by unauthenticated public URLs.", "plan_status": "READY_FOR_REAL_SOURCE"},
-    {"criterion": "F1", "description": "Send has preview stage.", "plan_status": "READY_FOR_REAL_SOURCE"},
-    {"criterion": "F2", "description": "Reply has preview stage and correct reply target.", "plan_status": "READY_FOR_REAL_SOURCE"},
-    {"criterion": "F3", "description": "Forward has preview stage.", "plan_status": "READY_FOR_REAL_SOURCE"},
-    {"criterion": "F4", "description": "Send-files has preview stage.", "plan_status": "READY_FOR_REAL_SOURCE"},
-    {"criterion": "F5", "description": "Commit requires a valid single-use preview token or equivalent approved mechanism.", "plan_status": "READY_FOR_REAL_SOURCE"},
-    {"criterion": "F6", "description": "Repeating the same commit does not duplicate the action.", "plan_status": "READY_FOR_REAL_SOURCE"},
-    {"criterion": "F7", "description": "Expired/used/invalid preview token fails safely.", "plan_status": "READY_FOR_REAL_SOURCE"},
-    {"criterion": "F8", "description": "Audit metadata records operation without recording private body/secrets.", "plan_status": "READY_FOR_REAL_SOURCE"},
-    {"criterion": "G1", "description": "Idempotency store behaves correctly under retry.", "plan_status": "READY_FOR_REAL_SOURCE"},
-    {"criterion": "G2", "description": "Duplicate protection survives reasonable restart/retry scenarios.", "plan_status": "READY_FOR_REAL_SOURCE"},
-    {"criterion": "G3", "description": "Timeouts are explicit.", "plan_status": "READY_FOR_REAL_SOURCE"},
-    {"criterion": "G4", "description": "Errors do not leave corrupt DB/job state.", "plan_status": "READY_FOR_REAL_SOURCE"},
-    {"criterion": "G5", "description": "Jobs can be resumed/retried safely where designed.", "plan_status": "READY_FOR_REAL_SOURCE"},
-    {"criterion": "H1", "description": "Generated OpenAPI schema matches deployed endpoints.", "plan_status": "READY_FOR_REAL_SOURCE"},
-    {"criterion": "H2", "description": "Read-only Action calls work end-to-end.", "plan_status": "EXTERNALLY_BLOCKED"},
-    {"criterion": "H3", "description": "Unauthorized calls fail without data leakage.", "plan_status": "READY_FOR_REAL_SOURCE"},
-    {"criterion": "H4", "description": "Write operations preserve preview/commit safety.", "plan_status": "READY_FOR_REAL_SOURCE"},
-    {"criterion": "H5", "description": "ChatGPT receives useful structured errors.", "plan_status": "READY_FOR_REAL_SOURCE"},
-    {"criterion": "I1", "description": "Setup page is fully operable with keyboard.", "plan_status": "READY_FOR_REAL_SOURCE"},
-    {"criterion": "I2", "description": "Inputs have explicit labels.", "plan_status": "READY_FOR_REAL_SOURCE"},
-    {"criterion": "I3", "description": "Buttons have accessible names.", "plan_status": "READY_FOR_REAL_SOURCE"},
-    {"criterion": "I4", "description": "Logical Tab order.", "plan_status": "READY_FOR_REAL_SOURCE"},
-    {"criterion": "I5", "description": "Heading structure is meaningful.", "plan_status": "READY_FOR_REAL_SOURCE"},
-    {"criterion": "I6", "description": "Error/status messages are text and readable by NVDA.", "plan_status": "READY_FOR_REAL_SOURCE"},
-    {"criterion": "I7", "description": "No mouse-only control.", "plan_status": "READY_FOR_REAL_SOURCE"},
-    {"criterion": "J1", "description": "Deployed commit SHA is known.", "plan_status": "EXTERNALLY_BLOCKED"},
-    {"criterion": "J2", "description": "Backup is created before production change.", "plan_status": "IMPLEMENTED_TEST"},
-    {"criterion": "J3", "description": "Runtime secrets/session are preserved.", "plan_status": "IMPLEMENTED_TEST"},
-    {"criterion": "J4", "description": "Health/smoke tests run after deploy.", "plan_status": "EXTERNALLY_BLOCKED"},
-    {"criterion": "J5", "description": "Failed deploy can restore last-known-good release.", "plan_status": "IMPLEMENTED_TEST"},
-    {"criterion": "J6", "description": "Main branch and production state are traceable.", "plan_status": "EXTERNALLY_BLOCKED"},
-    {"criterion": "K1", "description": "Ask for list of chats and receive it.", "plan_status": "EXTERNALLY_BLOCKED"},
-    {"criterion": "K2", "description": "Ask for a person's recent messages and receive correct results.", "plan_status": "EXTERNALLY_BLOCKED"},
-    {"criterion": "K3", "description": "Ask for files from a chat/date window and receive correct package.", "plan_status": "EXTERNALLY_BLOCKED"},
-    {"criterion": "K4", "description": "Ask for a draft/preview reply; no message is sent before explicit commit.", "plan_status": "EXTERNALLY_BLOCKED"},
-    {"criterion": "K5", "description": "Explicitly commit a test message to a safe destination and verify exactly one send.", "plan_status": "EXTERNALLY_BLOCKED"},
+_ROWS = [
+    ("A1", "Python 3.11 compile/import checks pass.", "READY_FOR_REAL_SOURCE"),
+    ("A2", "WSGI application imports successfully.", "READY_FOR_REAL_SOURCE"),
+    ("A3", "Health endpoint responds within timeout.", "READY_FOR_REAL_SOURCE"),
+    ("A4", "Invalid route does not leak stack traces/secrets.", "READY_FOR_REAL_SOURCE"),
+    ("A5", "Restart preserves private session/config.", "READY_FOR_REAL_SOURCE"),
+    ("B1", "Protected endpoints reject missing bearer/auth.", "READY_FOR_REAL_SOURCE"),
+    ("B2", "Wrong token cannot retrieve Telegram content.", "READY_FOR_REAL_SOURCE"),
+    ("B3", "Logs do not contain API hash, session, 2FA, bearer token, message bodies or private file contents.", "READY_FOR_REAL_SOURCE"),
+    ("B4", "Repository/history/PR/Actions artifacts contain no secrets.", "IMPLEMENTED_TEST"),
+    ("B5", "Path traversal attempts are rejected.", "READY_FOR_REAL_SOURCE"),
+    ("B6", "File IDs cannot be used to read arbitrary server files.", "READY_FOR_REAL_SOURCE"),
+    ("B7", "Malformed JSON/parameters return controlled errors.", "READY_FOR_REAL_SOURCE"),
+    ("B8", "Rate limits prevent obvious abuse.", "READY_FOR_REAL_SOURCE"),
+    ("C1", "One-time setup is keyboard/NVDA accessible.", "READY_FOR_REAL_SOURCE"),
+    ("C2", "Setup route is protected/one-time and disabled/rotated after successful setup as designed.", "READY_FOR_REAL_SOURCE"),
+    ("C3", "Code request/auth flow handles Telegram errors safely.", "READY_FOR_REAL_SOURCE"),
+    ("C4", "2FA flow works when required.", "READY_FOR_REAL_SOURCE"),
+    ("C5", "Restart does not lose the authorized session.", "READY_FOR_REAL_SOURCE"),
+    ("C6", "FloodWait/RPC failures are handled without corrupting state.", "READY_FOR_REAL_SOURCE"),
+    ("D1", "List dialogs works.", "READY_FOR_REAL_SOURCE"),
+    ("D2", "Read history returns correct ordering and pagination.", "READY_FOR_REAL_SOURCE"),
+    ("D3", "Global/scoped search works.", "READY_FOR_REAL_SOURCE"),
+    ("D4", "Filters by chat/person/text/date behave correctly.", "READY_FOR_REAL_SOURCE"),
+    ("D5", "Unicode/Cyrillic text remains intact.", "READY_FOR_REAL_SOURCE"),
+    ("D6", "Empty/no-result cases are controlled.", "READY_FOR_REAL_SOURCE"),
+    ("E1", "Metadata listing works for documents/media/voice/photo where supported.", "READY_FOR_REAL_SOURCE"),
+    ("E2", "Single-file download works and validates expected file.", "READY_FOR_REAL_SOURCE"),
+    ("E3", "Bulk download applies requested filters and does not duplicate files.", "READY_FOR_REAL_SOURCE"),
+    ("E4", "ZIP generation produces a valid archive.", "READY_FOR_REAL_SOURCE"),
+    ("E5", "Interrupted/failed download leaves recoverable state and useful error.", "READY_FOR_REAL_SOURCE"),
+    ("E6", "Downloaded private files are not exposed by unauthenticated public URLs.", "READY_FOR_REAL_SOURCE"),
+    ("F1", "Send has preview stage.", "READY_FOR_REAL_SOURCE"),
+    ("F2", "Reply has preview stage and correct reply target.", "READY_FOR_REAL_SOURCE"),
+    ("F3", "Forward has preview stage.", "READY_FOR_REAL_SOURCE"),
+    ("F4", "Send-files has preview stage.", "READY_FOR_REAL_SOURCE"),
+    ("F5", "Commit requires a valid single-use preview token or equivalent approved mechanism.", "READY_FOR_REAL_SOURCE"),
+    ("F6", "Repeating the same commit does not duplicate the action.", "READY_FOR_REAL_SOURCE"),
+    ("F7", "Expired/used/invalid preview token fails safely.", "READY_FOR_REAL_SOURCE"),
+    ("F8", "Audit metadata records operation without recording private body/secrets.", "READY_FOR_REAL_SOURCE"),
+    ("G1", "Idempotency store behaves correctly under retry.", "READY_FOR_REAL_SOURCE"),
+    ("G2", "Duplicate protection survives reasonable restart/retry scenarios.", "READY_FOR_REAL_SOURCE"),
+    ("G3", "Timeouts are explicit.", "READY_FOR_REAL_SOURCE"),
+    ("G4", "Errors do not leave corrupt DB/job state.", "READY_FOR_REAL_SOURCE"),
+    ("G5", "Jobs can be resumed/retried safely where designed.", "READY_FOR_REAL_SOURCE"),
+    ("H1", "Generated OpenAPI schema matches deployed endpoints.", "READY_FOR_REAL_SOURCE"),
+    ("H2", "Read-only Action calls work end-to-end.", "EXTERNALLY_BLOCKED"),
+    ("H3", "Unauthorized calls fail without data leakage.", "READY_FOR_REAL_SOURCE"),
+    ("H4", "Write operations preserve preview/commit safety.", "READY_FOR_REAL_SOURCE"),
+    ("H5", "ChatGPT receives useful structured errors.", "READY_FOR_REAL_SOURCE"),
+    ("I1", "Setup page is fully operable with keyboard.", "READY_FOR_REAL_SOURCE"),
+    ("I2", "Inputs have explicit labels.", "READY_FOR_REAL_SOURCE"),
+    ("I3", "Buttons have accessible names.", "READY_FOR_REAL_SOURCE"),
+    ("I4", "Logical Tab order.", "READY_FOR_REAL_SOURCE"),
+    ("I5", "Heading structure is meaningful.", "READY_FOR_REAL_SOURCE"),
+    ("I6", "Error/status messages are text and readable by NVDA.", "READY_FOR_REAL_SOURCE"),
+    ("I7", "No mouse-only control.", "READY_FOR_REAL_SOURCE"),
+    ("J1", "Deployed commit SHA is known.", "EXTERNALLY_BLOCKED"),
+    ("J2", "Backup is created before production change.", "IMPLEMENTED_TEST"),
+    ("J3", "Runtime secrets/session are preserved.", "IMPLEMENTED_TEST"),
+    ("J4", "Health/smoke tests run after deploy.", "EXTERNALLY_BLOCKED"),
+    ("J5", "Failed deploy can restore last-known-good release.", "IMPLEMENTED_TEST"),
+    ("J6", "Main branch and production state are traceable.", "EXTERNALLY_BLOCKED"),
+    ("K1", "Ask for list of chats and receive it.", "EXTERNALLY_BLOCKED"),
+    ("K2", "Ask for a person's recent messages and receive correct results.", "EXTERNALLY_BLOCKED"),
+    ("K3", "Ask for files from a chat/date window and receive correct package.", "EXTERNALLY_BLOCKED"),
+    ("K4", "Ask for a draft/preview reply; no message is sent before explicit commit.", "EXTERNALLY_BLOCKED"),
+    ("K5", "Explicitly commit a test message to a safe destination and verify exactly one send.", "EXTERNALLY_BLOCKED"),
 ]
-
+ACCEPTANCE_MATRIX = [
+    {"criterion": criterion, "description": description, "plan_status": status}
+    for criterion, description, status in _ROWS
+]
 CRITERIA = {item["criterion"]: item for item in ACCEPTANCE_MATRIX}
 
+COMMON_FACT_KEYS = {
+    "success", "count", "duration_ms", "timeout_ms", "retry_count", "attempt",
+    "return_code", "http_status", "status_code", "state", "reason_code",
+    "reason_codes", "checks", "contract_status", "error_type", "error_present",
+}
+GROUP_FACT_KEYS = {
+    "A": {"observed_sha", "restart_safe", "state_preserved"},
+    "B": {"authorized", "findings_count", "tree_scan_passed", "history_scan_passed", "artifact_count", "rate_limit_remaining", "file_count", "scan_scope"},
+    "C": {"auth_state", "state_preserved", "restart_safe", "recoverable"},
+    "D": {"result_count", "page_count", "identifier_hashes"},
+    "E": {"file_count", "file_hashes", "file_sha256", "deduplicated", "recoverable", "private_serving_enforced", "media_kind"},
+    "F": {"preview_only", "commit_single_use", "audit_recorded", "operation_kind", "payload_sha256", "identifier_sha256", "preview_state", "commit_state", "deduplicated"},
+    "G": {"state_preserved", "restart_safe", "recoverable", "job_state", "job_checkpoint", "deduplicated"},
+    "H": {"schema_valid", "authorized", "preview_only", "commit_single_use", "operation_kind"},
+    "I": {"keyboard_operable", "labels_present", "accessible_names_present", "heading_order_valid", "tab_order_valid", "mouse_only_absent"},
+    "J": {"backup_created", "backup_sha256", "state_preserved", "persistent_state_preserved", "persistent_entries_count", "previous_sha", "candidate_sha", "deployed_sha", "observed_sha", "rollback_state", "quiesced", "resumed", "manifest_sha256"},
+    "K": {"result_count", "file_count", "preview_only", "commit_single_use", "operation_kind", "identifier_sha256", "success"},
+}
+CRITERION_FACT_KEYS = {
+    criterion: COMMON_FACT_KEYS | GROUP_FACT_KEYS[criterion[0]]
+    for criterion in CRITERIA
+}
 
-def _privacy_safe(value: Any, path: str = "root") -> None:
-    if isinstance(value, dict):
-        for key, child in value.items():
-            normalized = str(key).strip().lower()
-            if normalized in FORBIDDEN_KEYS or any(
-                needle in normalized for needle in ("secret", "credential", "private_key")
-            ):
-                raise ValueError(f"privacy-unsafe evidence field at {path}")
-            _privacy_safe(child, f"{path}.{key}")
-    elif isinstance(value, (list, tuple)):
-        for index, child in enumerate(value):
-            _privacy_safe(child, f"{path}[{index}]")
-    elif isinstance(value, str):
-        if len(value) > 1000:
-            raise ValueError("evidence string is unbounded")
-        lowered = value.lower()
-        if "-----begin " in lowered and "private key-----" in lowered:
-            raise ValueError("private key material forbidden")
-    elif value is not None and not isinstance(value, (bool, int, float)):
-        raise ValueError("unsupported evidence value")
+RESULT_KEYS = {
+    "schema_version", "criterion", "code_sha", "environment_class",
+    "result", "evidence_ref", "facts",
+}
 
 
 def validate_matrix() -> None:
@@ -136,20 +142,32 @@ def validate_matrix() -> None:
         raise ValueError("A-K groups incomplete")
 
 
-def build_result(*, criterion: str, code_sha: str, environment_class: str,
-                 result: str, evidence_ref: str, facts: dict[str, Any] | None = None) -> dict[str, Any]:
+def validate_result_payload(payload: Any) -> dict[str, Any]:
+    if not isinstance(payload, dict) or set(payload) != RESULT_KEYS:
+        raise ValueError("acceptance result schema mismatch")
+    if payload.get("schema_version") != 2:
+        raise ValueError("acceptance result schema version unsupported")
+    criterion = payload.get("criterion")
     if criterion not in CRITERIA:
         raise ValueError("unknown acceptance criterion")
-    if not SHA_RE.fullmatch(code_sha):
+    code_sha = payload.get("code_sha")
+    if not isinstance(code_sha, str) or not SHA_RE.fullmatch(code_sha):
         raise ValueError("exact 40-character code SHA required")
-    if not SAFE_ENV_RE.fullmatch(environment_class):
-        raise ValueError("invalid environment class")
-    if result not in RESULT_STATUSES:
+    privacy.validate_environment_class(payload.get("environment_class"))
+    if payload.get("result") not in RESULT_STATUSES:
         raise ValueError("invalid result status")
-    if not SAFE_REF_RE.fullmatch(evidence_ref):
-        raise ValueError("invalid evidence reference")
+    privacy.validate_evidence_ref(payload.get("evidence_ref"))
+    payload["facts"] = privacy.validate_facts(
+        payload.get("facts"), allowed_keys=CRITERION_FACT_KEYS[criterion]
+    )
+    privacy.validate_aggregate_payload(payload)
+    return payload
+
+
+def build_result(*, criterion: str, code_sha: str, environment_class: str,
+                 result: str, evidence_ref: str, facts: dict[str, Any] | None = None) -> dict[str, Any]:
     payload = {
-        "schema_version": 1,
+        "schema_version": 2,
         "criterion": criterion,
         "code_sha": code_sha,
         "environment_class": environment_class,
@@ -157,13 +175,58 @@ def build_result(*, criterion: str, code_sha: str, environment_class: str,
         "evidence_ref": evidence_ref,
         "facts": facts or {},
     }
-    _privacy_safe(payload)
-    return payload
+    return validate_result_payload(payload)
 
 
 def serialize_result(payload: dict[str, Any]) -> str:
-    _privacy_safe(payload)
-    return json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    # Revalidate independently so callers cannot hand us a mutated/prebuilt unsafe dict.
+    validated = validate_result_payload(dict(payload))
+    return json.dumps(validated, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def evaluate_telegram_auth_gate(*, sanitized_application_source_ready: bool,
+                                passenger_runtime_verified: bool,
+                                server_setup_ready: bool,
+                                setup_session_is_first_human_blocker: bool,
+                                synthetic_only: bool = False) -> dict[str, Any]:
+    """Compute when one-time human Telegram authorization is genuinely required.
+
+    No credential values are accepted by this function. It is a control-plane policy,
+    not a Telegram login implementation.
+    """
+    inputs = (
+        sanitized_application_source_ready, passenger_runtime_verified,
+        server_setup_ready, setup_session_is_first_human_blocker, synthetic_only,
+    )
+    if any(not isinstance(item, bool) for item in inputs):
+        raise ValueError("Telegram auth gate inputs must be booleans")
+
+    reasons: list[str] = []
+    if synthetic_only:
+        reasons.append("SYNTHETIC_TEST_ONLY")
+    if not sanitized_application_source_ready:
+        reasons.append("SANITIZED_SOURCE_PENDING")
+    if not passenger_runtime_verified:
+        reasons.append("PASSENGER_RUNTIME_PENDING")
+    if not server_setup_ready:
+        reasons.append("SERVER_SETUP_NOT_READY")
+    if not setup_session_is_first_human_blocker:
+        reasons.append("HUMAN_INPUT_NOT_FIRST_BLOCKER")
+
+    if reasons:
+        return {"state": AUTH_NOT_YET_REQUIRED, "reason_codes": reasons}
+    return {"state": AUTH_REQUIRED, "reason_codes": ["SERVER_SETUP_FIRST_HUMAN_BLOCKER"]}
+
+
+def current_planning_auth_gate() -> dict[str, Any]:
+    """Current handoff facts: source/runtime remain earlier blockers, so user auth is premature."""
+    return evaluate_telegram_auth_gate(
+        sanitized_application_source_ready=False,
+        passenger_runtime_verified=False,
+        server_setup_ready=False,
+        setup_session_is_first_human_blocker=False,
+        synthetic_only=False,
+    )
 
 
 validate_matrix()

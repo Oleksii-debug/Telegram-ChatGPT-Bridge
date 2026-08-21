@@ -30,7 +30,9 @@ jobs:
           ops/deploy_release.py
           ops/baseline_reconcile.py
           ops/runtime_evidence.py
+          ops/evidence_privacy.py
           ops/acceptance_harness.py
+          ops/acceptance_contracts.py
           tests/test_secret_scan.py
           tests/test_recovery_ops.py
           tests/test_audit_round5.py
@@ -40,6 +42,7 @@ jobs:
           tests/test_audit_round9.py
           tests/test_audit_round10.py
           tests/test_acceptance_harness.py
+          tests/test_acceptance_contracts.py
           tests/test_baseline_reconcile.py
           tests/test_runtime_evidence.py
       - name: Verify single deploy-capable entrypoint
