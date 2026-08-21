@@ -1,56 +1,60 @@
 # Telegram Bridge — A–K acceptance harness
 
-Source of truth: Drive document `04_ACCEPTANCE_TESTS — Telegram Bridge`.
+Source of truth: Drive `04_ACCEPTANCE_TESTS — Telegram Bridge`.
 
-The repository contains a machine-readable planning matrix in `ops/acceptance_harness.py` covering all 67 criteria A1–K5 exactly once. Planning status is not a product verdict:
+The repository contains all 67 criteria A1–K5 exactly once in `ops/acceptance_harness.py`. Planning/readiness states are not product verdicts.
 
-- `IMPLEMENTED_TEST` — reusable tooling-level test exists; real application/live PASS is not implied.
-- `READY_FOR_REAL_SOURCE` — a contract or test boundary is ready but legitimately reconciled sanitized application source is still required.
-- `EXTERNALLY_BLOCKED` — proof requires unavailable authorized HOSTiQ/live/Telegram/ChatGPT evidence.
-- `NOT_IMPLEMENTED` — no usable harness exists yet.
+## Evidence privacy — schema v2
 
-## Evidence privacy contract — schema v2
+Public/Drive evidence is a compact control-plane record, never a diagnostic transcript. Every result requires:
 
-Actual acceptance evidence uses a separate `PASS` / `FAIL` / `BLOCKED` result object. Every result must contain an exact 40-character code SHA, a bounded environment class and a compact non-secret evidence reference.
+- exact 40-character Git SHA;
+- a semantic environment class from a finite allowlist;
+- PASS / FAIL / BLOCKED result state;
+- a structured evidence reference;
+- only criterion-appropriate typed facts.
 
-`ops/evidence_privacy.py` is deliberately fail-closed and positive-schema based. Public/Drive evidence does **not** accept arbitrary free-form `facts` dictionaries. A criterion may emit only explicitly allowlisted typed facts such as:
+Environment classes are semantic fixed values such as `github-ci`, `synthetic`, `reference-snapshot`, `hostiq-staging`, `hostiq-production` and `chatgpt-action-live`. Free-form labels are rejected.
 
-- booleans (`success`, `authorized`, `state_preserved`, `preview_only`);
-- bounded integers/counts/status codes/timeouts;
-- exact 40-character Git SHAs;
-- exact SHA-256 hashes and bounded lists of SHA-256 hashes;
-- short allowlisted enum/status/reason identifiers.
+Evidence references use reviewed provider forms only, for example `github:run:<numeric-id>`, `github:job:<numeric-id>`, `github:commit:<sha40>` or a `*:sha256:<sha256>` reference. Chat/person/file names and other uncontrolled labels are not evidence references. When a private identifier must be correlated, `hash_private_identifier()` emits a namespace-separated SHA-256 instead of returning the raw identifier.
 
-Unknown fact keys, nested dictionaries, bytes/custom objects, unbounded lists/strings and unsupported object types are rejected. Aggregate evidence size, dictionary size, list length and nesting depth are bounded.
+Facts use positive per-key schemas:
 
-Defense-in-depth content checks reject obvious private-key markers, concrete setup-route material, bearer/authorization values, cookie values, JWT-like opaque values and secret-like assignments even when a caller attempts to place them under a neutral key. Long opaque token-like strings are also rejected unless they are valid expected hashes.
+- booleans;
+- bounded integer/count/status values;
+- exact SHA-40 / SHA-256 values;
+- finite semantic enums;
+- bounded reviewed enum/hash lists.
 
-`build_result()` validates the complete finalized payload. `serialize_result()` independently validates again, so a prebuilt or later-mutated unsafe object cannot be serialized by bypassing the builder.
+Unknown keys, arbitrary prose, Cyrillic or ASCII private labels in enum slots, nested fact dictionaries, bytes/custom objects, oversized lists/objects, excessive depth and unsupported types fail closed. Aggregate size is bounded.
 
-Exception messages and subprocess stdout/stderr are never copied into public evidence by the provided sanitizers. The helpers record only safe class/status/presence metadata.
+`build_result()` validates the finalized object; `serialize_result()` independently revalidates a copy. Mutable list/tuple inputs are copied so later caller mutation cannot change a previously validated result without being caught at serialization.
 
-Raw Telegram message text, chat/person names, phone numbers, login codes, 2FA values, sessions, API credentials, setup routes, private file/media contents and runtime secret values are outside this evidence schema. Use hashes/counts/status identifiers instead.
+Exception messages, chained exception text and subprocess stdout/stderr are intentionally discarded. Evidence retains only reviewed category/presence/status facts. Repository secret scanning remains a separate stronger gate; the evidence schema additionally rejects privacy-unsafe metadata that is not necessarily a repository-secret pattern.
 
 ## Telegram user-authorization gate
 
-The auth flag is computed by `evaluate_telegram_auth_gate()` rather than asserted as a literal. It accepts only boolean control-plane readiness facts and returns a state plus stable non-secret reason codes.
+`evaluate_telegram_auth_gate()` accepts only boolean readiness facts and never credential values. `USER_TELEGRAM_AUTH_REQUIRED` occurs only when all real server/source/runtime prerequisites are ready, Telegram setup/session input is the first remaining human blocker and the work is not synthetic-only.
 
-`USER_TELEGRAM_AUTH_REQUIRED` is returned only when all of these are true:
-
-1. a legitimately sanitized real application source is ready;
-2. the actual Passenger runtime is verified;
-3. server-side setup is ready;
-4. Telegram setup/session input is the first remaining human-dependent blocker;
-5. the operation is not synthetic-only testing.
-
-Otherwise the state is `USER_TELEGRAM_AUTH_NOT_YET_REQUIRED` with reason codes such as `SANITIZED_SOURCE_PENDING`, `PASSENGER_RUNTIME_PENDING`, `SERVER_SETUP_NOT_READY`, `HUMAN_INPUT_NOT_FIRST_BLOCKER` or `SYNTHETIC_TEST_ONLY`.
-
-Current planning state remains:
+Current project state remains:
 
 `USER_TELEGRAM_AUTH_NOT_YET_REQUIRED`
 
-Real authorization must not be requested merely to make synthetic or server-preparation tests pass.
+Synthetic QA must never cause a request for phone number, login code, 2FA password, API hash or session material.
 
-## Product-PASS boundary
+## Coverage versus product evidence
 
-No live Telegram send is authorized by this harness. No A–K criterion becomes final PASS until the evidence rule in the Drive acceptance document is satisfied against the applicable real source/runtime/deployed release and independently audited.
+`ops/acceptance_contracts.py` maintains a separate coverage layer:
+
+- `SYNTHETIC_EXECUTABLE` means a deterministic prerequisite contract exists and maps to a concrete automated test;
+- `REAL_SOURCE_REQUIRED` means sanitized factual application/UI source or real non-live integration is still needed;
+- `LIVE_EXTERNAL_REQUIRED` means authorized deployed HOSTiQ/Telegram/ChatGPT evidence is required.
+
+The coverage layer never emits product PASS. In particular:
+
+- H1 generated schema matching deployed endpoints is not synthetically proven;
+- I1 full keyboard operation is not proven by static HTML;
+- I6 actual NVDA status/error announcement is not proven by static HTML;
+- K1–K5 always require live external evidence; K5 additionally requires explicit write approval.
+
+No live Telegram send is authorized by this harness.
