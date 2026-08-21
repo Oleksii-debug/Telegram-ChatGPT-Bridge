@@ -19,6 +19,7 @@ import tarfile
 from datetime import datetime
 from pathlib import Path, PurePosixPath
 
+from ops.deployment_lock_policy import LockPolicyError, validate_preexisting_lock
 from ops.release_guard import (
     SafetyError, apply_backup_retention, apply_retention, atomic_switch_link,
     attach_persistent_state, build_manifest, cleanup_stale_staging,
@@ -724,24 +725,41 @@ def _deployment_lock(control_root: Path):
         raise SafetyError("POSIX deployment lock support unavailable")
     validate_private_control_root(control_root)
     path = control_root / TRANSACTION_LOCK
-    if path.is_symlink():
-        raise SafetyError("deployment lock path is unsafe")
-    flags = os.O_RDWR | os.O_CREAT
+
+    preexisting = os.path.lexists(path)
+    expected_dev = expected_ino = None
+    if preexisting:
+        try:
+            validate_preexisting_lock(path)
+            before = path.lstat()
+        except (LockPolicyError, OSError) as exc:
+            raise SafetyError("deployment lock preflight policy failed") from exc
+        expected_dev, expected_ino = before.st_dev, before.st_ino
+        flags = os.O_RDWR
+    else:
+        flags = os.O_RDWR | os.O_CREAT | os.O_EXCL
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
+
     try:
         fd = os.open(path, flags, 0o600)
     except OSError as exc:
-        raise SafetyError("deployment lock could not be opened") from exc
+        raise SafetyError("deployment lock could not be opened safely") from exc
     try:
-        os.fchmod(fd, 0o600)
         st = os.fstat(fd)
+        uid = os.getuid() if hasattr(os, "getuid") else None
         if not stat.S_ISREG(st.st_mode):
             raise SafetyError("deployment lock is not a regular file")
-        if hasattr(os, "getuid") and st.st_uid != os.getuid():
+        if uid is not None and st.st_uid != uid:
             raise SafetyError("deployment lock owner is unexpected")
-        if stat.S_IMODE(st.st_mode) & 0o077:
-            raise SafetyError("deployment lock permissions are too broad")
+        if stat.S_IMODE(st.st_mode) != 0o600:
+            raise SafetyError("deployment lock mode must be exactly 0600")
+        if st.st_nlink != 1:
+            raise SafetyError("deployment lock hardlink topology rejected")
+        if st.st_size != 0:
+            raise SafetyError("deployment lock must be empty")
+        if preexisting and (st.st_dev != expected_dev or st.st_ino != expected_ino):
+            raise SafetyError("deployment lock changed during preflight")
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as exc:
