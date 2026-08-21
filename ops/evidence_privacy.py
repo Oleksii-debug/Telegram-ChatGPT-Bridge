@@ -1,15 +1,17 @@
 # -*- coding: utf-8 -*-
 """Fail-closed privacy policy for public/non-secret acceptance evidence.
 
-The policy intentionally does not permit arbitrary prose in evidence facts.
-Evidence is a compact control-plane record: bounded numbers, booleans, hashes,
-stable enums and hashed identifiers. Raw Telegram/server content belongs only in
-private runtime storage and must never be copied into normal Drive/GitHub evidence.
+Public evidence is a control-plane record, not a diagnostic transcript.  Only
+semantic environment classes, structured evidence references, bounded values,
+reviewed enums and hashes are accepted.  External/private identifiers must be
+hashed before they cross this boundary.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import re
+import unicodedata
 from typing import Any, Iterable
 
 MAX_EVIDENCE_BYTES = 4096
@@ -21,11 +23,32 @@ MAX_INT = 1_000_000_000
 SHA40_RE = re.compile(r"^[0-9a-f]{40}$")
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 SAFE_ENUM_RE = re.compile(r"^[A-Z0-9][A-Z0-9_.:-]{0,79}$")
-SAFE_ENV_RE = re.compile(r"^[A-Za-z0-9._-]{1,80}$")
-SAFE_REF_RE = re.compile(r"^[A-Za-z0-9._:/#-]{1,240}$")
+CONTROL_CHAR_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 
-# Defense in depth. The primary protection is the positive typed schema below;
-# these patterns catch obvious secret material even under a nominally safe key.
+ALLOWED_ENVIRONMENT_CLASSES = frozenset({
+    "github-ci",
+    "synthetic",
+    "reference-snapshot",
+    "local-test",
+    "hostiq-staging",
+    "hostiq-production",
+    "chatgpt-action-live",
+})
+
+# Evidence references are structured and provider-specific.  No free-form chat,
+# person, file or note label can be smuggled into a reference field.
+EVIDENCE_REF_PATTERNS = (
+    re.compile(r"^github:run:[1-9][0-9]{0,19}$"),
+    re.compile(r"^github:job:[1-9][0-9]{0,19}$"),
+    re.compile(r"^github:check:[1-9][0-9]{0,19}$"),
+    re.compile(r"^github:commit:[0-9a-f]{40}$"),
+    re.compile(r"^test:sha256:[0-9a-f]{64}$"),
+    re.compile(r"^reference:sha256:[0-9a-f]{64}$"),
+    re.compile(r"^hostiq:sha256:[0-9a-f]{64}$"),
+    re.compile(r"^external:sha256:[0-9a-f]{64}$"),
+)
+
+# Defense in depth. The primary protection is the positive schema below.
 PRIVATE_KEY_RE = re.compile(r"-----BEGIN (?:RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----", re.I)
 SETUP_ROUTE_RE = re.compile(r"(?<![A-Za-z0-9_])/setup-[A-Za-z0-9_-]{12,}(?![A-Za-z0-9_])", re.I)
 AUTH_VALUE_RE = re.compile(r"\b(?:authorization|bearer)\b\s*[:= -]?\s*[A-Za-z0-9._~+/-]{8,}", re.I)
@@ -48,17 +71,21 @@ BOOL_FACTS = {
     "commit_single_use", "restart_safe", "recoverable", "schema_valid",
     "keyboard_operable", "labels_present", "accessible_names_present",
     "heading_order_valid", "tab_order_valid", "mouse_only_absent",
+    "status_messages_accessible", "error_associations_valid", "focus_reachable",
+    "structured_errors_valid", "route_registry_matched", "raw_text_absent",
 }
 INT_FACTS = {
     "count", "findings_count", "artifact_count", "persistent_entries_count",
     "file_count", "result_count", "page_count", "retry_count", "attempt",
     "duration_ms", "timeout_ms", "return_code", "http_status", "status_code",
-    "rate_limit_remaining", "job_checkpoint", "criteria_count",
+    "rate_limit_remaining", "retry_after_seconds", "job_checkpoint", "criteria_count",
+    "passed_count", "failed_count", "blocked_count", "test_count", "focusable_count",
 }
 SHA40_FACTS = {"previous_sha", "candidate_sha", "deployed_sha", "observed_sha"}
 SHA256_FACTS = {
     "sha256", "backup_sha256", "manifest_sha256", "identifier_sha256",
     "chat_sha256", "message_sha256", "file_sha256", "payload_sha256",
+    "request_sha256", "path_sha256",
 }
 ENUM_FACTS = {
     "state", "mode", "reason_code", "error_type", "scan_scope",
@@ -73,9 +100,95 @@ ALL_FACT_KEYS = (
     ENUM_FACTS | ENUM_LIST_FACTS | SHA256_LIST_FACTS
 )
 
+AUTH_REASON_CODES = {
+    "SYNTHETIC_TEST_ONLY", "SANITIZED_SOURCE_PENDING", "PASSENGER_RUNTIME_PENDING",
+    "SERVER_SETUP_NOT_READY", "HUMAN_INPUT_NOT_FIRST_BLOCKER",
+    "SERVER_SETUP_FIRST_HUMAN_BLOCKER",
+}
+ENUM_VALUE_ALLOWLISTS: dict[str, frozenset[str]] = {
+    "state": frozenset({
+        "READY", "RUNNING", "RETRYABLE", "COMPLETED", "BLOCKED", "FAILED",
+        "CANCELLED", "VERIFIED", "UNVERIFIED", "PENDING", "SUCCESS",
+    }),
+    "mode": frozenset({
+        "SYNTHETIC", "REAL_SOURCE", "LIVE_EXTERNAL", "REFERENCE_ONLY",
+        "PROCESS_LOSS_SAME_HOST_V1",
+    }),
+    "reason_code": frozenset(AUTH_REASON_CODES | {
+        "POLICY_REJECTED", "INPUT_REJECTED", "EXTERNAL_BLOCKER", "NOT_APPLICABLE",
+    }),
+    "error_type": frozenset({
+        "EXCEPTION", "RUNTIME_ERROR", "VALUE_ERROR", "TYPE_ERROR", "OS_ERROR",
+        "TIMEOUT_ERROR", "CONTRACT_ERROR", "ASSERTION_ERROR",
+    }),
+    "scan_scope": frozenset({
+        "PUBLIC_REPOSITORY", "CURRENT_TREE", "FULL_HISTORY", "REFERENCE_SNAPSHOT",
+    }),
+    "operation_kind": frozenset({
+        "READ", "SEARCH", "DOWNLOAD", "BULK_DOWNLOAD", "ZIP", "SEND", "REPLY",
+        "FORWARD", "SEND_FILE", "SEND_FILES", "PREVIEW", "COMMIT",
+    }),
+    "rollback_state": frozenset({"NOT_REQUIRED", "ROLLED_BACK", "CRITICAL_ROLLBACK_FAILED"}),
+    "result_code": frozenset({
+        "COMMITTED", "IDEMPOTENCY_CONFLICT", "USED_PREVIEW", "EXPIRED_PREVIEW",
+        "INVALID_PREVIEW", "AUTHORIZED", "DENIED", "RATE_LIMITED", "OK",
+    }),
+    "environment_state": frozenset({"READY", "BLOCKED", "VERIFIED", "UNVERIFIED"}),
+    "method": frozenset({"GET", "POST", "PUT", "PATCH", "DELETE"}),
+    "contract_status": frozenset({
+        "SYNETIC_EXECUTABLE", "SYNTHETIC_EXECUTABLE", "REAL_SOURCE_REQUIRED", "LIVE_EXTERNAL_REQUIRED",
+    }),
+    "auth_state": frozenset({
+        "USER_TELEGRAM_AUTH_NOT_YET_REQUIRED", "USER_TELEGRAM_AUTH_REQUIRED",
+        "CODE_REQUESTED", "FLOOD_WAIT", "RPC_ERROR", "INVALID_CODE", "INVALID_2FA",
+        "AUTHORIZED", "UNAUTHORIZED", "MISSING_AUTH", "WRONG_AUTH", "MALFORMED_AUTH",
+    }),
+    "media_kind": frozenset({"DOCUMENT", "VOICE", "PHOTO", "VIDEO", "AUDIO", "OTHER"}),
+    "job_state": frozenset({"READY", "RUNNING", "RETRYABLE", "COMPLETED", "FAILED", "CANCELLED"}),
+    "preview_state": frozenset({"CREATED", "EXPIRED", "USED", "INVALID"}),
+    "commit_state": frozenset({
+        "COMMITTED", "IDEMPOTENCY_CONFLICT", "USED_PREVIEW", "EXPIRED_PREVIEW", "INVALID_PREVIEW",
+    }),
+    "scope": frozenset({"GLOBAL", "DIALOG", "PERSON", "DATE", "FILE", "ACTOR"}),
+    "error_code": frozenset({
+        "INVALID_JSON", "INVALID_JSON_SHAPE", "PAYLOAD_TOO_LARGE", "INVALID_CONTENT_LENGTH",
+        "AUTH_REQUIRED", "AUTH_MALFORMED", "AUTH_INVALID", "IDEMPOTENCY_CONFLICT",
+        "RATE_LIMITED", "TELEGRAM_UNAVAILABLE", "FLOOD_WAIT", "RPC_ERROR",
+        "TIMEOUT", "CANCELLED", "INTERNAL_ERROR", "FILE_NOT_FOUND", "FILE_ACCESS_DENIED",
+    }),
+    "reason_codes": frozenset(AUTH_REASON_CODES),
+    "checks": frozenset({
+        "COMPILE_PASS", "UNIT_TESTS_PASS", "INTEGRATION_TESTS_PASS", "SECRET_SCAN_PASS",
+        "HISTORY_SECRET_SCAN_PASS", "RECOVERY_MARKER_PASS", "NO_AUTODEPLOY_PASS",
+        "OPENAPI_POLICY_PASS", "ACCESSIBILITY_STRUCTURE_PASS", "COVERAGE_DRIFT_PASS",
+        "PY311_PREPARE_VERIFY_PASS", "ROLLBACK_REGRESSION_PASS",
+    }),
+    "capabilities": frozenset({
+        "AUTH", "PATH_TRAVERSAL", "RATE_LIMIT", "IDEMPOTENCY", "ACCESSIBILITY",
+        "OPENAPI", "ZIP", "PRIVATE_FILE", "LOG_REDACTION", "TELEGRAM_FAKE", "EVIDENCE_PRIVACY",
+    }),
+    "coverage_tags": frozenset({
+        "SYNTHETIC", "REAL_SOURCE", "LIVE", "SECURITY", "ACCESSIBILITY", "PRIVACY",
+        "RELIABILITY", "OPENAPI", "FILES", "WRITES",
+    }),
+}
+
+
+def hash_private_identifier(value: str, *, namespace: str = "external") -> str:
+    """Return a one-way identifier suitable for public evidence.
+
+    The raw identifier is never returned. Namespaces prevent accidental equality
+    between unrelated identifier domains.
+    """
+    if not isinstance(value, str) or not value:
+        raise ValueError("private identifier must be non-empty text")
+    if not re.fullmatch(r"[a-z][a-z0-9_-]{0,31}", namespace):
+        raise ValueError("invalid hash namespace")
+    normalized = unicodedata.normalize("NFC", value)
+    return hashlib.sha256((namespace + "\0" + normalized).encode("utf-8")).hexdigest()
+
 
 def _looks_tokenish(text: str) -> bool:
-    """Reject long opaque non-hash strings that are inappropriate as public evidence."""
     if len(text) < 32:
         return False
     compact = re.sub(r"[^A-Za-z0-9_-]", "", text)
@@ -90,6 +203,8 @@ def _looks_tokenish(text: str) -> bool:
 def reject_sensitive_text(text: str, *, label: str = "evidence") -> None:
     if not isinstance(text, str):
         raise ValueError(f"{label} must be text")
+    if CONTROL_CHAR_RE.search(text):
+        raise ValueError(f"control characters rejected in {label}")
     if any(pattern.search(text) for pattern in (
         PRIVATE_KEY_RE, SETUP_ROUTE_RE, AUTH_VALUE_RE, COOKIE_VALUE_RE,
         JWT_RE, SECRET_ASSIGNMENT_RE,
@@ -100,23 +215,27 @@ def reject_sensitive_text(text: str, *, label: str = "evidence") -> None:
 
 
 def validate_environment_class(value: str) -> str:
-    if not isinstance(value, str) or not SAFE_ENV_RE.fullmatch(value):
-        raise ValueError("invalid environment class")
-    reject_sensitive_text(value, label="environment_class")
+    if not isinstance(value, str) or value not in ALLOWED_ENVIRONMENT_CLASSES:
+        raise ValueError("environment class is not in the semantic allowlist")
     return value
 
 
 def validate_evidence_ref(value: str) -> str:
-    if not isinstance(value, str) or not SAFE_REF_RE.fullmatch(value):
-        raise ValueError("invalid evidence reference")
-    reject_sensitive_text(value, label="evidence_ref")
+    if not isinstance(value, str) or not any(pattern.fullmatch(value) for pattern in EVIDENCE_REF_PATTERNS):
+        raise ValueError("evidence reference must use an approved structured form")
+    if CONTROL_CHAR_RE.search(value) or any(pattern.search(value) for pattern in (
+        PRIVATE_KEY_RE, SETUP_ROUTE_RE, AUTH_VALUE_RE, COOKIE_VALUE_RE, JWT_RE, SECRET_ASSIGNMENT_RE
+    )):
+        raise ValueError("privacy-sensitive evidence reference rejected")
     return value
 
 
 def _validate_enum(value: Any, key: str) -> str:
     if not isinstance(value, str) or not SAFE_ENUM_RE.fullmatch(value):
         raise ValueError(f"invalid safe enum fact: {key}")
-    reject_sensitive_text(value, label=f"facts.{key}")
+    allowed = ENUM_VALUE_ALLOWLISTS.get(key)
+    if allowed is None or value not in allowed:
+        raise ValueError(f"enum fact is not semantically allowlisted: {key}")
     return value
 
 
@@ -125,7 +244,11 @@ def _validate_int(value: Any, key: str) -> int:
         raise ValueError(f"invalid bounded integer fact: {key}")
     if key == "http_status" and not (100 <= value <= 599):
         raise ValueError("invalid HTTP status evidence")
-    if key.endswith("_count") or key in {"count", "attempt", "duration_ms", "timeout_ms", "retry_count", "rate_limit_remaining", "job_checkpoint", "criteria_count"}:
+    if key.endswith("_count") or key in {
+        "count", "attempt", "duration_ms", "timeout_ms", "retry_count",
+        "rate_limit_remaining", "retry_after_seconds", "job_checkpoint", "criteria_count",
+        "test_count", "focusable_count",
+    }:
         if value < 0:
             raise ValueError(f"negative count/duration fact: {key}")
     return value
@@ -181,7 +304,7 @@ def validate_facts(facts: Any, *, allowed_keys: Iterable[str]) -> dict[str, Any]
         if isinstance(value, dict):
             raise ValueError("nested evidence dictionaries are forbidden")
         validate_fact_value(key, value)
-        cleaned[key] = list(value) if isinstance(value, tuple) else value
+        cleaned[key] = list(value) if isinstance(value, (list, tuple)) else value
     return cleaned
 
 
@@ -203,6 +326,10 @@ def _walk_structure(value: Any, *, depth: int = 0) -> None:
     elif isinstance(value, str):
         if len(value) > 240:
             raise ValueError("evidence string too large")
+        if CONTROL_CHAR_RE.search(value) or any(pattern.search(value) for pattern in (
+            PRIVATE_KEY_RE, SETUP_ROUTE_RE, AUTH_VALUE_RE, COOKIE_VALUE_RE, JWT_RE, SECRET_ASSIGNMENT_RE
+        )):
+            raise ValueError("privacy-sensitive aggregate evidence rejected")
     elif value is None or isinstance(value, (bool, int)):
         return
     else:
@@ -220,11 +347,21 @@ def validate_aggregate_payload(payload: Any) -> None:
 
 
 def sanitize_exception(exc: BaseException) -> dict[str, Any]:
-    """Return class-only exception evidence; the exception message is intentionally discarded."""
-    name = re.sub(r"[^A-Za-z0-9]+", "_", type(exc).__name__).strip("_").upper() or "EXCEPTION"
-    if not SAFE_ENUM_RE.fullmatch(name):
-        name = "EXCEPTION"
-    return {"error_type": name, "error_present": True}
+    """Return category-only exception evidence; messages and chained text are discarded."""
+    mapping = (
+        (TimeoutError, "TIMEOUT_ERROR"),
+        (ValueError, "VALUE_ERROR"),
+        (TypeError, "TYPE_ERROR"),
+        (OSError, "OS_ERROR"),
+        (AssertionError, "ASSERTION_ERROR"),
+        (RuntimeError, "RUNTIME_ERROR"),
+    )
+    error_type = "EXCEPTION"
+    for klass, label in mapping:
+        if isinstance(exc, klass):
+            error_type = label
+            break
+    return {"error_type": error_type, "error_present": True}
 
 
 def sanitize_subprocess_result(return_code: int, *, stdout: Any = None, stderr: Any = None) -> dict[str, Any]:
