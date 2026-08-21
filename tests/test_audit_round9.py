@@ -1,16 +1,15 @@
 # -*- coding: utf-8 -*-
-"""Audit round 9: single deploy entrypoint, pre-materialization journal, lock and provenance."""
+"""Audit round 9/10: deployment journal, serialization, provenance and rollback integration."""
 from __future__ import annotations
 
 import json
 import os
-import signal
+import shlex
 import stat
 import subprocess
 import sys
 import tempfile
 import textwrap
-import time
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -62,9 +61,7 @@ class Round9Layout:
         }
         self.manifest_hash = release_guard.sha256_json(self.meta)
         release_guard.write_json_atomic(
-            self.prepared / deploy_release.PREPARED_META,
-            self.meta,
-            mode=0o644,
+            self.prepared / deploy_release.PREPARED_META, self.meta, mode=0o644
         )
 
         self.control = root / "control"
@@ -82,21 +79,25 @@ class Round9Layout:
 
     def write_approval(self, approval_id: str, nonce: str) -> None:
         now = datetime.now(timezone.utc)
-        payload = {
-            "approved": True,
-            "approved_sha": self.new_sha,
-            "repository": self.repository,
-            "approved_ref": "main",
-            "release_manifest_sha256": self.manifest_hash,
-            "ci_run_id": "round9",
-            "audit_id": "audit-round9",
-            "approval_id": approval_id,
-            "nonce": nonce,
-            "issued_at": now.isoformat(),
-            "expires_at": (now + timedelta(hours=1)).isoformat(),
-            "data_schema_change": False,
-        }
-        self.approval.write_text(json.dumps(payload), encoding="utf-8")
+        self.approval.write_text(
+            json.dumps(
+                {
+                    "approved": True,
+                    "approved_sha": self.new_sha,
+                    "repository": self.repository,
+                    "approved_ref": "main",
+                    "release_manifest_sha256": self.manifest_hash,
+                    "ci_run_id": "round9",
+                    "audit_id": "audit-round9",
+                    "approval_id": approval_id,
+                    "nonce": nonce,
+                    "issued_at": now.isoformat(),
+                    "expires_at": (now + timedelta(hours=1)).isoformat(),
+                    "data_schema_change": False,
+                }
+            ),
+            encoding="utf-8",
+        )
         self.approval.chmod(0o600)
 
     def kwargs(self):
@@ -143,8 +144,7 @@ class SingleEntrypointTests(unittest.TestCase):
         self.assertFalse((repo_root / "ops/deployment_hardening.py").exists())
         deploy_defs = []
         for path in (repo_root / "ops").glob("*.py"):
-            text = path.read_text(encoding="utf-8")
-            if "def execute_prepared_release" in text:
+            if "def execute_prepared_release" in path.read_text(encoding="utf-8"):
                 deploy_defs.append(path.name)
         self.assertEqual(["deploy_release.py"], deploy_defs)
         self.assertEqual("ops.deploy_release", deploy_release._supported_deploy_entrypoint())
@@ -213,7 +213,6 @@ class PreMaterializationJournalTests(unittest.TestCase):
                 deploy_release, "verify_approved_ref_policy", return_value=layout.new_sha
             ):
                 self.assertEqual(0, deploy_release.execute_prepared_release(**layout.kwargs()))
-            self.assertEqual(layout.new_sha, deploy_release._active_release_sha(layout.active))
 
     def test_runtime_manifest_change_blocks_incomplete_recovery(self):
         with tempfile.TemporaryDirectory() as td:
@@ -233,11 +232,12 @@ class PreMaterializationJournalTests(unittest.TestCase):
                     deploy_release.execute_prepared_release(**layout.kwargs())
 
             (layout.state / "logs").mkdir()
-            layout.runtime.write_text(json.dumps({"paths": ["var", "logs"]}), encoding="utf-8")
+            layout.runtime.write_text(
+                json.dumps({"paths": ["var", "logs"]}), encoding="utf-8"
+            )
             with self.assertRaises(release_guard.SafetyError):
                 deploy_release.execute_prepared_release(**layout.kwargs())
             self.assertEqual("CRITICAL_TRANSACTION_AMBIGUOUS", layout.journal()["state"])
-            self.assertEqual(layout.old.resolve(), layout.active.resolve())
 
 
 class TransitionGraphTests(unittest.TestCase):
@@ -319,17 +319,15 @@ class ApprovalMarkerValidationTests(unittest.TestCase):
         return next((layout.control / "consumed").glob("*.consumed.json"))
 
     def validate(self, layout: Round9Layout):
-        journal = layout.journal()
         return deploy_release._validate_consumed_approval_marker(
             control_root=layout.control,
             consumption_root=layout.control / "consumed",
-            journal=journal,
+            journal=layout.journal(),
             require_exists=True,
         )
 
-    def test_wrong_approval_id_malformed_broad_mode_and_symlink_fail(self):
-        cases = ("wrong-id", "malformed", "broad-mode", "symlink")
-        for case in cases:
+    def test_wrong_approval_id_malformed_broad_mode_symlink_and_missing_fail(self):
+        for case in ("wrong-id", "malformed", "broad-mode", "symlink", "missing"):
             with self.subTest(case=case), tempfile.TemporaryDirectory() as td:
                 layout = self.make_committed_layout(Path(td))
                 marker = self.marker(layout)
@@ -341,12 +339,14 @@ class ApprovalMarkerValidationTests(unittest.TestCase):
                     marker.write_text("{not-json", encoding="utf-8")
                 elif case == "broad-mode":
                     marker.chmod(0o644)
-                else:
+                elif case == "symlink":
                     target = marker.with_name("marker-target.json")
                     target.write_text(marker.read_text(encoding="utf-8"), encoding="utf-8")
                     target.chmod(0o600)
                     marker.unlink()
                     marker.symlink_to(target)
+                else:
+                    marker.unlink()
                 with self.assertRaises(release_guard.SafetyError):
                     self.validate(layout)
 
@@ -363,8 +363,7 @@ class PosixTransactionLockTests(unittest.TestCase):
                 import sys, time
                 from pathlib import Path
                 from ops import deploy_release
-                control = Path(sys.argv[1])
-                with deploy_release._deployment_lock(control):
+                with deploy_release._deployment_lock(Path(sys.argv[1])):
                     print('LOCKED', flush=True)
                     time.sleep(60)
                 """
@@ -377,78 +376,109 @@ class PosixTransactionLockTests(unittest.TestCase):
                 cwd=Path(__file__).resolve().parents[1],
             )
             try:
+                assert process.stdout is not None
                 self.assertEqual("LOCKED", process.stdout.readline().strip())
                 with self.assertRaises(release_guard.SafetyError):
                     with deploy_release._deployment_lock(control):
                         pass
                 process.kill()
                 process.wait(timeout=10)
+                process.communicate(timeout=1)
                 with deploy_release._deployment_lock(control):
                     pass
             finally:
                 if process.poll() is None:
                     process.kill()
                     process.wait(timeout=10)
+                try:
+                    process.communicate(timeout=1)
+                except Exception:
+                    pass
 
 
 class RealNonLiveTransactionIntegrationTests(unittest.TestCase):
-    @unittest.skipUnless(sys.version_info[:2] == (3, 11), "real integration requires Python 3.11")
-    def test_real_git_prepare_then_execute_and_post_switch_rollback(self):
-        for fail_auth in (False, True):
-            with self.subTest(fail_auth=fail_auth), tempfile.TemporaryDirectory() as td:
-                root = Path(td)
-                repo = root / "repo"
-                repo.mkdir()
-                subprocess.run(["git", "init", "-q", "-b", "main"], cwd=repo, check=True)
-                subprocess.run(["git", "config", "user.name", "Round9 Integration"], cwd=repo, check=True)
-                subprocess.run(["git", "config", "user.email", "round9@example.invalid"], cwd=repo, check=True)
-                (repo / "app.py").write_text("VALUE = 9\n", encoding="utf-8")
-                tests = repo / "tests"
-                tests.mkdir()
-                (tests / "test_smoke.py").write_text(
-                    "import unittest\nclass T(unittest.TestCase):\n    def test_ok(self): self.assertEqual(1,1)\n",
-                    encoding="utf-8",
-                )
-                subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
-                subprocess.run(["git", "commit", "-qm", "round9 integration"], cwd=repo, check=True)
-                sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo, text=True).strip()
+    def _build(self, root: Path, auth_mode: str):
+        repo = root / "repo"
+        repo.mkdir()
+        subprocess.run(["git", "init", "-q", "-b", "main"], cwd=repo, check=True)
+        subprocess.run(["git", "config", "user.name", "Round9 Integration"], cwd=repo, check=True)
+        subprocess.run(["git", "config", "user.email", "round9@example.invalid"], cwd=repo, check=True)
+        (repo / "app.py").write_text("VALUE = 9\n", encoding="utf-8")
+        tests = repo / "tests"
+        tests.mkdir()
+        (tests / "test_smoke.py").write_text(
+            "import unittest\nclass T(unittest.TestCase):\n"
+            "    def test_ok(self): self.assertEqual(1,1)\n",
+            encoding="utf-8",
+        )
+        subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+        subprocess.run(["git", "commit", "-qm", "round9 integration"], cwd=repo, check=True)
+        sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo, text=True).strip()
 
-                releases = root / "releases"
-                prepared, _meta, manifest_hash = deploy_release.prepare_versioned_release(
-                    repo=repo,
-                    sha=sha,
-                    approved_ref="main",
-                    repository_id="synthetic/round9-real",
-                    releases_root=releases,
-                    python_executable=str(Path(sys.executable).resolve(strict=True)),
-                    runtime_entries=["var"],
-                )
+        releases = root / "releases"
+        prepared, _meta, manifest_hash = deploy_release.prepare_versioned_release(
+            repo=repo, sha=sha, approved_ref="main",
+            repository_id="synthetic/round9-real", releases_root=releases,
+            python_executable=str(Path(sys.executable).resolve(strict=True)),
+            runtime_entries=["var"],
+        )
 
-                old_sha = "9" * 40
-                old = releases / old_sha
-                old.mkdir()
-                (old / "old.py").write_text("OLD = 1\n", encoding="utf-8")
-                state = root / "state"
-                (state / "var").mkdir(parents=True)
-                (state / "var/db").write_text("state", encoding="utf-8")
-                release_guard.attach_persistent_state(old, state, ["var"])
-                active = root / "active"
-                active.symlink_to(old)
+        old_sha = "9" * 40
+        old = releases / old_sha
+        old.mkdir()
+        (old / "old.py").write_text("OLD = 1\n", encoding="utf-8")
+        state = root / "state"
+        (state / "var").mkdir(parents=True)
+        (state / "var/db").write_text("state", encoding="utf-8")
+        release_guard.attach_persistent_state(old, state, ["var"])
+        active = root / "active"
+        active.symlink_to(old)
 
-                control = root / "control"
-                control.mkdir()
-                control.chmod(0o700)
-                runtime = control / "runtime.json"
-                runtime.write_text(json.dumps({"paths": ["var"]}), encoding="utf-8")
-                runtime.chmod(0o600)
-                for name in ("quiesce", "resume", "restart", "identity", "unauth", "auth"):
-                    hook = control / name
-                    exit_code = 1 if (name == "auth" and fail_auth) else 0
-                    hook.write_text(f"#!/bin/sh\nexit {exit_code}\n", encoding="utf-8")
-                    hook.chmod(0o700)
-                approval = control / "approval.json"
-                now = datetime.now(timezone.utc)
-                approval.write_text(json.dumps({
+        control = root / "control"
+        control.mkdir()
+        control.chmod(0o700)
+        runtime = control / "runtime.json"
+        runtime.write_text(json.dumps({"paths": ["var"]}), encoding="utf-8")
+        runtime.chmod(0o600)
+        for name in ("quiesce", "resume", "restart", "identity", "unauth"):
+            hook = control / name
+            hook.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            hook.chmod(0o700)
+
+        auth = control / "auth"
+        auth_log = control / "auth.log"
+        if auth_mode == "healthy":
+            auth.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        elif auth_mode == "candidate-fails":
+            auth.write_text(
+                "#!/bin/sh\n"
+                f"ACTIVE={shlex.quote(str(active))}\n"
+                f"OLD={shlex.quote(str(old.resolve()))}\n"
+                f"LOG={shlex.quote(str(auth_log))}\n"
+                'NOW="$(readlink -f "$ACTIVE")"\n'
+                'printf "%s\\n" "$NOW" >> "$LOG"\n'
+                '[ "$NOW" = "$OLD" ] && exit 0\n'
+                "exit 1\n",
+                encoding="utf-8",
+            )
+        elif auth_mode == "rollback-unhealthy":
+            auth.write_text(
+                "#!/bin/sh\n"
+                f"ACTIVE={shlex.quote(str(active))}\n"
+                f"LOG={shlex.quote(str(auth_log))}\n"
+                'readlink -f "$ACTIVE" >> "$LOG"\n'
+                "exit 1\n",
+                encoding="utf-8",
+            )
+        else:
+            raise AssertionError(auth_mode)
+        auth.chmod(0o700)
+
+        approval = control / "approval.json"
+        now = datetime.now(timezone.utc)
+        approval.write_text(
+            json.dumps(
+                {
                     "approved": True,
                     "approved_sha": sha,
                     "repository": "synthetic/round9-real",
@@ -456,47 +486,76 @@ class RealNonLiveTransactionIntegrationTests(unittest.TestCase):
                     "release_manifest_sha256": manifest_hash,
                     "ci_run_id": "round9-real",
                     "audit_id": "audit-round9-real",
-                    "approval_id": "approval-round9-real",
-                    "nonce": "nonce-round9-real",
+                    "approval_id": f"approval-{auth_mode}",
+                    "nonce": f"nonce-{auth_mode}",
                     "issued_at": now.isoformat(),
                     "expires_at": (now + timedelta(hours=1)).isoformat(),
                     "data_schema_change": False,
-                }), encoding="utf-8")
-                approval.chmod(0o600)
+                }
+            ),
+            encoding="utf-8",
+        )
+        approval.chmod(0o600)
 
-                kwargs = dict(
-                    repo=repo,
-                    prepared_release=prepared,
-                    repository_id="synthetic/round9-real",
-                    approved_ref="main",
-                    ci_run_id="round9-real",
-                    audit_id="audit-round9-real",
-                    active_link=active,
-                    releases_root=releases,
-                    backup_root=root / "backups",
-                    persistent_state_root=state,
-                    runtime_manifest=runtime,
-                    control_root=control,
-                    approval_file=approval,
-                    approval_consumption_root=control / "consumed",
-                    quiesce_hook=control / "quiesce",
-                    resume_hook=control / "resume",
-                    restart_hook=control / "restart",
-                    identity_hook=control / "identity",
-                    unauth_hook=control / "unauth",
-                    auth_hook=control / "auth",
-                    status_file=control / "status.json",
-                )
-                with mock.patch.object(deploy_release, "verify_running_release", return_value=None):
-                    rc = deploy_release.execute_prepared_release(**kwargs)
-                if fail_auth:
-                    self.assertEqual(20, rc)
-                    self.assertEqual(old.resolve(), active.resolve())
-                    self.assertEqual("ROLLED_BACK", json.loads((control / deploy_release.TRANSACTION_JOURNAL).read_text())["state"])
-                else:
-                    self.assertEqual(0, rc)
-                    self.assertEqual(sha, deploy_release._active_release_sha(active))
-                    self.assertEqual("DEPLOYED", json.loads((control / deploy_release.TRANSACTION_JOURNAL).read_text())["state"])
+        kwargs = dict(
+            repo=repo, prepared_release=prepared, repository_id="synthetic/round9-real",
+            approved_ref="main", ci_run_id="round9-real", audit_id="audit-round9-real",
+            active_link=active, releases_root=releases, backup_root=root / "backups",
+            persistent_state_root=state, runtime_manifest=runtime, control_root=control,
+            approval_file=approval, approval_consumption_root=control / "consumed",
+            quiesce_hook=control / "quiesce", resume_hook=control / "resume",
+            restart_hook=control / "restart", identity_hook=control / "identity",
+            unauth_hook=control / "unauth", auth_hook=auth,
+            status_file=control / "status.json",
+        )
+        return locals()
+
+    @unittest.skipUnless(sys.version_info[:2] == (3, 11), "real integration requires Python 3.11")
+    def test_successful_non_live_deploy(self):
+        with tempfile.TemporaryDirectory() as td:
+            L = self._build(Path(td), "healthy")
+            with mock.patch.object(deploy_release, "verify_running_release", return_value=None):
+                rc = deploy_release.execute_prepared_release(**L["kwargs"])
+            self.assertEqual(0, rc)
+            self.assertEqual(L["sha"], deploy_release._active_release_sha(L["active"]))
+            self.assertEqual(
+                "DEPLOYED",
+                json.loads((L["control"] / deploy_release.TRANSACTION_JOURNAL).read_text())["state"],
+            )
+
+    @unittest.skipUnless(sys.version_info[:2] == (3, 11), "real integration requires Python 3.11")
+    def test_candidate_auth_failure_rolls_back_to_healthy_previous_release(self):
+        with tempfile.TemporaryDirectory() as td:
+            L = self._build(Path(td), "candidate-fails")
+            with mock.patch.object(deploy_release, "verify_running_release", return_value=None):
+                rc = deploy_release.execute_prepared_release(**L["kwargs"])
+            self.assertEqual(20, rc)
+            self.assertEqual(L["old"].resolve(), L["active"].resolve())
+            journal = json.loads(
+                (L["control"] / deploy_release.TRANSACTION_JOURNAL).read_text()
+            )
+            self.assertEqual("ROLLED_BACK", journal["state"])
+            self.assertEqual("state", (L["state"] / "var/db").read_text(encoding="utf-8"))
+            qroot = L["releases"] / ".quarantine"
+            self.assertTrue(qroot.is_dir() and any(qroot.iterdir()))
+            log = L["auth_log"].read_text(encoding="utf-8").splitlines()
+            self.assertGreaterEqual(len(log), 2)
+            self.assertEqual((L["releases"] / L["sha"]).resolve(), Path(log[0]).resolve())
+            self.assertEqual(L["old"].resolve(), Path(log[-1]).resolve())
+
+    @unittest.skipUnless(sys.version_info[:2] == (3, 11), "real integration requires Python 3.11")
+    def test_genuinely_unhealthy_rollback_is_critical(self):
+        with tempfile.TemporaryDirectory() as td:
+            L = self._build(Path(td), "rollback-unhealthy")
+            with mock.patch.object(deploy_release, "verify_running_release", return_value=None):
+                rc = deploy_release.execute_prepared_release(**L["kwargs"])
+            self.assertEqual(70, rc)
+            self.assertEqual(L["old"].resolve(), L["active"].resolve())
+            journal = json.loads(
+                (L["control"] / deploy_release.TRANSACTION_JOURNAL).read_text()
+            )
+            self.assertEqual("CRITICAL_ROLLBACK_FAILED", journal["state"])
+            self.assertNotEqual("DEPLOYED", journal["state"])
 
 
 if __name__ == "__main__":

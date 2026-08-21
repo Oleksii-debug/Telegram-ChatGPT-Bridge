@@ -30,6 +30,7 @@ jobs:
           ops/deploy_release.py
           ops/baseline_reconcile.py
           ops/runtime_evidence.py
+          ops/acceptance_harness.py
           tests/test_secret_scan.py
           tests/test_recovery_ops.py
           tests/test_audit_round5.py
@@ -37,6 +38,7 @@ jobs:
           tests/test_audit_round7.py
           tests/test_audit_round8.py
           tests/test_audit_round9.py
+          tests/test_acceptance_harness.py
           tests/test_baseline_reconcile.py
           tests/test_runtime_evidence.py
       - name: Verify single deploy-capable entrypoint
@@ -54,10 +56,14 @@ jobs:
           umask 022
           python -m unittest discover -s tests -v
       - name: Current-tree secret scan
+        if: always()
         run: python tools/secret_scan.py --mode current
       - name: Full-history secret scan
+        if: always()
         run: python tools/secret_scan.py --mode history
       - name: Verify recovery marker
+        if: always()
         run: test -f RECOVERY_BASELINE.md && grep -q 'DO NOT MERGE / DO NOT DEPLOY' RECOVERY_BASELINE.md
       - name: Verify no active cPanel or auto-deploy arming file
+        if: always()
         run: test ! -e .cpanel.yml && test ! -e ops/ENABLE_HOSTIQ_AUTO_DEPLOY
