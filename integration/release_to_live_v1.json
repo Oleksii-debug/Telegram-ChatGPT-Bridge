@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "round": "RELEASE_TO_LIVE_ROUND_2_P1",
+  "source_checkpoint": "30de1000672d18e2b17a4c4c91a0c583f7699071",
+  "purpose": "canonical_startup_dependency_and_nonlive_prepare_envelope",
+  "paths": [
+    "integration/release_to_live_v1.json",
+    "ops/release_package.py",
+    "passenger_wsgi.py",
+    "requirements.lock",
+    "requirements.txt",
+    "tests/test_release_package.py",
+    "tools/verify_release_prepare.py"
+  ],
+  "trace_commits": [
+    "239574cccc27764082e1b18b72d49a0a073a7665",
+    "4216f38354a4a8ec54fc194c15c715ba12928107",
+    "2942dbb6d03d76c620fc1bdcd9ff3d0cdcebd3c8",
+    "688e196da474b4acaff1885c2d584759bea8034c",
+    "9008a5af1a535f26d0471360a443aef29f18de9d",
+    "115d3ad56333f0089ef7ccd4b14ae49359341bb7"
+  ],
+  "runtime_packages": {
+    "Telethon": "1.44.0",
+    "pyaes": "1.6.1",
+    "rsa": "4.9.1",
+    "pyasn1": "0.6.4"
+  },
+  "test_only_dependencies": "NONE_REQUIRED",
+  "private_values_recorded": false,
+  "production_mutated": false,
+  "deployment_authorized": false
+}
