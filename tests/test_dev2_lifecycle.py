@@ -67,7 +67,7 @@ class LifecycleTests(unittest.TestCase):
             root = self.root(td); ok = self.file(root, "ok"); bad = self.file(root, "bad", "#!/bin/sh\nexit 7\n")
             self.assertEqual("PASS", hostiq_lifecycle.run_private_hook(root, ok, expected_name="restart").status)
             self.assertEqual("HOOK_NONZERO", hostiq_lifecycle.run_private_hook(root, bad, expected_name="restart").detail_code)
-            with mock.patch.object(hostiq_lifecycle.subprocess, "run", side_effect=hostiq_lifecycle.subprocess.TimeoutExpired("x", 1)):
+            with mock.patch.object(hostiq_lifecycle, "run_private_executable", return_value=-1):
                 self.assertEqual("HOOK_TIMEOUT", hostiq_lifecycle.run_private_hook(root, ok, expected_name="restart").detail_code)
 
     def test_endpoint_requires_https_production_host(self):
