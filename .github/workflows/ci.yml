@@ -38,6 +38,7 @@ jobs:
           ops/evidence_privacy.py
           ops/acceptance_harness.py
           ops/acceptance_contracts.py
+          ops/candidate_contracts.py
           ops/deployment_lock_policy.py
           ops/integration_interfaces.py
           ops/openapi_registry.py
@@ -66,8 +67,21 @@ jobs:
           tests/test_runtime_evidence.py
           tests/test_dev_a_integration.py
           tests/test_dev_a_provenance.py
+          tests/test_dev_a_candidate_contracts.py
       - name: Validate unified ChatGPT Action schema offline
         run: python tools/build_action_openapi.py --validate-only
+      - name: Validate truthful candidate coverage and API inventory
+        run: |
+          python - <<'PY'
+          from ops.candidate_contracts import candidate_acceptance_coverage, integrated_api_inventory, validate_candidate_acceptance_coverage, validate_integrated_api_inventory
+          coverage = candidate_acceptance_coverage()
+          counts = validate_candidate_acceptance_coverage(coverage)
+          inventory = integrated_api_inventory()
+          validate_integrated_api_inventory(inventory)
+          assert counts == {'LIVE_EXTERNAL_REQUIRED': 17, 'REAL_SOURCE_REQUIRED': 13, 'SYNTHETIC_EXECUTABLE': 37}
+          assert len(inventory) == 19
+          print('DEV_A_CANDIDATE_CONTRACTS_PASS')
+          PY
       - name: Verify deterministic integration provenance and overlap decisions
         run: python tools/verify_integration_provenance.py
       - name: Verify single deploy-capable entrypoint
