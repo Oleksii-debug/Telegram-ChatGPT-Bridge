@@ -85,18 +85,24 @@ The tool creates, with no-clobber POSIX semantics, one owner-private marker:
 
 The marker contains only schema version, exact candidate SHA and expected WSGI SHA-256. It is created descriptor-relative with `O_NOFOLLOW|O_EXCL`, owner/mode/inode checks and `fsync`; an existing/concurrent marker is never overwritten.
 
-## 6. Passenger application-process proof
+## 6. Passenger application-process proof — canonical WSGI stays call-free
 
-The exact packaged root `passenger_wsgi.py` may call the fail-isolated hook after importing the application:
+The preferred integration does **not** add a collector call to `passenger_wsgi.py`. Keep the canonical startup minimal and network-free:
 
 ```python
-from pathlib import Path
 from bridge.app import application
-from ops.passenger_evidence_hook import collect_if_armed
-
-_here = Path(__file__).resolve()
-collect_if_armed(app_root=_here.parent, wsgi_file=_here)
 ```
+
+Instead, the real exported `bridge.app.application` calls the fail-isolated adapter at the beginning of its WSGI request path. In `bridge/app.py` the integration is conceptually:
+
+```python
+from ops.passenger_evidence_hook import collect_if_armed_from_bridge_app
+
+# inside BridgeApplication.__call__(...):
+collect_if_armed_from_bridge_app(__file__)
+```
+
+The return code is ignored by normal request handling. The adapter never raises into the request, never contacts Telegram/network, is inert when no owner-private marker exists, derives the canonical application root and sibling `passenger_wsgi.py`, and delegates to the same exact SHA/WSGI-bound collector. This proves the runtime from the actual process serving a Passenger request while preserving DEV_A's call-free WSGI contract.
 
 Public Git cannot arm the hook. On the real Passenger process, strong evidence requires all of:
 
@@ -111,6 +117,8 @@ Only then are both reports written owner-private:
 - `$HOME/.telegram_bridge_private_evidence/passenger_runtime_binding.json`.
 
 The binding report records only exact candidate SHA, expected/actual WSGI hashes, runtime payload hash, tamper hash and `private_values_copied=false`. The marker is consumed only after both private reports are written. Context mismatch or hash mismatch leaves the marker for diagnosis/retry and never degrades application availability.
+
+The older direct-call-in-`passenger_wsgi.py` example is no longer the preferred integration because the packaged DEV_A startup policy intentionally requires a minimal call-free WSGI module.
 
 ## 7. Real non-production PREPARE proof
 
@@ -145,12 +153,13 @@ Only after exact package PREPARE + exact Auditor approval:
 5. switch immutable code while preserving private bindings;
 6. invoke fixed private `restart` hook;
 7. verify exact running candidate identity;
-8. validate meaningful `GET /health`, not HTTP 200 alone;
-9. verify an unauthenticated protected route rejects without leak;
-10. run only the harmless authenticated read probe `/api/v1/dialogs/list` with a server-private bearer reference;
-11. if Telegram remains intentionally unconfigured, bootstrap mode may accept only the exact structured `telegram_backend_unconfigured` response without contacting Telegram;
-12. verify serving/resume and private-state survival;
-13. verify rollback/rollback-health. Mandatory failure rolls back; unhealthy rollback is `CRITICAL_ROLLBACK_FAILED`.
+8. trigger one safe request so the armed in-process Passenger evidence adapter can collect the bound runtime report;
+9. validate meaningful `GET /health`, not HTTP 200 alone;
+10. verify an unauthenticated protected route rejects without leak;
+11. run only the harmless authenticated read probe `/api/v1/dialogs/list` with a server-private bearer reference;
+12. if Telegram remains intentionally unconfigured, bootstrap mode may accept only the exact structured `telegram_backend_unconfigured` response without contacting Telegram;
+13. verify serving/resume and private-state survival;
+14. verify rollback/rollback-health. Mandatory failure rolls back; unhealthy rollback is `CRITICAL_ROLLBACK_FAILED`.
 
 No send/reply/forward/send-files/K5 operation belongs to deployment smoke.
 
