@@ -74,6 +74,10 @@
       "ops/server_manifest.py",
       "tests/test_dev2_lifecycle.py",
       "tests/test_server_manifest.py"
+    ],
+    "supersedes_predecessor_paths": [
+      "ops/hostiq_lifecycle.py",
+      "tests/test_dev2_lifecycle.py"
     ]
   },
   "test_only_dependencies": "NONE_REQUIRED",
