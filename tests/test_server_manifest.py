@@ -1,11 +1,14 @@
 # -*- coding: utf-8 -*-
 import os
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
 
 from ops import server_manifest
 from ops.release_guard import SafetyError
+
+ROOT = Path(__file__).resolve().parents[1]
 
 
 class ServerManifestTests(unittest.TestCase):
@@ -21,9 +24,15 @@ class ServerManifestTests(unittest.TestCase):
         self.write(root, "bridge/app.py", b"application = object()\n")
         self.write(root, "tests/test_app.py", b"def test_x(): pass\n")
         self.write(root, "ops/helper.py", b"x = 1\n")
+        self.write(root, "ops/README.md", b"safe tooling notes\n")
         self.write(root, "tools/helper.py", b"x = 1\n")
         self.write(root, "requirements.txt", b"pkg==1\n")
+        self.write(root, "requirements.lock", b"pkg==1 --hash=sha256:" + b"0" * 64 + b"\n")
         self.write(root, "docs/README.md", b"safe\n")
+        self.write(root, ".github/workflows/ci.yml", b"name: guard\n")
+        self.write(root, "integration/provenance_v1.json", b"{}\n")
+        self.write(root, "reference_candidate/hostiq_v0_4/CANDIDATE_PROVENANCE.json", b"{}\n")
+        self.write(root, "reference_candidate/hostiq_v0_4/README_REFERENCE_ONLY.md", b"reference only\n")
         self.write(root, "README.md", b"safe\n")
 
     def test_hash_only_manifest_classifies_reviewed_files(self):
@@ -35,8 +44,27 @@ class ServerManifestTests(unittest.TestCase):
             self.assertEqual("empty_extra", rows["install_server.sh"]["category"])
             self.assertEqual("application_source", rows["bridge/app.py"]["category"])
             self.assertEqual("dependency_input", rows["requirements.txt"]["category"])
+            self.assertEqual("tooling_metadata", rows[".github/workflows/ci.yml"]["category"])
+            self.assertEqual("tooling_metadata", rows["integration/provenance_v1.json"]["category"])
+            self.assertEqual("sanitized_metadata", rows["reference_candidate/hostiq_v0_4/CANDIDATE_PROVENANCE.json"]["category"])
+            self.assertEqual("tooling_metadata", rows["ops/README.md"]["category"])
             self.assertEqual(64, len(rows["bridge/app.py"]["sha256"]))
             self.assertNotIn("content", rows["bridge/app.py"])
+
+    def test_every_current_git_tracked_path_has_reviewed_category(self):
+        output = subprocess.run(
+            ["git", "ls-files", "-z"],
+            cwd=ROOT,
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        ).stdout
+        tracked = [raw.decode("utf-8") for raw in output.split(b"\0") if raw]
+        self.assertGreater(len(tracked), 1)
+        for rel in tracked:
+            path = ROOT / rel
+            with self.subTest(path=rel):
+                self.assertIn(server_manifest._category(rel, path.stat().st_size), server_manifest.SAFE_CATEGORIES)
 
     def test_private_runtime_directories_are_not_entered_or_serialized(self):
         with tempfile.TemporaryDirectory() as td:
@@ -59,6 +87,13 @@ class ServerManifestTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td); self.candidate(root)
             self.write(root, "mystery.bin", b"opaque")
+            with self.assertRaises(SafetyError):
+                server_manifest.collect_server_manifest(root)
+
+    def test_unreviewed_reference_candidate_namespace_fails_closed(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td); self.candidate(root)
+            self.write(root, "reference_candidate/unreviewed/item.json", b"{}")
             with self.assertRaises(SafetyError):
                 server_manifest.collect_server_manifest(root)
 
