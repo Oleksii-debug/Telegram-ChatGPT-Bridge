@@ -60,6 +60,22 @@ def _assert_ancestor(ancestor: str, descendant: str) -> None:
         raise ProvenanceError("required provenance commit is not an ancestor of candidate HEAD")
 
 
+def _valid_sha(value: object) -> bool:
+    return isinstance(value, str) and len(value) == 40 and all(ch in "0123456789abcdef" for ch in value)
+
+
+def _safe_sorted_paths(value: object, label: str) -> list[str]:
+    if not isinstance(value, list) or not value or value != sorted(set(value)):
+        raise ProvenanceError(f"{label} path allowlist invalid")
+    for raw in value:
+        if not isinstance(raw, str) or not raw:
+            raise ProvenanceError(f"{label} path allowlist invalid")
+        path = PurePosixPath(raw)
+        if path.is_absolute() or ".." in path.parts:
+            raise ProvenanceError(f"{label} path allowlist unsafe")
+    return value
+
+
 def _load() -> dict[str, Any]:
     try:
         payload = json.loads(MANIFEST.read_text(encoding="utf-8"))
@@ -75,28 +91,45 @@ def _load_release_override() -> dict[str, Any]:
         payload = json.loads(RELEASE_OVERRIDE.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise ProvenanceError("release-to-live provenance overlay is unreadable") from exc
-    if not isinstance(payload, dict) or payload.get("schema_version") != 1:
+    if not isinstance(payload, dict) or payload.get("schema_version") != 2:
         raise ProvenanceError("release-to-live provenance overlay schema mismatch")
-    if payload.get("round") != "RELEASE_TO_LIVE_ROUND_2_P1":
+    if payload.get("round") != "RELEASE_TO_LIVE_ROUND_2":
         raise ProvenanceError("release-to-live provenance round mismatch")
-    checkpoint = str(payload.get("source_checkpoint", ""))
-    if len(checkpoint) != 40 or any(ch not in "0123456789abcdef" for ch in checkpoint):
+    if payload.get("purpose") != "canonical_release_packaging_runtime_evidence_and_final_qa_integration":
+        raise ProvenanceError("release-to-live purpose mismatch")
+    checkpoint = payload.get("source_checkpoint")
+    if not _valid_sha(checkpoint):
         raise ProvenanceError("release-to-live source checkpoint invalid")
-    paths = payload.get("paths")
-    if not isinstance(paths, list) or not paths or paths != sorted(set(paths)):
-        raise ProvenanceError("release-to-live path allowlist invalid")
-    for raw in paths:
-        if not isinstance(raw, str) or not raw:
-            raise ProvenanceError("release-to-live path allowlist invalid")
-        path = PurePosixPath(raw)
-        if path.is_absolute() or ".." in path.parts:
-            raise ProvenanceError("release-to-live path allowlist unsafe")
+    paths = _safe_sorted_paths(payload.get("paths"), "release-to-live")
     commits = payload.get("trace_commits")
     if not isinstance(commits, list) or not commits:
         raise ProvenanceError("release-to-live trace commits missing")
     for commit in commits:
-        if not isinstance(commit, str) or len(commit) != 40 or any(ch not in "0123456789abcdef" for ch in commit):
+        if not _valid_sha(commit):
             raise ProvenanceError("release-to-live trace commit invalid")
+    if payload.get("runtime_packages") != {
+        "Telethon": "1.44.0",
+        "pyaes": "1.6.1",
+        "rsa": "4.9.1",
+        "pyasn1": "0.6.4",
+    }:
+        raise ProvenanceError("release-to-live runtime package identity mismatch")
+    if payload.get("test_only_dependencies") != "NONE_REQUIRED":
+        raise ProvenanceError("release-to-live test dependency state invalid")
+
+    dev_b = payload.get("dev_b")
+    if not isinstance(dev_b, dict) or dev_b.get("pr") != 11:
+        raise ProvenanceError("DEV_B release provenance missing")
+    for field in ("sha", "merge_commit", "first_parent"):
+        if not _valid_sha(dev_b.get(field)):
+            raise ProvenanceError("DEV_B release provenance SHA invalid")
+    imported = set(_safe_sorted_paths(dev_b.get("imported_paths"), "DEV_B imported"))
+    adapted = set(_safe_sorted_paths(dev_b.get("adapted_paths"), "DEV_B adapted"))
+    supersedes = set(_safe_sorted_paths(dev_b.get("supersedes_predecessor_paths"), "DEV_B supersession"))
+    if not adapted <= imported or not supersedes <= imported:
+        raise ProvenanceError("DEV_B adaptation/supersession escapes imported path set")
+    if not imported <= set(paths):
+        raise ProvenanceError("DEV_B imported path missing from release-to-live allowlist")
     if payload.get("private_values_recorded") is not False:
         raise ProvenanceError("release-to-live overlay records private values")
     if payload.get("production_mutated") is not False or payload.get("deployment_authorized") is not False:
@@ -161,6 +194,10 @@ def verify_repository() -> dict[str, Any]:
     head = _git("rev-parse", "HEAD")
     base = str(manifest["base"]["sha"])
     predecessors = manifest["predecessors"]
+    dev_b = release_override["dev_b"]
+    dev_b_imported = set(dev_b["imported_paths"])
+    dev_b_adapted = set(dev_b["adapted_paths"])
+    dev_b_supersedes = set(dev_b["supersedes_predecessor_paths"])
 
     overlap_counts = _verify_overlap_matrix(manifest)
 
@@ -169,6 +206,7 @@ def verify_repository() -> dict[str, Any]:
         predecessors["DEV4"]["merge_commit"]: (predecessors["DEV3"]["merge_commit"], predecessors["DEV4"]["sha"]),
         predecessors["DEV2"]["merge_commit"]: (predecessors["DEV4"]["merge_commit"], predecessors["DEV2"]["sha"]),
         predecessors["DEV5"]["merge_commit"]: (predecessors["DEV2"]["merge_commit"], predecessors["DEV5"]["sha"]),
+        dev_b["merge_commit"]: (dev_b["first_parent"], dev_b["sha"]),
     }
     for commit, expected in expected_parent_sets.items():
         actual = _parents(str(commit))
@@ -182,12 +220,16 @@ def verify_repository() -> dict[str, Any]:
     for commit in release_override["trace_commits"]:
         _assert_ancestor(str(commit), head)
 
+    predecessor_supersession_owner = set(predecessors["DEV2"]["paths"])
+    if not dev_b_supersedes <= predecessor_supersession_owner:
+        raise ProvenanceError("DEV_B supersession is outside DEV2 predecessor path set")
+
     for lane in ("DEV3", "DEV4", "DEV2"):
         data = predecessors[lane]
         source = str(data["sha"])
         overrides = _validate_override_subset(data, "paths")
         for path in data["paths"]:
-            if path in overrides:
+            if path in overrides or (lane == "DEV2" and path in dev_b_supersedes):
                 continue
             if _blob("HEAD", path) != _blob(source, path):
                 raise ProvenanceError(f"unexpected post-import mutation: {lane}:{path}")
@@ -202,6 +244,12 @@ def verify_repository() -> dict[str, Any]:
     for path in dev5["rejected_overlaps_preserve_base"]:
         if _blob("HEAD", path) != _blob(base, path):
             raise ProvenanceError(f"rejected DEV5 overlap overwrote DEV1 authority: {path}")
+
+    for path in dev_b_imported:
+        if path in dev_b_adapted:
+            continue
+        if _blob("HEAD", path) != _blob(str(dev_b["sha"]), path):
+            raise ProvenanceError(f"unexpected DEV_B imported-path drift: {path}")
 
     allowed_paths: set[str] = set(manifest["dev_a_paths"])
     for lane in ("DEV3", "DEV4", "DEV2"):
@@ -238,10 +286,13 @@ def verify_repository() -> dict[str, Any]:
         "head": head,
         "base": base,
         "changed_path_count": len(changed),
-        "verified_predecessor_count": 4,
-        "semantic_merge_count": 4,
+        "verified_predecessor_count": 5,
+        "semantic_merge_count": 5,
         "dev3_override_count": len(_validate_override_subset(predecessors["DEV3"], "paths")),
         "adapted_dev5_path_count": len(dev5_overrides),
+        "dev_b_imported_path_count": len(dev_b_imported),
+        "dev_b_adapted_path_count": len(dev_b_adapted),
+        "dev_b_superseded_path_count": len(dev_b_supersedes),
         "pr2_pr3_overlap_count": overlap_counts["PR2_PR3"],
         "pr2_pr5_overlap_count": overlap_counts["PR2_PR5"],
         "rejected_dev5_overlap_count": len(dev5["rejected_overlaps_preserve_base"]),
