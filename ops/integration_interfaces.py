@@ -4,6 +4,10 @@
 This module intentionally contains interfaces and bounded value objects only.
 It does not import DEV2-DEV5 implementations, perform Telegram/network I/O, or
 carry production secrets/private Telegram content.
+
+The vocabulary here is an adapter contract for the integrated candidate.  It
+must represent the canonical DEV3 read route identifiers/access classes and
+DEV4 Action/write identifiers without changing their runtime safety semantics.
 """
 from __future__ import annotations
 
@@ -12,9 +16,19 @@ from dataclasses import dataclass
 from typing import Any, Literal, Mapping, Protocol
 
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+# DEV3 uses dotted lowercase operation IDs (``dialogs.list``); DEV4 Action uses
+# lower-camel IDs (``listTelegramDialogs``).  Accept exactly those reviewed
+# grammars plus the historical lowercase snake form used by shared contracts.
+OPERATION_ID_RE = re.compile(
+    r"^(?:[a-z][a-z0-9_]{2,79}|[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)+|[a-z][A-Za-z0-9]{2,79})$"
+)
 SAFE_METHODS = {"GET", "POST", "PUT", "PATCH", "DELETE"}
 SAFE_ROUTE_CLASSES = {
-    "PUBLIC_HEALTH", "PROTECTED_READ", "PROTECTED_WRITE", "PRIVATE_SETUP",
+    "PUBLIC_HEALTH",
+    "PROTECTED_READ",
+    "PROTECTED_OR_SIGNED",
+    "PROTECTED_WRITE",
+    "PRIVATE_SETUP",
 }
 
 
@@ -84,7 +98,7 @@ class WritePreview:
             (self.payload_sha256, "payload"),
         ):
             _require_sha256(value, label)
-        if self.operation_kind not in {"SEND", "REPLY", "FORWARD", "SEND_FILE"}:
+        if self.operation_kind not in {"SEND", "REPLY", "FORWARD", "SEND_FILES"}:
             raise ValueError("unsupported write operation")
         if isinstance(self.expires_at, bool) or not isinstance(self.expires_at, int) or self.expires_at < 0:
             raise ValueError("preview expiry must be a non-negative integer")
@@ -110,7 +124,7 @@ class RoutePolicy:
     path_template: str
     operation_id: str
     classification: Literal[
-        "PUBLIC_HEALTH", "PROTECTED_READ", "PROTECTED_WRITE", "PRIVATE_SETUP"
+        "PUBLIC_HEALTH", "PROTECTED_READ", "PROTECTED_OR_SIGNED", "PROTECTED_WRITE", "PRIVATE_SETUP"
     ]
     preview_commit_required: bool = False
 
@@ -123,7 +137,7 @@ class RoutePolicy:
             raise ValueError("invalid route template")
         if ".." in self.path_template or "?" in self.path_template or "#" in self.path_template:
             raise ValueError("route template must be canonical")
-        if not isinstance(self.operation_id, str) or not re.fullmatch(r"[a-z][a-z0-9_]{2,79}", self.operation_id):
+        if not isinstance(self.operation_id, str) or not OPERATION_ID_RE.fullmatch(self.operation_id):
             raise ValueError("invalid operation id")
         if self.classification not in SAFE_ROUTE_CLASSES:
             raise ValueError("unknown route classification")
