@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """Non-auto-armed HOSTiQ lifecycle hooks for audited deployment integration.
 
-All executable/token/SHA references must live under an owner-controlled private
-control root.  Public Git alone cannot arm or trigger these hooks.
+All executable/reference files must live under an owner-controlled private
+control root. Public Git alone cannot arm or trigger these hooks.
 """
 from __future__ import annotations
 
@@ -13,8 +13,8 @@ import re
 import stat
 import subprocess
 import urllib.error
-import urllib.request
 import urllib.parse
+import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -30,6 +30,10 @@ MAX_HTTP_BODY = 32 * 1024
 DEFAULT_TIMEOUT = 5.0
 SAFE_PRIVATE_HOOK_NAMES = {"restart", "rollback"}
 SETUP_PATH_RE = re.compile(r"/setup-[A-Za-z0-9_-]{16,}", re.IGNORECASE)
+EXPECTED_HEALTH_COMPONENTS = {"auth", "backend", "storage", "rate_limit"}
+EXPECTED_COMPONENT_STATES = {"configured", "unconfigured"}
+CANDIDATE_READ_PROBE_PATH = "/api/v1/dialogs/list"
+
 
 @dataclass(frozen=True)
 class HookResult:
@@ -126,7 +130,56 @@ def _request(url: str, *, timeout: float, token: str | None = None) -> tuple[int
     return status, body, content_type
 
 
-def health_check(url: str, *, timeout: float = DEFAULT_TIMEOUT) -> HookResult:
+def _request_post_empty_json(url: str, *, timeout: float, token: str) -> tuple[int, bytes, str]:
+    validate_endpoint_url(url)
+    parsed = urllib.parse.urlsplit(url)
+    if parsed.path != CANDIDATE_READ_PROBE_PATH or parsed.query:
+        raise SafetyError("authenticated candidate probe endpoint invalid")
+    headers = {
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+        "User-Agent": "TelegramBridgeRuntimeVerifier/1",
+        "Authorization": "Bearer " + token,
+    }
+    request = urllib.request.Request(url, headers=headers, data=b"{}", method="POST")
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            body = response.read(MAX_HTTP_BODY + 1)
+            status = int(response.status)
+            content_type = response.headers.get("Content-Type", "")
+    except urllib.error.HTTPError as exc:
+        body = exc.read(MAX_HTTP_BODY + 1)
+        status = int(exc.code)
+        content_type = exc.headers.get("Content-Type", "") if exc.headers else ""
+    if len(body) > MAX_HTTP_BODY:
+        raise SafetyError("smoke response body too large")
+    return status, body, content_type
+
+
+def _candidate_health_payload(data: object) -> tuple[bool, bool]:
+    if not isinstance(data, dict) or set(data) != {"ok", "service", "ready", "components"}:
+        raise SafetyError("candidate health schema invalid")
+    if data["ok"] is not True or data["service"] != "telegram-bridge" or not isinstance(data["ready"], bool):
+        raise SafetyError("candidate health identity invalid")
+    components = data["components"]
+    if not isinstance(components, dict) or set(components) != EXPECTED_HEALTH_COMPONENTS:
+        raise SafetyError("candidate health components invalid")
+    if any(value not in EXPECTED_COMPONENT_STATES for value in components.values()):
+        raise SafetyError("candidate health component state invalid")
+    computed_ready = all(value == "configured" for value in components.values())
+    if data["ready"] is not computed_ready:
+        raise SafetyError("candidate health readiness inconsistent")
+    return bool(data["ready"]), computed_ready
+
+
+def health_check(url: str, *, timeout: float = DEFAULT_TIMEOUT, allow_bootstrap_not_ready: bool = False) -> HookResult:
+    """Validate the integrated candidate's meaningful, bounded health contract.
+
+    `allow_bootstrap_not_ready` is only for the pre-Telegram-authorization
+    bootstrap stage. It still requires the exact health schema and truthful
+    component/readiness consistency; it never treats an arbitrary HTTP 200 as
+    healthy.
+    """
     try:
         status, body, ctype = _request(url, timeout=timeout)
         if status != 200:
@@ -134,10 +187,13 @@ def health_check(url: str, *, timeout: float = DEFAULT_TIMEOUT) -> HookResult:
         if "json" not in ctype.casefold():
             return HookResult("health", "FAIL", status, "HEALTH_NOT_JSON")
         data = json.loads(body.decode("utf-8"))
-        if not isinstance(data, dict) or not (data.get("status") == "ok" or data.get("ok") is True):
-            return HookResult("health", "FAIL", status, "HEALTH_SHAPE")
-        return HookResult("health", "PASS", status, "HEALTH_OK")
-    except (OSError, ValueError, json.JSONDecodeError, SafetyError):
+        ready, _ = _candidate_health_payload(data)
+        if ready:
+            return HookResult("health", "PASS", status, "HEALTH_READY")
+        if allow_bootstrap_not_ready:
+            return HookResult("health", "PASS", status, "HEALTH_BOOTSTRAP_NOT_READY")
+        return HookResult("health", "FAIL", status, "HEALTH_NOT_READY")
+    except (OSError, UnicodeError, ValueError, json.JSONDecodeError, SafetyError):
         return HookResult("health", "FAIL", None, "HEALTH_EXCEPTION")
 
 
@@ -146,7 +202,6 @@ def unauthenticated_smoke(url: str, *, timeout: float = DEFAULT_TIMEOUT) -> Hook
         status, body, _ = _request(url, timeout=timeout)
         if status not in {401, 403, 404}:
             return HookResult("unauth_smoke", "FAIL", status, "UNAUTH_NOT_REJECTED")
-        # Never serialize body; reject obvious server error/private-page signatures only by boolean decision.
         lowered = body[:4096].decode("utf-8", errors="ignore").casefold()
         if "traceback (most recent call last)" in lowered or "tg_session_string" in lowered or "api_hash" in lowered:
             return HookResult("unauth_smoke", "FAIL", status, "UNAUTH_LEAK_SIGNATURE")
@@ -155,24 +210,69 @@ def unauthenticated_smoke(url: str, *, timeout: float = DEFAULT_TIMEOUT) -> Hook
         return HookResult("unauth_smoke", "FAIL", None, "UNAUTH_EXCEPTION")
 
 
+def _read_private_bearer(private_root: Path, token_file: Path) -> str:
+    token_path = validate_private_file(private_root, token_file)
+    token = token_path.read_text(encoding="utf-8").strip()
+    if len(token) < 24 or len(token) > 512 or any(ch.isspace() for ch in token):
+        raise SafetyError("private bearer reference invalid")
+    return token
+
+
 def authenticated_smoke(url: str, *, private_root: Path, token_file: Path, timeout: float = DEFAULT_TIMEOUT) -> HookResult:
+    """Generic authenticated GET smoke retained for existing private endpoints."""
     try:
-        token_path = validate_private_file(private_root, token_file)
-        token = token_path.read_text(encoding="utf-8").strip()
-        if len(token) < 24 or len(token) > 512 or any(ch.isspace() for ch in token):
-            raise SafetyError("private bearer reference invalid")
+        token = _read_private_bearer(private_root, token_file)
         status, body, ctype = _request(url, timeout=timeout, token=token)
-        token = ""  # minimize lifetime of reference
+        token = ""
         if status != 200 or "json" not in ctype.casefold():
             return HookResult("auth_smoke", "FAIL", status, "AUTH_STATUS_OR_TYPE")
         data = json.loads(body.decode("utf-8"))
         if not isinstance(data, dict):
             return HookResult("auth_smoke", "FAIL", status, "AUTH_SHAPE")
-        # Only test safe structural status keys; never return body content.
         if not (data.get("status") in {"ok", "ready"} or data.get("ok") is True):
             return HookResult("auth_smoke", "FAIL", status, "AUTH_SHAPE")
         return HookResult("auth_smoke", "PASS", status, "AUTH_OK")
-    except (OSError, ValueError, json.JSONDecodeError, SafetyError):
+    except (OSError, UnicodeError, ValueError, json.JSONDecodeError, SafetyError):
+        return HookResult("auth_smoke", "FAIL", None, "AUTH_EXCEPTION")
+
+
+def candidate_authenticated_read_smoke(
+    url: str,
+    *,
+    private_root: Path,
+    token_file: Path,
+    timeout: float = DEFAULT_TIMEOUT,
+    allow_backend_unconfigured: bool = False,
+) -> HookResult:
+    """Authenticated POST probe for the integrated read API.
+
+    When Telegram authorization is intentionally not yet required, an exact
+    structured 503 `telegram_backend_unconfigured` result proves the bearer was
+    accepted and the app truthfully remains not ready, without a live Telegram
+    operation. Other 4xx/5xx results do not pass.
+    """
+    try:
+        token = _read_private_bearer(private_root, token_file)
+        status, body, ctype = _request_post_empty_json(url, timeout=timeout, token=token)
+        token = ""
+        if "json" not in ctype.casefold():
+            return HookResult("auth_smoke", "FAIL", status, "AUTH_NOT_JSON")
+        data = json.loads(body.decode("utf-8"))
+        if status == 200:
+            if isinstance(data, dict) and data.get("ok") is True and isinstance(data.get("data"), dict):
+                return HookResult("auth_smoke", "PASS", status, "AUTH_READ_OK")
+            return HookResult("auth_smoke", "FAIL", status, "AUTH_SHAPE")
+        if allow_backend_unconfigured and status == 503:
+            if (
+                isinstance(data, dict)
+                and data.get("ok") is False
+                and isinstance(data.get("error"), dict)
+                and set(data["error"]).issuperset({"code"})
+                and data["error"].get("code") == "telegram_backend_unconfigured"
+            ):
+                return HookResult("auth_smoke", "PASS", status, "AUTH_ACCEPTED_BACKEND_NOT_READY")
+        return HookResult("auth_smoke", "FAIL", status, "AUTH_STATUS_OR_SHAPE")
+    except (OSError, UnicodeError, ValueError, json.JSONDecodeError, SafetyError):
         return HookResult("auth_smoke", "FAIL", None, "AUTH_EXCEPTION")
 
 
