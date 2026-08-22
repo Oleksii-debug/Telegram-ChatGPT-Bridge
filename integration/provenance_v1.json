@@ -141,6 +141,12 @@
     "tests/test_dev_a_candidate_contracts.py", "tests/test_dev_a_integration.py", "tests/test_dev_a_provenance.py",
     "tools/verify_integration_provenance.py"
   ],
+  "dev_c_validation_paths": [
+    "docs/DEV_C_E2E_QA.md",
+    "ops/devc_portable_qa.py",
+    "tests/test_devc_integrated_candidate.py",
+    "tests/test_devc_portable_qa.py"
+  ],
   "safety_boundary": {
     "merge": false,
     "deploy": false,
