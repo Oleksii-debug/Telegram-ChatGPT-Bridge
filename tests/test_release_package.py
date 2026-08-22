@@ -19,6 +19,7 @@ from ops.release_package import (
     validate_public_release_tree,
     validate_wsgi_contract,
 )
+from tools import verify_release_prepare as release_prepare
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -121,6 +122,40 @@ class ReleasePackageContractTests(unittest.TestCase):
     def test_no_meaningless_test_requirement_files_are_present(self):
         self.assertFalse((ROOT / "requirements-test.txt").exists())
         self.assertFalse((ROOT / "requirements-test.lock").exists())
+
+    def test_exact_prepare_verification_ignores_working_checkout_dependency_drift(self):
+        """PR merge-ref bytes must never become the exact release identity source."""
+        with tempfile.TemporaryDirectory() as repo_td, tempfile.TemporaryDirectory() as prepared_td:
+            repo = Path(repo_td)
+            prepared = Path(prepared_td)
+            # Deliberately make the workflow/working checkout invalid and different.
+            (repo / "requirements.txt").write_text("Telethon==0.0.1\n", encoding="utf-8")
+            (repo / "requirements.lock").write_text("not-the-candidate-lock\n", encoding="utf-8")
+
+            # The PREPARE result represents bytes exported from the exact Git SHA.
+            for name in ("passenger_wsgi.py", "requirements.txt", "requirements.lock"):
+                shutil.copy2(ROOT / name, prepared / name)
+            sha = "a" * 40
+            meta = {
+                "sha": sha,
+                "requirements_lock_sha256": release_prepare.sha256_file(prepared / "requirements.lock"),
+                "requirements_test_lock_sha256": None,
+                "immutable_permission_policy": "no-write-bits-v1",
+                "payload_manifest_sha256": "b" * 64,
+            }
+            exact_paths = ["passenger_wsgi.py", "requirements.txt", "requirements.lock"]
+            with mock.patch.object(release_prepare, "_git_paths", return_value=exact_paths), \
+                 mock.patch.object(
+                     release_prepare,
+                     "prepare_versioned_release",
+                     return_value=(prepared, meta, "c" * 64),
+                 ), \
+                 mock.patch.object(release_prepare, "verify_prepared_release", return_value=meta), \
+                 mock.patch.object(release_prepare, "_verify_installed_runtime"):
+                result = release_prepare.verify_exact_candidate(repo, sha, "origin/candidate")
+            self.assertEqual("NONLIVE_PREPARE_VERIFIED", result["state"])
+            self.assertEqual(4, result["package_count"])
+            self.assertEqual(meta["requirements_lock_sha256"], result["requirements_lock_sha256"])
 
 
 if __name__ == "__main__":
