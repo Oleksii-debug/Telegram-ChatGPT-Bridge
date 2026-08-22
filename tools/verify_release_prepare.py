@@ -80,12 +80,15 @@ def _verify_installed_runtime(prepared: Path) -> None:
 
 
 def verify_exact_candidate(repo: Path, sha: str, approved_ref: str) -> dict[str, object]:
+    """Verify only bytes exported from ``sha``; never trust working-tree bytes.
+
+    Pull-request workflows normally check out a synthetic merge ref.  The
+    canonical release identity, dependency lock and startup contract therefore
+    must be derived from the exact Git object exported by the deployment
+    PREPARE transaction, not from files present in that workflow checkout.
+    """
     repo = repo.resolve(strict=True)
     paths = _git_paths(repo, sha)
-    # Validate the public package contract against the exact checked-out candidate
-    # before the expensive real PREPARE. Git's exact-ref policy is enforced again
-    # inside prepare_versioned_release().
-    package = validate_public_release_tree(repo, paths=paths)
 
     with tempfile.TemporaryDirectory(prefix="telegram-bridge-prepare-") as tmp:
         releases_root = Path(tmp) / "releases"
@@ -103,7 +106,13 @@ def verify_exact_candidate(repo: Path, sha: str, approved_ref: str) -> dict[str,
             raise SafetyError("prepared release metadata changed during verification")
         if meta.get("sha") != sha:
             raise SafetyError("prepared release identity does not match candidate SHA")
-        if meta.get("requirements_lock_sha256") != sha256_file(repo / "requirements.lock"):
+
+        # Validate package/startup/dependency bytes only after the exact Git SHA
+        # has been exported and sealed by PREPARE.  ``paths`` is the exact Git
+        # tree inventory so generated .venv/metadata cannot expand release scope.
+        package = validate_public_release_tree(prepared, paths=paths)
+        prepared_lock = prepared / "requirements.lock"
+        if meta.get("requirements_lock_sha256") != sha256_file(prepared_lock):
             raise SafetyError("prepared release is not bound to the canonical runtime lock")
         if meta.get("requirements_test_lock_sha256") is not None:
             raise SafetyError("unexpected test-only dependency lock in canonical release")
