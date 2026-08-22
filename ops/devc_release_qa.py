@@ -146,6 +146,19 @@ def validate_dependency_envelope(
     return sorted(defects), len(input_packages), len(locked_packages)
 
 
+def _safe_all_export(node: ast.AST) -> bool:
+    if not isinstance(node, ast.Assign) or len(node.targets) != 1:
+        return False
+    target = node.targets[0]
+    if not isinstance(target, ast.Name) or target.id != "__all__":
+        return False
+    value = node.value
+    if not isinstance(value, (ast.List, ast.Tuple)) or len(value.elts) != 1:
+        return False
+    item = value.elts[0]
+    return isinstance(item, ast.Constant) and item.value == "application"
+
+
 def validate_passenger_wsgi_source(source: str | None) -> list[str]:
     if source is None:
         return ["PASSENGER_WSGI_MISSING"]
@@ -170,11 +183,16 @@ def validate_passenger_wsgi_source(source: str | None) -> list[str]:
             if len(node.names) != 1:
                 defects.add("PASSENGER_WSGI_UNSAFE_TOP_LEVEL")
             continue
+        if _safe_all_export(node):
+            continue
         defects.add("PASSENGER_WSGI_UNSAFE_TOP_LEVEL")
     if canonical_imports != 1:
         defects.add("PASSENGER_WSGI_CANONICAL_IMPORT_MISSING")
     for node in ast.walk(tree):
-        if isinstance(node, (ast.Call, ast.Assign, ast.AnnAssign, ast.AugAssign, ast.With, ast.AsyncWith, ast.Try)):
+        if isinstance(node, (ast.Call, ast.AnnAssign, ast.AugAssign, ast.With, ast.AsyncWith, ast.Try)):
+            defects.add("PASSENGER_WSGI_IMPORT_SIDE_EFFECT_RISK")
+            break
+        if isinstance(node, ast.Assign) and not _safe_all_export(node):
             defects.add("PASSENGER_WSGI_IMPORT_SIDE_EFFECT_RISK")
             break
     return sorted(defects)
