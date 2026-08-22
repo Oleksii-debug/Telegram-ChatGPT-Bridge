@@ -54,6 +54,37 @@ Send-file commit resolves only registered private Bridge file references. Regist
 
 External Telegram receipts are reduced to bounded metadata (`operation`, positive `message_ids`, optional numeric `chat_id`, `count`) before being persisted/returned. Arbitrary adapter strings cannot become successful receipt payloads.
 
+## Cross-lane compatibility repair
+
+`ops.integration_interfaces` is now an explicit adapter vocabulary rather than a stale predecessor grammar. It represents DEV3 dotted runtime operation IDs, DEV4 camelCase Action IDs, `SEND_FILES`, and the DEV3 `PROTECTED_OR_SIGNED` private-file class. The adapter does not weaken writes: every `PROTECTED_WRITE` policy still requires `preview_commit_required=True`, and malformed/unknown operation IDs remain fail-closed.
+
+DEV_C's earlier high finding that write routes were not mounted was measured against the older DEV_A `c7dbcdb...` checkpoint. The current candidate supersedes that checkpoint: all eight DEV4 preview/commit routes are dispatched by the unified WSGI layer and are covered by black-box mocked WSGI tests. DEV_C must still independently revalidate the final exact DEV_A head; source success is not deployed Action evidence.
+
+## DEV5 fuzz adaptation
+
+The original DEV5 fuzz file assumed helper APIs from DEV5 acceptance/evidence files that were intentionally rejected to preserve DEV1 production/control authority. DEV_A did not restore those helpers. Instead the adversarial vectors were adapted to the real integrated boundaries:
+
+- actual DEV3 WSGI JSON/content-length/auth parsing;
+- actual `BearerGuard` and strict integer/file-ref validation;
+- DEV1 structured evidence refs/environment/fact schemas;
+- actual private `FileRecordStore` + `ArchiveBuilder` limits and CRC;
+- DEV3/DEV4 integration interface adapter;
+- imported DEV5 crash-safe idempotency oracle.
+
+Archive member naming was additionally hardened to Unicode NFC + casefold collision keys with deterministic disambiguation and post-build collision/CRC validation. This preserves Unicode while preventing equivalent member-name ambiguity across ZIP consumers.
+
+## Candidate API inventory and 67-criterion truth accounting
+
+`ops.candidate_contracts` derives a 19-route integrated API inventory from the actual DEV3 runtime registry plus DEV4 `OPERATIONS`: 17 Action operations, public health, and protected-or-signed binary file serving. Each row maps method/path, runtime and Action operation IDs, safety class, authentication policy, rate class, audit policy, and applicable acceptance criteria. CI fails if the inventory drifts from the actual registries or if a private setup surface appears.
+
+The same module provides an exact 67-criterion candidate evidence map. Counts are deliberately conservative:
+
+- `SYNTHETIC_EXECUTABLE`: 37;
+- `REAL_SOURCE_REQUIRED`: 13;
+- `LIVE_EXTERNAL_REQUIRED`: 17.
+
+Every row explicitly has `product_pass=false`. Deployed Action equality H1, human keyboard/NVDA criteria I1/I4/I6, Passenger/live deployment criteria, and K1-K5 remain `LIVE_EXTERNAL_REQUIRED`. K5 additionally requires later Independent Auditor write approval plus a fresh explicit user commit. This candidate-specific accounting supersedes any older synthetic planning label that could otherwise overstate those human/live criteria.
+
 ## Fail-closed defaults
 
 The default unified application is intentionally not ready for production traffic until server-side dependencies are injected:
@@ -88,5 +119,8 @@ Independent audit should verify at least:
 11. private file-ref/hash/size enforcement for send-files;
 12. no private body/token/target in metadata-only audit events;
 13. fail-closed defaults when limiter/store/writer are absent;
-14. complete CI, current-tree secret scan and full-history secret scan;
-15. preservation of the production no-merge/no-deploy/no-live-write gate.
+14. cross-lane interface vocabulary compatibility;
+15. adapted DEV5 fuzz vectors against actual integrated modules;
+16. candidate 19-route inventory and exact 67-criterion truth accounting;
+17. complete CI, current-tree secret scan and full-history secret scan;
+18. preservation of the production no-merge/no-deploy/no-live-write gate.
