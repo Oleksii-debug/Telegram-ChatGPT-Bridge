@@ -143,9 +143,12 @@
   ],
   "dev_c_validation_paths": [
     "docs/DEV_C_E2E_QA.md",
+    "docs/DEV_C_RELEASE_TO_LIVE_QA.md",
     "ops/devc_portable_qa.py",
+    "ops/devc_release_qa.py",
     "tests/test_devc_integrated_candidate.py",
-    "tests/test_devc_portable_qa.py"
+    "tests/test_devc_portable_qa.py",
+    "tests/test_devc_release_qa.py"
   ],
   "safety_boundary": {
     "merge": false,
