@@ -42,10 +42,23 @@ def _category(path: str, size: int) -> str:
         return "tests"
     if parts and parts[0] in {"ops", "tools"} and name.endswith((".py", ".sh")):
         return "tooling"
+    if parts and parts[0] in {"ops", "tools"} and name.endswith((".md", ".txt", ".json")):
+        return "tooling_metadata"
     if name in {"requirements.txt", "requirements.lock", "requirements-dev.txt", "constraints.txt", "pyproject.toml", "poetry.lock"}:
         return "dependency_input"
     if parts and parts[0] == "docs" and name.endswith((".md", ".txt", ".json")):
         return "documentation_metadata"
+    if len(parts) == 3 and parts[0] == ".github" and parts[1] == "workflows" and name.endswith((".yml", ".yaml")):
+        return "tooling_metadata"
+    if len(parts) == 2 and parts[0] == "integration" and name.endswith(".json"):
+        return "tooling_metadata"
+    if (
+        len(parts) == 3
+        and parts[0] == "reference_candidate"
+        and parts[1] == "hostiq_v0_4"
+        and name.endswith((".json", ".md"))
+    ):
+        return "sanitized_metadata"
     if name in {"readme.md", "recovery_baseline.md", ".gitignore", ".secret-scan-allowlist.json"}:
         return "sanitized_metadata"
     raise SafetyError("unreviewed application-root file class")
@@ -113,6 +126,8 @@ def collect_server_manifest(app_root: Path) -> dict:
                 raise SafetyError("application-root path collision")
             folded.add(rel.casefold())
             category = _category(rel, st.st_size)
+            if category not in SAFE_CATEGORIES:
+                raise SafetyError("manifest category not in reconciliation schema")
             digest, size = _hash_regular(absolute, st)
             total_bytes += size
             if total_bytes > MAX_TOTAL_BYTES:
