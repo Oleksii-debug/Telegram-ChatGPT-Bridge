@@ -64,7 +64,7 @@
         "tests/test_archive_security.py", "tests/test_backend_read.py", "tests/test_dev3_round2.py",
         "tests/test_read_app.py", "tests/test_storage_downloads.py", "tests/test_validation_security.py"
       ],
-      "dev_a_overrides": ["bridge/__init__.py"]
+      "dev_a_overrides": ["bridge/__init__.py", "bridge/archive.py"]
     },
     "DEV4": {
       "pr": 7,
@@ -104,6 +104,7 @@
         "docs/DEV5_QA_SECURITY_MATRIX.md", "docs/DEV5_ROUND2_QA.md", "ops/dev5_round2_oracles.py",
         "tests/test_dev5_round2.py", "tests/test_dev5_round2_fuzz.py"
       ],
+      "dev_a_overrides": ["tests/test_dev5_round2_fuzz.py"],
       "rejected_overlaps_preserve_base": [
         "docs/ACCEPTANCE_CONTRACTS.md", "docs/ACCEPTANCE_HARNESS.md", "ops/acceptance_contracts.py",
         "ops/acceptance_harness.py", "ops/evidence_privacy.py", "tests/test_acceptance_contracts.py",
@@ -125,12 +126,16 @@
   },
   "assembly_commits": {
     "application_integration": "d1a28da09d7c6d7d5a19a771ee6a2a342aad1324",
-    "ci_gate": "c5b63e779901db01d49fdb2aa90bc4870597a138"
+    "ci_gate": "c5b63e779901db01d49fdb2aa90bc4870597a138",
+    "interface_vocabulary_reconciliation": "738e99eda2afcfe327dac26a87da0cb7c265ee74",
+    "archive_collision_hardening": "e34104f96e63c7f4d117a606e5f8b38c59772a2e",
+    "adapted_dev5_fuzz": "0e9fbf39f9dd6f0bfdf32accbdcb0fb9a31cb797"
   },
   "dev_a_paths": [
     ".github/workflows/ci.yml", "bridge/__init__.py", "bridge/integrated_app.py",
     "docs/DEV_A_INTEGRATED_RELEASE_CANDIDATE.md", "docs/DEV_A_PROVENANCE_LEDGER.md",
-    "integration/provenance_v1.json", "tests/test_dev_a_integration.py", "tests/test_dev_a_provenance.py",
+    "integration/provenance_v1.json", "ops/integration_interfaces.py",
+    "tests/test_dev_a_integration.py", "tests/test_dev_a_provenance.py",
     "tools/verify_integration_provenance.py"
   ],
   "safety_boundary": {
