@@ -17,9 +17,12 @@ MANIFEST = ROOT / "integration" / "provenance_v1.json"
 EXPECTED_DEV_C_VALIDATION_PATHS = frozenset(
     {
         "docs/DEV_C_E2E_QA.md",
+        "docs/DEV_C_RELEASE_TO_LIVE_QA.md",
         "ops/devc_portable_qa.py",
+        "ops/devc_release_qa.py",
         "tests/test_devc_integrated_candidate.py",
         "tests/test_devc_portable_qa.py",
+        "tests/test_devc_release_qa.py",
     }
 )
 
@@ -129,7 +132,7 @@ def _validate_override_subset(data: dict[str, Any], path_key: str) -> set[str]:
 
 
 def _dev_c_validation_paths(manifest: dict[str, Any]) -> set[str]:
-    """Accept only the exact four QA/docs paths in a DEV_C stacked DRAFT PR."""
+    """Accept only the exact reviewed QA/docs paths in a DEV_C stacked DRAFT PR."""
     raw = manifest.get("dev_c_validation_paths")
     if raw is None:
         return set()
