@@ -124,6 +124,49 @@ class PassengerEvidenceHookTests(unittest.TestCase):
             self.assertNotIn("private", result.casefold())
             self.assertTrue(marker.exists())
 
+    def test_bridge_app_request_adapter_derives_canonical_root_and_wsgi(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            bridge = root / "bridge"
+            bridge.mkdir()
+            app_file = bridge / "app.py"
+            app_file.write_text("# app\n", encoding="utf-8")
+            wsgi = root / "passenger_wsgi.py"
+            wsgi.write_text("from bridge.app import application\n", encoding="utf-8")
+            with mock.patch.object(passenger_evidence_hook, "collect_if_armed", return_value="PASSENGER_EVIDENCE_NOT_ARMED") as collect:
+                result = passenger_evidence_hook.collect_if_armed_from_bridge_app(app_file)
+            self.assertEqual("PASSENGER_EVIDENCE_NOT_ARMED", result)
+            collect.assert_called_once_with(app_root=root, wsgi_file=wsgi, home=None)
+
+    def test_bridge_app_request_adapter_rejects_wrong_topology_and_never_raises(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            wrong = root / "app.py"
+            wrong.write_text("# wrong\n", encoding="utf-8")
+            self.assertEqual(
+                "PASSENGER_EVIDENCE_APP_TOPOLOGY_BLOCKED",
+                passenger_evidence_hook.collect_if_armed_from_bridge_app(wrong),
+            )
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            bridge = root / "bridge"; bridge.mkdir()
+            app_file = bridge / "app.py"; app_file.write_text("# app\n", encoding="utf-8")
+            self.assertEqual(
+                "PASSENGER_EVIDENCE_APP_TOPOLOGY_BLOCKED",
+                passenger_evidence_hook.collect_if_armed_from_bridge_app(app_file),
+            )
+
+    def test_bridge_app_request_adapter_does_not_mask_collector_bounded_code(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td); bridge = root / "bridge"; bridge.mkdir()
+            app_file = bridge / "app.py"; app_file.write_text("# app\n", encoding="utf-8")
+            wsgi = root / "passenger_wsgi.py"; wsgi.write_text("from bridge.app import application\n", encoding="utf-8")
+            with mock.patch.object(passenger_evidence_hook, "collect_if_armed", return_value="PASSENGER_EVIDENCE_BLOCKED"):
+                self.assertEqual(
+                    "PASSENGER_EVIDENCE_BLOCKED",
+                    passenger_evidence_hook.collect_if_armed_from_bridge_app(app_file),
+                )
+
 
 if __name__ == "__main__":
     unittest.main()
