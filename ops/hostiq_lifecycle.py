@@ -2,16 +2,14 @@
 """Non-auto-armed HOSTiQ lifecycle hooks for audited deployment integration.
 
 All executable/reference files must live under an owner-controlled private
-control root. Public Git alone cannot arm or trigger these hooks.
+control root. Public Git alone cannot arm or trigger these hooks. Private file
+reads/execution use TOCTOU-resistant descriptor-based access.
 """
 from __future__ import annotations
 
 import hashlib
 import json
-import os
 import re
-import stat
-import subprocess
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -24,6 +22,8 @@ try:
 except ImportError:
     class SafetyError(RuntimeError):
         pass
+
+from ops.private_control import read_private_text, run_private_executable, validate_private_file
 
 SHA40 = re.compile(r"^[0-9a-f]{40}$")
 MAX_HTTP_BODY = 32 * 1024
@@ -43,59 +43,17 @@ class HookResult:
     detail_code: str | None = None
 
 
-def validate_private_root(root: Path) -> Path:
-    root = Path(os.path.abspath(os.fspath(root.expanduser())))
-    if root.is_symlink():
-        raise SafetyError("private control root must not be a symlink")
-    st = root.lstat()
-    if not stat.S_ISDIR(st.st_mode) or st.st_uid != os.getuid() or stat.S_IMODE(st.st_mode) & 0o077:
-        raise SafetyError("unsafe private control root")
-    return root
-
-
-def _inside(root: Path, child: Path) -> Path:
-    root = validate_private_root(root)
-    child = Path(os.path.abspath(os.fspath(child.expanduser())))
-    try:
-        rel = child.relative_to(root)
-    except ValueError as exc:
-        raise SafetyError("private hook path escapes control root") from exc
-    cursor = root
-    for part in rel.parts:
-        cursor = cursor / part
-        if cursor.is_symlink():
-            raise SafetyError("symlink component in private hook path")
-    return child
-
-
-def validate_private_file(root: Path, path: Path, *, require_executable: bool = False, allow_empty: bool = False) -> Path:
-    path = _inside(root, path)
-    st = path.lstat()
-    if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1:
-        raise SafetyError("unsafe private hook topology")
-    if st.st_uid != os.getuid():
-        raise SafetyError("private hook owner mismatch")
-    mode = stat.S_IMODE(st.st_mode)
-    if mode & 0o077:
-        raise SafetyError("private hook permissions too broad")
-    if require_executable and not (mode & 0o100):
-        raise SafetyError("private hook is not owner-executable")
-    if not allow_empty and st.st_size == 0:
-        raise SafetyError("private hook/reference file is empty")
-    return path
-
-
 def run_private_hook(root: Path, hook: Path, *, expected_name: str, timeout: float = 20.0) -> HookResult:
     if expected_name not in SAFE_PRIVATE_HOOK_NAMES:
         raise SafetyError("unsupported private hook name")
-    hook = validate_private_file(root, hook, require_executable=True)
     try:
-        proc = subprocess.run([str(hook)], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                              stderr=subprocess.DEVNULL, timeout=timeout, check=False)
-    except subprocess.TimeoutExpired:
+        rc = run_private_executable(root, hook, timeout=timeout)
+    except SafetyError:
+        raise
+    if rc == -1:
         return HookResult(expected_name, "FAIL", None, "HOOK_TIMEOUT")
-    if proc.returncode != 0:
-        return HookResult(expected_name, "FAIL", proc.returncode, "HOOK_NONZERO")
+    if rc != 0:
+        return HookResult(expected_name, "FAIL", rc, "HOOK_NONZERO")
     return HookResult(expected_name, "PASS", 0, "HOOK_OK")
 
 
@@ -173,13 +131,7 @@ def _candidate_health_payload(data: object) -> tuple[bool, bool]:
 
 
 def health_check(url: str, *, timeout: float = DEFAULT_TIMEOUT, allow_bootstrap_not_ready: bool = False) -> HookResult:
-    """Validate the integrated candidate's meaningful, bounded health contract.
-
-    `allow_bootstrap_not_ready` is only for the pre-Telegram-authorization
-    bootstrap stage. It still requires the exact health schema and truthful
-    component/readiness consistency; it never treats an arbitrary HTTP 200 as
-    healthy.
-    """
+    """Validate the integrated candidate's meaningful bounded health contract."""
     try:
         status, body, ctype = _request(url, timeout=timeout)
         if status != 200:
@@ -211,15 +163,13 @@ def unauthenticated_smoke(url: str, *, timeout: float = DEFAULT_TIMEOUT) -> Hook
 
 
 def _read_private_bearer(private_root: Path, token_file: Path) -> str:
-    token_path = validate_private_file(private_root, token_file)
-    token = token_path.read_text(encoding="utf-8").strip()
+    token = read_private_text(private_root, token_file, max_bytes=512).strip()
     if len(token) < 24 or len(token) > 512 or any(ch.isspace() for ch in token):
         raise SafetyError("private bearer reference invalid")
     return token
 
 
 def authenticated_smoke(url: str, *, private_root: Path, token_file: Path, timeout: float = DEFAULT_TIMEOUT) -> HookResult:
-    """Generic authenticated GET smoke retained for existing private endpoints."""
     try:
         token = _read_private_bearer(private_root, token_file)
         status, body, ctype = _request(url, timeout=timeout, token=token)
@@ -244,13 +194,7 @@ def candidate_authenticated_read_smoke(
     timeout: float = DEFAULT_TIMEOUT,
     allow_backend_unconfigured: bool = False,
 ) -> HookResult:
-    """Authenticated POST probe for the integrated read API.
-
-    When Telegram authorization is intentionally not yet required, an exact
-    structured 503 `telegram_backend_unconfigured` result proves the bearer was
-    accepted and the app truthfully remains not ready, without a live Telegram
-    operation. Other 4xx/5xx results do not pass.
-    """
+    """Authenticated POST probe for the integrated read API without live writes."""
     try:
         token = _read_private_bearer(private_root, token_file)
         status, body, ctype = _request_post_empty_json(url, timeout=timeout, token=token)
@@ -280,8 +224,7 @@ def running_identity(private_root: Path, sha_file: Path, expected_sha: str) -> H
     if not SHA40.fullmatch(expected_sha):
         raise SafetyError("expected release SHA invalid")
     try:
-        sha_file = validate_private_file(private_root, sha_file)
-        actual = sha_file.read_text(encoding="ascii").strip().casefold()
+        actual = read_private_text(private_root, sha_file, max_bytes=64).strip().casefold()
     except (OSError, UnicodeError, SafetyError):
         return HookResult("identity", "FAIL", None, "IDENTITY_REFERENCE_INVALID")
     if not SHA40.fullmatch(actual):
