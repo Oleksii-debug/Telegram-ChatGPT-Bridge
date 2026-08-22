@@ -129,13 +129,16 @@
     "ci_gate": "c5b63e779901db01d49fdb2aa90bc4870597a138",
     "interface_vocabulary_reconciliation": "738e99eda2afcfe327dac26a87da0cb7c265ee74",
     "archive_collision_hardening": "e34104f96e63c7f4d117a606e5f8b38c59772a2e",
-    "adapted_dev5_fuzz": "0e9fbf39f9dd6f0bfdf32accbdcb0fb9a31cb797"
+    "adapted_dev5_fuzz": "0e9fbf39f9dd6f0bfdf32accbdcb0fb9a31cb797",
+    "candidate_truth_contracts": "c9c162b78460024b2bec407a05d3d34e26b34f81",
+    "candidate_truth_tests": "70985119a21c1951078a8f1b8031ceb3baa3c00b",
+    "candidate_truth_ci_gate": "545e963f7ec89ab534fcb8b1dfafdedb9a8d504b"
   },
   "dev_a_paths": [
     ".github/workflows/ci.yml", "bridge/__init__.py", "bridge/integrated_app.py",
     "docs/DEV_A_INTEGRATED_RELEASE_CANDIDATE.md", "docs/DEV_A_PROVENANCE_LEDGER.md",
-    "integration/provenance_v1.json", "ops/integration_interfaces.py",
-    "tests/test_dev_a_integration.py", "tests/test_dev_a_provenance.py",
+    "integration/provenance_v1.json", "ops/candidate_contracts.py", "ops/integration_interfaces.py",
+    "tests/test_dev_a_candidate_contracts.py", "tests/test_dev_a_integration.py", "tests/test_dev_a_provenance.py",
     "tools/verify_integration_provenance.py"
   ],
   "safety_boundary": {
