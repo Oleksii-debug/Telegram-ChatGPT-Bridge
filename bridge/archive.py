@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import re
 import secrets
+import unicodedata
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -17,22 +18,33 @@ from .storage import FileRecord, FileRecordStore
 def safe_archive_name(name: str) -> str:
     candidate = name.replace("\\", "/").split("/")[-1]
     candidate = re.sub(r"[\x00-\x1f<>:\"|?*]+", "_", candidate)
+    candidate = unicodedata.normalize("NFC", candidate)
     candidate = candidate.strip(" .") or "file"
     if candidate in {".", ".."}:
         candidate = "file"
     return candidate[:180]
 
 
+def _collision_key(name: str) -> str:
+    return unicodedata.normalize("NFC", name).casefold()
+
+
 def unique_name(name: str, used: set[str]) -> str:
+    """Return a safe member name unique under Unicode-NFC + casefold.
+
+    ZIP consumers differ in case sensitivity and Unicode normalization.  The
+    archive therefore resolves those collisions deterministically instead of
+    emitting two visually/equivalently named members.
+    """
     base = safe_archive_name(name)
     stem = Path(base).stem or "file"
     suffix = Path(base).suffix
     candidate = base
     index = 2
-    while candidate.casefold() in used:
+    while _collision_key(candidate) in used:
         candidate = f"{stem} ({index}){suffix}"
         index += 1
-    used.add(candidate.casefold())
+    used.add(_collision_key(candidate))
     return candidate
 
 
@@ -84,10 +96,15 @@ class ArchiveBuilder:
                 bad = zf.testzip()
                 if bad is not None:
                     raise BridgeError("Archive CRC validation failed", status=500, code="zip_crc_failed")
+                member_keys: set[str] = set()
                 for info in zf.infolist():
                     name = info.filename
                     if name.startswith("/") or name.startswith("\\") or ".." in Path(name).parts:
                         raise BridgeError("Unsafe archive member", status=500, code="unsafe_zip_member")
+                    key = _collision_key(name)
+                    if key in member_keys:
+                        raise BridgeError("Archive member collision", status=500, code="zip_member_collision")
+                    member_keys.add(key)
             target.replace(final)
             try:
                 os.chmod(final, 0o600)
