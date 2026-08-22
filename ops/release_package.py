@@ -96,6 +96,59 @@ def _valid_wsgi_all_assignment(node: ast.Assign) -> bool:
     return isinstance(element, ast.Constant) and element.value == "application"
 
 
+def _exact_import(node: ast.AST, module: str, name: str) -> bool:
+    return (
+        isinstance(node, ast.ImportFrom)
+        and node.level == 0
+        and node.module == module
+        and [(alias.name, alias.asname) for alias in node.names] == [(name, None)]
+    )
+
+
+def _valid_wsgi_here_assignment(node: ast.AST) -> bool:
+    if not isinstance(node, ast.Assign) or len(node.targets) != 1:
+        return False
+    target = node.targets[0]
+    value = node.value
+    if not isinstance(target, ast.Name) or target.id != "_here":
+        return False
+    # Exact form: _here = Path(__file__).resolve()
+    return (
+        isinstance(value, ast.Call)
+        and not value.args
+        and not value.keywords
+        and isinstance(value.func, ast.Attribute)
+        and value.func.attr == "resolve"
+        and isinstance(value.func.value, ast.Call)
+        and isinstance(value.func.value.func, ast.Name)
+        and value.func.value.func.id == "Path"
+        and len(value.func.value.args) == 1
+        and isinstance(value.func.value.args[0], ast.Name)
+        and value.func.value.args[0].id == "__file__"
+        and not value.func.value.keywords
+    )
+
+
+def _valid_wsgi_evidence_call(node: ast.AST) -> bool:
+    if not isinstance(node, ast.Expr) or not isinstance(node.value, ast.Call):
+        return False
+    call = node.value
+    if not isinstance(call.func, ast.Name) or call.func.id != "collect_if_armed" or call.args:
+        return False
+    if [kw.arg for kw in call.keywords] != ["app_root", "wsgi_file"]:
+        return False
+    app_root = call.keywords[0].value
+    wsgi_file = call.keywords[1].value
+    return (
+        isinstance(app_root, ast.Attribute)
+        and app_root.attr == "parent"
+        and isinstance(app_root.value, ast.Name)
+        and app_root.value.id == "_here"
+        and isinstance(wsgi_file, ast.Name)
+        and wsgi_file.id == "_here"
+    )
+
+
 def validate_wsgi_contract(root: Path) -> dict[str, str]:
     path = root / WSGI_PATH
     if not path.is_file() or path.is_symlink():
@@ -106,33 +159,30 @@ def validate_wsgi_contract(root: Path) -> dict[str, str]:
     except (OSError, UnicodeError, SyntaxError) as exc:
         raise SafetyError("canonical Passenger WSGI entrypoint is invalid") from exc
 
-    import_seen = False
-    all_seen = False
-    for index, node in enumerate(tree.body):
-        if (
-            index == 0
-            and isinstance(node, ast.Expr)
-            and isinstance(node.value, ast.Constant)
-            and isinstance(node.value.value, str)
-        ):
-            continue
-        if isinstance(node, ast.ImportFrom):
-            if import_seen or node.level != 0 or node.module != "bridge.app":
-                raise SafetyError("Passenger WSGI entrypoint has unexpected import")
-            if [(alias.name, alias.asname) for alias in node.names] != [("application", None)]:
-                raise SafetyError("Passenger WSGI entrypoint must expose the recovered application symbol")
-            import_seen = True
-            continue
-        if isinstance(node, ast.Assign) and _valid_wsgi_all_assignment(node):
-            if all_seen:
-                raise SafetyError("Passenger WSGI entrypoint repeats __all__")
-            all_seen = True
-            continue
-        # A Passenger bootstrap must remain a minimal import shim. Reject calls,
-        # definitions, conditionals and all other executable/structural statements.
-        raise SafetyError("Passenger WSGI entrypoint contains unexpected executable statement")
-    if not import_seen:
-        raise SafetyError("Passenger WSGI entrypoint must import from bridge.app")
+    body = list(tree.body)
+    if (
+        body
+        and isinstance(body[0], ast.Expr)
+        and isinstance(body[0].value, ast.Constant)
+        and isinstance(body[0].value.value, str)
+    ):
+        body = body[1:]
+    # Exact audited startup sequence.  No arbitrary imports, environment reads,
+    # conditionals, definitions or top-level calls are permitted.
+    if len(body) != 6:
+        raise SafetyError("Passenger WSGI entrypoint statement count mismatch")
+    if not _exact_import(body[0], "pathlib", "Path"):
+        raise SafetyError("Passenger WSGI entrypoint Path import mismatch")
+    if not _exact_import(body[1], "bridge.app", "application"):
+        raise SafetyError("Passenger WSGI entrypoint must expose the recovered application symbol")
+    if not _exact_import(body[2], "ops.passenger_evidence_hook", "collect_if_armed"):
+        raise SafetyError("Passenger WSGI evidence-hook import mismatch")
+    if not _valid_wsgi_here_assignment(body[3]):
+        raise SafetyError("Passenger WSGI path binding mismatch")
+    if not _valid_wsgi_evidence_call(body[4]):
+        raise SafetyError("Passenger WSGI evidence-hook invocation mismatch")
+    if not isinstance(body[5], ast.Assign) or not _valid_wsgi_all_assignment(body[5]):
+        raise SafetyError("Passenger WSGI __all__ contract mismatch")
     return {"path": WSGI_PATH, "sha256": sha256_file(path)}
 
 
