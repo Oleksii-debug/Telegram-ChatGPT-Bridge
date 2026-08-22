@@ -29,6 +29,7 @@ jobs:
           tools/secret_scan.py
           tools/parallel_overlap_report.py
           tools/build_action_openapi.py
+          tools/verify_integration_provenance.py
           ops/release_guard.py
           ops/recovery_capture.py
           ops/deploy_release.py
@@ -64,8 +65,11 @@ jobs:
           tests/test_baseline_reconcile.py
           tests/test_runtime_evidence.py
           tests/test_dev_a_integration.py
+          tests/test_dev_a_provenance.py
       - name: Validate unified ChatGPT Action schema offline
         run: python tools/build_action_openapi.py --validate-only
+      - name: Verify deterministic integration provenance and overlap decisions
+        run: python tools/verify_integration_provenance.py
       - name: Verify single deploy-capable entrypoint
         run: |
           test -f ops/deploy_release.py

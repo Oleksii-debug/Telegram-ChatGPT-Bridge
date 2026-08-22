@@ -1,0 +1,143 @@
+{
+  "schema_version": 2,
+  "base": {
+    "pr": 2,
+    "branch": "recovery/deployment-package-hardening",
+    "sha": "26a2df12c350f670a703b236edc3648f339b64a9",
+    "recovery_guard_run": 67,
+    "run_id": 32568194466,
+    "job_id": 97019792460,
+    "changed_paths": [
+      ".github/workflows/ci.yml",
+      "docs/ACCEPTANCE_CONTRACTS.md",
+      "docs/ACCEPTANCE_HARNESS.md",
+      "docs/DEPLOYMENT_BRANCH_REGISTER.md",
+      "docs/DEPLOYMENT_TRANSACTION_MODEL.md",
+      "docs/DEV1_CONTRACT_HARDENING.md",
+      "docs/DEV1_ROUND2_COMPATIBILITY.md",
+      "docs/HOSTIQ_ONE_TIME_OPERATOR_PACKAGE.md",
+      "docs/LOCK_CONTROL_POLICY.md",
+      "docs/PRODUCTION_BASELINE_RECONCILIATION.md",
+      "docs/RECOVERY_DEPLOYMENT_DESIGN.md",
+      "docs/REFERENCE_SNAPSHOT_V04_ANALYSIS.md",
+      "docs/SECRET_SCAN_ALLOWLIST_POLICY.md",
+      "ops/README.md",
+      "ops/__init__.py",
+      "ops/acceptance_contracts.py",
+      "ops/acceptance_harness.py",
+      "ops/baseline_reconcile.py",
+      "ops/deploy_release.py",
+      "ops/deployment_lock_policy.py",
+      "ops/evidence_privacy.py",
+      "ops/integration_interfaces.py",
+      "ops/recovery_capture.py",
+      "ops/release_guard.py",
+      "ops/runtime_evidence.py",
+      "tests/test_acceptance_contracts.py",
+      "tests/test_acceptance_harness.py",
+      "tests/test_audit_round10.py",
+      "tests/test_audit_round5.py",
+      "tests/test_audit_round6.py",
+      "tests/test_audit_round7.py",
+      "tests/test_audit_round8.py",
+      "tests/test_audit_round9.py",
+      "tests/test_baseline_reconcile.py",
+      "tests/test_dev1_round1.py",
+      "tests/test_dev1_round2.py",
+      "tests/test_recovery_ops.py",
+      "tests/test_runtime_evidence.py",
+      "tests/test_secret_scan.py",
+      "tools/parallel_overlap_report.py",
+      "tools/secret_scan.py"
+    ]
+  },
+  "predecessors": {
+    "DEV3": {
+      "pr": 4,
+      "sha": "4f2c162320c2cbd8e1b0fc2b91a62d2a50806653",
+      "merge_commit": "1cd732480e634e2cd6b45be98977c6cb2b2833b9",
+      "paths": [
+        "bridge/__init__.py", "bridge/app.py", "bridge/archive.py", "bridge/audit.py",
+        "bridge/backend.py", "bridge/downloads.py", "bridge/errors.py", "bridge/models.py",
+        "bridge/routes.py", "bridge/security.py", "bridge/storage.py", "bridge/validation.py",
+        "docs/APPLICATION_READ_MEDIA.md", "docs/DEV3_ROUND2_HARDENING.md",
+        "tests/test_archive_security.py", "tests/test_backend_read.py", "tests/test_dev3_round2.py",
+        "tests/test_read_app.py", "tests/test_storage_downloads.py", "tests/test_validation_security.py"
+      ],
+      "dev_a_overrides": ["bridge/__init__.py"]
+    },
+    "DEV4": {
+      "pr": 7,
+      "sha": "fc409c7e0bd782148df5cb1a00f9f624b7008548",
+      "merge_commit": "10bcc583beaf6aa6f06b15958bf92351cb7f048b",
+      "paths": [
+        "docs/DEV4_WRITE_TELEGRAM_OPENAPI.md", "ops/file_send_policy.py", "ops/openapi_registry.py",
+        "ops/telegram_session_lock.py", "ops/telegram_write_adapter.py", "ops/write_endpoint_policy.py",
+        "ops/write_safety.py", "tests/test_dev4_endpoint_policy.py", "tests/test_dev4_file_send_policy.py",
+        "tests/test_dev4_session_lock.py", "tests/test_dev4_write_core.py", "tools/build_action_openapi.py"
+      ],
+      "dev_a_overrides": []
+    },
+    "DEV2": {
+      "pr": 5,
+      "sha": "19910ec89c85aec6d9ddd31abca0f4cab4dac6cb",
+      "merge_commit": "9b7d10e8b3acda804d10d92850fc54b06270aef7",
+      "paths": [
+        "docs/DEV2_SERVER_RUNTIME_INTEGRATION.md", "docs/HOSTIQ_EVIDENCE_DELTA_CHECKLIST.md",
+        "docs/REFERENCE_SNAPSHOT_V04_DEV2.md", "ops/baseline_reconcile.py", "ops/hostiq_lifecycle.py",
+        "ops/private_evidence.py", "ops/runtime_evidence.py", "ops/snapshot_candidate.py",
+        "reference_candidate/hostiq_v0_4/CANDIDATE_PROVENANCE.json",
+        "reference_candidate/hostiq_v0_4/README_REFERENCE_ONLY.md", "tests/test_dev2_baseline_runtime.py",
+        "tests/test_dev2_compile.py", "tests/test_dev2_lifecycle.py", "tests/test_runtime_evidence.py",
+        "tools/collect_runtime_evidence.py"
+      ],
+      "semantic_overlap_reviewed": [
+        "ops/baseline_reconcile.py", "ops/runtime_evidence.py", "tests/test_runtime_evidence.py"
+      ],
+      "dev_a_overrides": []
+    },
+    "DEV5": {
+      "pr": 3,
+      "sha": "82643ade0f1b5157d311e06a700223a1501ae062",
+      "merge_commit": "c7dbcdbb19968b80575c0a87eae8c3b12800fd86",
+      "ported_paths": [
+        "docs/DEV5_QA_SECURITY_MATRIX.md", "docs/DEV5_ROUND2_QA.md", "ops/dev5_round2_oracles.py",
+        "tests/test_dev5_round2.py", "tests/test_dev5_round2_fuzz.py"
+      ],
+      "rejected_overlaps_preserve_base": [
+        "docs/ACCEPTANCE_CONTRACTS.md", "docs/ACCEPTANCE_HARNESS.md", "ops/acceptance_contracts.py",
+        "ops/acceptance_harness.py", "ops/evidence_privacy.py", "tests/test_acceptance_contracts.py",
+        "tests/test_acceptance_harness.py"
+      ]
+    }
+  },
+  "overlap_matrix": {
+    "PR2_PR3": {"count": 7, "classification": "SEMANTIC_PRESERVE_DEV1"},
+    "PR2_PR4": {"count": 0, "classification": "NO_DIRECT_OVERLAP"},
+    "PR2_PR5": {"count": 3, "classification": "SEMANTIC_REVIEW_DEV2_SELECTED"},
+    "PR2_PR7": {"count": 0, "classification": "NO_DIRECT_OVERLAP"},
+    "PR3_PR4": {"count": 0, "classification": "NO_DIRECT_OVERLAP"},
+    "PR3_PR5": {"count": 0, "classification": "NO_DIRECT_OVERLAP"},
+    "PR3_PR7": {"count": 0, "classification": "NO_DIRECT_OVERLAP"},
+    "PR4_PR5": {"count": 0, "classification": "NO_DIRECT_OVERLAP"},
+    "PR4_PR7": {"count": 0, "classification": "NO_DIRECT_OVERLAP"},
+    "PR5_PR7": {"count": 0, "classification": "NO_DIRECT_OVERLAP"}
+  },
+  "assembly_commits": {
+    "application_integration": "d1a28da09d7c6d7d5a19a771ee6a2a342aad1324",
+    "ci_gate": "c5b63e779901db01d49fdb2aa90bc4870597a138"
+  },
+  "dev_a_paths": [
+    ".github/workflows/ci.yml", "bridge/__init__.py", "bridge/integrated_app.py",
+    "docs/DEV_A_INTEGRATED_RELEASE_CANDIDATE.md", "docs/DEV_A_PROVENANCE_LEDGER.md",
+    "integration/provenance_v1.json", "tests/test_dev_a_integration.py", "tests/test_dev_a_provenance.py",
+    "tools/verify_integration_provenance.py"
+  ],
+  "safety_boundary": {
+    "merge": false,
+    "deploy": false,
+    "passenger_restart": false,
+    "live_telegram_write": false,
+    "telegram_authorization_state": "USER_TELEGRAM_AUTH_NOT_YET_REQUIRED"
+  }
+}
