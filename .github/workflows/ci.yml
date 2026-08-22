@@ -21,13 +21,58 @@ jobs:
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: '3.11'
-      - name: Compile guard tooling
-        run: python -m py_compile tools/secret_scan.py tests/test_secret_scan.py
-      - name: Guard regression tests
-        run: python -m unittest discover -s tests -v
+      - name: Compile guard and operations tooling
+        run: >-
+          python -m py_compile
+          tools/secret_scan.py
+          tools/parallel_overlap_report.py
+          ops/release_guard.py
+          ops/recovery_capture.py
+          ops/deploy_release.py
+          ops/baseline_reconcile.py
+          ops/runtime_evidence.py
+          ops/evidence_privacy.py
+          ops/acceptance_harness.py
+          ops/acceptance_contracts.py
+          ops/deployment_lock_policy.py
+          ops/integration_interfaces.py
+          tests/test_secret_scan.py
+          tests/test_recovery_ops.py
+          tests/test_audit_round5.py
+          tests/test_audit_round6.py
+          tests/test_audit_round7.py
+          tests/test_audit_round8.py
+          tests/test_audit_round9.py
+          tests/test_audit_round10.py
+          tests/test_acceptance_harness.py
+          tests/test_acceptance_contracts.py
+          tests/test_dev1_round1.py
+          tests/test_dev1_round2.py
+          tests/test_baseline_reconcile.py
+          tests/test_runtime_evidence.py
+      - name: Verify single deploy-capable entrypoint
+        run: |
+          test -f ops/deploy_release.py
+          test ! -e ops/deploy_release_legacy.py
+          test ! -e ops/deployment_hardening.py
+          test "$(grep -RIl --include='*.py' 'def execute_prepared_release' ops | wc -l)" -eq 1
+          python - <<'PY'
+          from ops import deploy_release
+          assert deploy_release._supported_deploy_entrypoint() == 'ops.deploy_release'
+          PY
+      - name: Guard and deployment regression tests including real Python 3.11 PREPARE
+        run: |
+          umask 022
+          python -m unittest discover -s tests -v
       - name: Current-tree secret scan
+        if: always()
         run: python tools/secret_scan.py --mode current
       - name: Full-history secret scan
+        if: always()
         run: python tools/secret_scan.py --mode history
       - name: Verify recovery marker
+        if: always()
         run: test -f RECOVERY_BASELINE.md && grep -q 'DO NOT MERGE / DO NOT DEPLOY' RECOVERY_BASELINE.md
+      - name: Verify no active cPanel or auto-deploy arming file
+        if: always()
+        run: test ! -e .cpanel.yml && test ! -e ops/ENABLE_HOSTIQ_AUTO_DEPLOY
