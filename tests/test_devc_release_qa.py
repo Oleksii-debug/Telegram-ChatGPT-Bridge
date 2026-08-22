@@ -21,7 +21,12 @@ SHA = "b" * 40
 
 class PassengerWSGITests(unittest.TestCase):
     def test_canonical_source_is_minimal_and_import_safe(self):
-        self.assertEqual([], validate_passenger_wsgi_source("from bridge.app import application\n"))
+        source = (
+            '"""Canonical Passenger entrypoint."""\n'
+            "from bridge.app import application\n"
+            '__all__ = ["application"]\n'
+        )
+        self.assertEqual([], validate_passenger_wsgi_source(source))
 
     def test_missing_wrong_import_side_effect_and_private_material_fail(self):
         self.assertIn("PASSENGER_WSGI_MISSING", validate_passenger_wsgi_source(None))
@@ -32,6 +37,10 @@ class PassengerWSGITests(unittest.TestCase):
         self.assertIn(
             "PASSENGER_WSGI_IMPORT_SIDE_EFFECT_RISK",
             validate_passenger_wsgi_source("from bridge.app import application\napplication()\n"),
+        )
+        self.assertIn(
+            "PASSENGER_WSGI_IMPORT_SIDE_EFFECT_RISK",
+            validate_passenger_wsgi_source("from bridge.app import application\nother = 1\n"),
         )
         self.assertIn(
             "PASSENGER_WSGI_PRIVATE_MATERIAL",
@@ -87,7 +96,10 @@ class PackageAssessmentTests(unittest.TestCase):
     def test_complete_synthetic_package_is_ready_for_prepare(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            (root / "passenger_wsgi.py").write_text("from bridge.app import application\n", encoding="utf-8")
+            (root / "passenger_wsgi.py").write_text(
+                '"""Canonical Passenger entrypoint."""\nfrom bridge.app import application\n__all__ = ["application"]\n',
+                encoding="utf-8",
+            )
             (root / "requirements.txt").write_text("Telethon==1.40.0\n", encoding="utf-8")
             (root / "requirements.lock").write_text(
                 f"Telethon==1.40.0 --hash=sha256:{H}\n", encoding="utf-8"
