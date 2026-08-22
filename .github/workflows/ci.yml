@@ -24,13 +24,16 @@ jobs:
       - name: Compile guard, integrated application and operations tooling
         run: >-
           python -m py_compile
+          passenger_wsgi.py
           bridge/app.py
           bridge/integrated_app.py
           tools/secret_scan.py
           tools/parallel_overlap_report.py
           tools/build_action_openapi.py
           tools/verify_integration_provenance.py
+          tools/verify_release_prepare.py
           ops/release_guard.py
+          ops/release_package.py
           ops/recovery_capture.py
           ops/deploy_release.py
           ops/baseline_reconcile.py
@@ -53,6 +56,7 @@ jobs:
           ops/dev5_round2_oracles.py
           tests/test_secret_scan.py
           tests/test_recovery_ops.py
+          tests/test_release_package.py
           tests/test_audit_round5.py
           tests/test_audit_round6.py
           tests/test_audit_round7.py
@@ -68,6 +72,19 @@ jobs:
           tests/test_dev_a_integration.py
           tests/test_dev_a_provenance.py
           tests/test_dev_a_candidate_contracts.py
+      - name: Validate canonical release startup and dependency envelope
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          from ops.release_package import validate_public_release_tree
+          result = validate_public_release_tree(
+              Path('.'),
+              paths=['passenger_wsgi.py', 'requirements.txt', 'requirements.lock', 'bridge/app.py'],
+          )
+          assert result['dependencies']['package_count'] == 4
+          assert result['dependencies']['test_dependencies_present'] is False
+          print('DEV_A_RELEASE_PACKAGE_CONTRACT_PASS')
+          PY
       - name: Validate unified ChatGPT Action schema offline
         run: python tools/build_action_openapi.py --validate-only
       - name: Validate truthful candidate coverage and API inventory
@@ -94,10 +111,21 @@ jobs:
           from ops import deploy_release
           assert deploy_release._supported_deploy_entrypoint() == 'ops.deploy_release'
           PY
-      - name: Guard and deployment regression tests including real Python 3.11 PREPARE
+      - name: Guard and deployment regression tests including real Python 3.11 PREPARE fixtures
         run: |
           umask 022
           python -m unittest discover -s tests -v
+      - name: Real exact-head non-live release PREPARE
+        env:
+          CANDIDATE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          CANDIDATE_REF: ${{ github.event.pull_request.head.ref || github.ref_name }}
+        run: |
+          test -n "$CANDIDATE_SHA"
+          test -n "$CANDIDATE_REF"
+          python tools/verify_release_prepare.py \
+            --repo . \
+            --sha "$CANDIDATE_SHA" \
+            --approved-ref "origin/$CANDIDATE_REF"
       - name: Current-tree secret scan
         if: always()
         run: python tools/secret_scan.py --mode current
