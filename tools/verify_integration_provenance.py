@@ -14,6 +14,14 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 MANIFEST = ROOT / "integration" / "provenance_v1.json"
+EXPECTED_DEV_C_VALIDATION_PATHS = frozenset(
+    {
+        "docs/DEV_C_E2E_QA.md",
+        "ops/devc_portable_qa.py",
+        "tests/test_devc_integrated_candidate.py",
+        "tests/test_devc_portable_qa.py",
+    }
+)
 
 
 class ProvenanceError(RuntimeError):
@@ -120,6 +128,23 @@ def _validate_override_subset(data: dict[str, Any], path_key: str) -> set[str]:
     return overrides
 
 
+def _dev_c_validation_paths(manifest: dict[str, Any]) -> set[str]:
+    """Accept only the exact four QA/docs paths in a DEV_C stacked DRAFT PR."""
+    raw = manifest.get("dev_c_validation_paths")
+    if raw is None:
+        return set()
+    if not isinstance(raw, list) or any(not isinstance(path, str) for path in raw):
+        raise ProvenanceError("DEV_C validation path allowlist malformed")
+    if len(raw) != len(set(raw)):
+        raise ProvenanceError("DEV_C validation path allowlist contains duplicates")
+    observed = set(raw)
+    if observed != set(EXPECTED_DEV_C_VALIDATION_PATHS):
+        raise ProvenanceError("DEV_C validation path allowlist is not exact")
+    if observed & set(manifest.get("dev_a_paths", [])):
+        raise ProvenanceError("DEV_C validation path overlaps DEV_A production provenance")
+    return observed
+
+
 def verify_repository() -> dict[str, Any]:
     manifest = _load()
     head = _git("rev-parse", "HEAD")
@@ -168,6 +193,8 @@ def verify_repository() -> dict[str, Any]:
     for lane in ("DEV3", "DEV4", "DEV2"):
         allowed_paths.update(predecessors[lane]["paths"])
     allowed_paths.update(dev5["ported_paths"])
+    validation_paths = _dev_c_validation_paths(manifest)
+    allowed_paths.update(validation_paths)
 
     changed = {
         line.strip()
@@ -175,6 +202,8 @@ def verify_repository() -> dict[str, Any]:
         if line.strip()
     }
     _reject_unexpected_paths(changed, allowed_paths)
+    if validation_paths and not validation_paths.issubset(changed):
+        raise ProvenanceError("declared DEV_C validation path is absent from stacked candidate diff")
     missing_in_manifest = sorted(path for path in manifest["dev_a_paths"] if path not in changed)
     if missing_in_manifest:
         raise ProvenanceError("declared DEV_A path is absent from candidate diff")
@@ -198,6 +227,7 @@ def verify_repository() -> dict[str, Any]:
         "semantic_merge_count": 4,
         "dev3_override_count": len(_validate_override_subset(predecessors["DEV3"], "paths")),
         "adapted_dev5_path_count": len(dev5_overrides),
+        "dev_c_validation_path_count": len(validation_paths),
         "pr2_pr3_overlap_count": overlap_counts["PR2_PR3"],
         "pr2_pr5_overlap_count": overlap_counts["PR2_PR5"],
         "rejected_dev5_overlap_count": len(dev5["rejected_overlaps_preserve_base"]),
