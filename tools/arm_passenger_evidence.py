@@ -9,7 +9,8 @@ import stat
 from pathlib import Path
 
 from ops.passenger_evidence_hook import ARM_MARKER_NAME, build_arm_marker
-from ops.release_guard import SafetyError, write_json_atomic
+from ops.private_control import read_private_text
+from ops.release_guard import SafetyError
 
 _EXPECTED_PREFLIGHT_KEYS = {
     "schema_version", "candidate_sha", "wsgi_sha256", "requirements_sha256",
@@ -21,17 +22,11 @@ _EXPECTED_PREFLIGHT_KEYS = {
 
 
 def _private_file_json(path: Path) -> dict:
-    st = path.lstat()
-    mode = stat.S_IMODE(st.st_mode)
-    if path.is_symlink() or not stat.S_ISREG(st.st_mode) or st.st_nlink != 1:
-        raise SafetyError("preflight evidence topology unsafe")
-    if hasattr(os, "getuid") and st.st_uid != os.getuid():
-        raise SafetyError("preflight evidence owner unsafe")
-    if mode & 0o077 or st.st_size <= 0 or st.st_size > 64 * 1024:
-        raise SafetyError("preflight evidence permissions/size unsafe")
+    path = path.expanduser()
+    raw = read_private_text(path.parent, path, max_bytes=4096)
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
         raise SafetyError("preflight evidence JSON invalid") from exc
     if not isinstance(payload, dict) or set(payload) != _EXPECTED_PREFLIGHT_KEYS:
         raise SafetyError("preflight evidence schema mismatch")
@@ -45,7 +40,7 @@ def _private_file_json(path: Path) -> dict:
     return payload
 
 
-def _private_control_root(path: Path) -> Path:
+def _private_control_root(path: Path) -> tuple[Path, os.stat_result]:
     path = path.expanduser()
     st = path.lstat()
     if path.is_symlink() or not stat.S_ISDIR(st.st_mode):
@@ -54,21 +49,72 @@ def _private_control_root(path: Path) -> Path:
         raise SafetyError("private control root owner unsafe")
     if stat.S_IMODE(st.st_mode) & 0o077:
         raise SafetyError("private control root permissions unsafe")
-    return path
+    return path, st
+
+
+def _write_marker_no_clobber(control: Path, expected_root: os.stat_result, payload: dict) -> Path:
+    if os.name != "posix" or not hasattr(os, "O_NOFOLLOW") or not hasattr(os, "O_DIRECTORY"):
+        raise SafetyError("required POSIX arming primitives unavailable")
+    nofollow = int(getattr(os, "O_NOFOLLOW"))
+    directory = int(getattr(os, "O_DIRECTORY"))
+    cloexec = int(getattr(os, "O_CLOEXEC", 0))
+    root_fd = os.open(control, os.O_RDONLY | directory | nofollow | cloexec)
+    marker_created = False
+    try:
+        root_after = os.fstat(root_fd)
+        if (
+            not stat.S_ISDIR(root_after.st_mode)
+            or root_after.st_dev != expected_root.st_dev
+            or root_after.st_ino != expected_root.st_ino
+            or (hasattr(os, "getuid") and root_after.st_uid != os.getuid())
+            or stat.S_IMODE(root_after.st_mode) & 0o077
+        ):
+            raise SafetyError("private control root changed during arming")
+        raw = (json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True) + "\n").encode("ascii")
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | nofollow | cloexec
+        try:
+            fd = os.open(ARM_MARKER_NAME, flags, 0o600, dir_fd=root_fd)
+        except FileExistsError as exc:
+            raise SafetyError("Passenger evidence marker already exists") from exc
+        marker_created = True
+        try:
+            offset = 0
+            while offset < len(raw):
+                written = os.write(fd, raw[offset:])
+                if written <= 0:
+                    raise SafetyError("Passenger evidence marker write failed")
+                offset += written
+            os.fsync(fd)
+            st = os.fstat(fd)
+            if (
+                not stat.S_ISREG(st.st_mode)
+                or st.st_nlink != 1
+                or (hasattr(os, "getuid") and st.st_uid != os.getuid())
+                or stat.S_IMODE(st.st_mode) & 0o077
+                or st.st_size != len(raw)
+            ):
+                raise SafetyError("Passenger evidence marker write validation failed")
+        finally:
+            os.close(fd)
+        os.fsync(root_fd)
+        return control / ARM_MARKER_NAME
+    except Exception:
+        if marker_created:
+            try:
+                os.unlink(ARM_MARKER_NAME, dir_fd=root_fd)
+                os.fsync(root_fd)
+            except OSError:
+                pass
+        raise
+    finally:
+        os.close(root_fd)
 
 
 def arm_from_preflight(*, preflight_path: Path, control_root: Path) -> Path:
     preflight = _private_file_json(preflight_path)
-    control = _private_control_root(control_root)
-    marker = control / ARM_MARKER_NAME
-    if marker.exists() or marker.is_symlink():
-        raise SafetyError("Passenger evidence marker already exists")
+    control, root_stat = _private_control_root(control_root)
     payload = build_arm_marker(preflight["candidate_sha"], preflight["wsgi_sha256"])
-    write_json_atomic(marker, payload, mode=0o600)
-    st = marker.lstat()
-    if marker.is_symlink() or not stat.S_ISREG(st.st_mode) or st.st_nlink != 1 or stat.S_IMODE(st.st_mode) & 0o077:
-        raise SafetyError("Passenger evidence marker write validation failed")
-    return marker
+    return _write_marker_no_clobber(control, root_stat, payload)
 
 
 def main(argv=None) -> int:
