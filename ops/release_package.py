@@ -87,6 +87,15 @@ def _parse_requirements(path: Path, *, hashes_required: bool) -> dict[str, tuple
     return parsed
 
 
+def _valid_wsgi_all_assignment(node: ast.Assign) -> bool:
+    if len(node.targets) != 1 or not isinstance(node.targets[0], ast.Name) or node.targets[0].id != "__all__":
+        return False
+    if not isinstance(node.value, (ast.List, ast.Tuple)) or len(node.value.elts) != 1:
+        return False
+    element = node.value.elts[0]
+    return isinstance(element, ast.Constant) and element.value == "application"
+
+
 def validate_wsgi_contract(root: Path) -> dict[str, str]:
     path = root / WSGI_PATH
     if not path.is_file() or path.is_symlink():
@@ -97,16 +106,33 @@ def validate_wsgi_contract(root: Path) -> dict[str, str]:
     except (OSError, UnicodeError, SyntaxError) as exc:
         raise SafetyError("canonical Passenger WSGI entrypoint is invalid") from exc
 
-    imports = [node for node in ast.walk(tree) if isinstance(node, (ast.Import, ast.ImportFrom))]
-    if len(imports) != 1:
-        raise SafetyError("Passenger WSGI entrypoint has unexpected imports")
-    node = imports[0]
-    if not isinstance(node, ast.ImportFrom) or node.level != 0 or node.module != "bridge.app":
+    import_seen = False
+    all_seen = False
+    for index, node in enumerate(tree.body):
+        if (
+            index == 0
+            and isinstance(node, ast.Expr)
+            and isinstance(node.value, ast.Constant)
+            and isinstance(node.value.value, str)
+        ):
+            continue
+        if isinstance(node, ast.ImportFrom):
+            if import_seen or node.level != 0 or node.module != "bridge.app":
+                raise SafetyError("Passenger WSGI entrypoint has unexpected import")
+            if [(alias.name, alias.asname) for alias in node.names] != [("application", None)]:
+                raise SafetyError("Passenger WSGI entrypoint must expose the recovered application symbol")
+            import_seen = True
+            continue
+        if isinstance(node, ast.Assign) and _valid_wsgi_all_assignment(node):
+            if all_seen:
+                raise SafetyError("Passenger WSGI entrypoint repeats __all__")
+            all_seen = True
+            continue
+        # A Passenger bootstrap must remain a minimal import shim. Reject calls,
+        # definitions, conditionals and all other executable/structural statements.
+        raise SafetyError("Passenger WSGI entrypoint contains unexpected executable statement")
+    if not import_seen:
         raise SafetyError("Passenger WSGI entrypoint must import from bridge.app")
-    if [(alias.name, alias.asname) for alias in node.names] != [("application", None)]:
-        raise SafetyError("Passenger WSGI entrypoint must expose the recovered application symbol")
-    if any(isinstance(item, (ast.Call, ast.Await, ast.AsyncFor, ast.AsyncWith)) for item in tree.body):
-        raise SafetyError("Passenger WSGI entrypoint performs executable startup side effects")
     return {"path": WSGI_PATH, "sha256": sha256_file(path)}
 
 
