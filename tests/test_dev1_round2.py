@@ -86,6 +86,14 @@ class ActualDeploymentLockTests(unittest.TestCase):
 
     def test_inode_replacement_between_preflight_and_open_fails(self):
         self._touch_private()
+        replacement = self.control / "replacement-lock"
+        replacement.write_bytes(b"")
+        os.chmod(replacement, 0o600)
+        original_stat = self.lock.lstat()
+        replacement_stat = replacement.lstat()
+        self.assertEqual(original_stat.st_dev, replacement_stat.st_dev)
+        self.assertNotEqual(original_stat.st_ino, replacement_stat.st_ino)
+
         real_open = os.open
         swapped = False
 
@@ -93,9 +101,7 @@ class ActualDeploymentLockTests(unittest.TestCase):
             nonlocal swapped
             if Path(path) == self.lock and not swapped:
                 swapped = True
-                self.lock.unlink()
-                fd_new = real_open(self.lock, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-                os.close(fd_new)
+                os.replace(replacement, self.lock)
             return real_open(path, flags, mode)
 
         with mock.patch.object(deploy.os, "open", side_effect=racing_open):
@@ -103,6 +109,7 @@ class ActualDeploymentLockTests(unittest.TestCase):
                 with deploy._deployment_lock(self.control):
                     self.fail("raced lock acquired")
         self.assertTrue(swapped)
+        self.assertEqual(replacement_stat.st_ino, self.lock.lstat().st_ino)
 
 
 class RateLimiterRound2Tests(unittest.TestCase):
