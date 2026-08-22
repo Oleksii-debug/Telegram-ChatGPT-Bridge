@@ -2,23 +2,25 @@
 
 The tested DEV3 read/media core remains available as :class:`BridgeApplication`.
 The package-level and ``bridge.app.application`` WSGI entry point is replaced at
-package import completion with the lazy unified integration entry point.  This
-preserves the recovered HOSTiQ startup contract ``from bridge.app import
-application`` while allowing the audited candidate to add DEV4 preview/commit
-routing without changing Passenger bootstrap text.
+package import completion with a lazy production-runtime wrapper. This preserves
+the recovered HOSTiQ startup contract ``from bridge.app import application`` and
+the unified DEV4 preview/commit surface while allowing server-side dependency
+construction on the first request.
 
 Importing this package performs no Telegram network activity and constructs no
-Telegram client. Production adapters remain dependency-injected/server-side.
+Telegram client. Private Telegram references remain server-side and are consumed
+only by the lazy runtime builder after request dispatch begins.
 """
 
 from .app import BridgeApplication, ReadAppConfig
 from .backend import ReadBackend, TelethonReadBackend, UnavailableReadBackend
 from .errors import BridgeError
-from .integrated_app import UnifiedBridgeApplication, application
+from .integrated_app import UnifiedBridgeApplication
+from .runtime_wsgi import application
 from . import app as _app_module
 
 # Preserve the authoritative recovered Passenger import target while switching
-# the exported callable to the unified, lazy, fail-closed integration layer.
+# the exported callable to the unified, lazy, server-side runtime builder.
 _app_module.application = application
 
 __all__ = [
