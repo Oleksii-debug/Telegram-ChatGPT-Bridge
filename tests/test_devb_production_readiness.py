@@ -12,13 +12,22 @@ def h(value: bytes = b"x") -> str:
 
 
 def valid_package(candidate: str = "a" * 40) -> dict:
+    wsgi = h(b"wsgi")
+    runtime_payload = h(b"runtime-payload")
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "candidate_sha": candidate,
         "evidence_classes": {
             "source": "PRIVATE_SERVER_EVIDENCE",
             "runtime": "FIRST_HAND_LIVE",
             "lifecycle": "FIRST_HAND_LIVE",
+        },
+        "candidate_package": {
+            "identity_artifact_sha256": h(b"candidate-identity"),
+            "manifest_sha256": h(b"candidate-manifest"),
+            "wsgi_sha256": wsgi,
+            "requirements_lock_sha256": h(b"requirements-lock"),
+            "package_preflight_pass": True,
         },
         "server_manifest": {
             "artifact_sha256": h(b"server-artifact"),
@@ -35,12 +44,21 @@ def valid_package(candidate: str = "a" * 40) -> dict:
         },
         "runtime": {
             "artifact_sha256": h(b"runtime"),
+            "payload_sha256": runtime_payload,
             "collector_context": "APPLICATION_PROCESS",
             "python_major_minor": "3.11",
             "runtime_compliance": "PYTHON_3_11_APPLICATION_CONTEXT_CONFIRMED",
             "application_import_ok": True,
             "passenger_context_present": True,
-            "wsgi_sha256": h(b"wsgi"),
+            "wsgi_sha256": wsgi,
+        },
+        "runtime_binding": {
+            "artifact_sha256": h(b"runtime-binding"),
+            "candidate_sha": candidate,
+            "expected_wsgi_sha256": wsgi,
+            "actual_wsgi_sha256": wsgi,
+            "runtime_payload_sha256": runtime_payload,
+            "binding_valid": True,
         },
         "lifecycle": {
             "mode": "LIVE_SERVER",
@@ -61,13 +79,23 @@ def valid_package(candidate: str = "a" * 40) -> dict:
     }
 
 
+def legacy_v1(candidate: str = "a" * 40) -> dict:
+    package = valid_package(candidate)
+    package["schema_version"] = 1
+    package.pop("candidate_package")
+    package.pop("runtime_binding")
+    package["runtime"].pop("payload_sha256")
+    return package
+
+
 class SupportReturnValidationTests(unittest.TestCase):
-    def test_strong_structural_package_is_accepted_but_never_authorizes(self):
+    def test_strong_v2_package_is_accepted_but_never_authorizes(self):
         package = valid_package()
         validated = production_readiness.validate_support_return(package)
         self.assertEqual(package["candidate_sha"], validated["candidate_sha"])
         result = production_readiness.build_deployment_readiness(package)
         self.assertEqual("PASS", result["checks"]["source_reconciliation"]["status"])
+        self.assertEqual("PASS", result["checks"]["exact_candidate_runtime_binding"]["status"])
         self.assertEqual("PASS", result["checks"]["passenger_python_311"]["status"])
         self.assertEqual("PASS", result["checks"]["backup_restart_identity_health_smoke_resume"]["status"])
         self.assertEqual("PASS", result["checks"]["rollback"]["status"])
@@ -77,9 +105,42 @@ class SupportReturnValidationTests(unittest.TestCase):
         self.assertTrue(result["non_auditor_prerequisites_structurally_present"])
         production_readiness.validate_public_readiness(result)
 
+    def test_legacy_v1_remains_parseable_but_cannot_satisfy_exact_runtime_gate(self):
+        package = legacy_v1()
+        production_readiness.validate_support_return(package)
+        result = production_readiness.build_deployment_readiness(package)
+        self.assertEqual("BLOCKED_EXTERNAL", result["checks"]["exact_candidate_runtime_binding"]["status"])
+        self.assertEqual("BLOCKED_EXTERNAL", result["checks"]["passenger_python_311"]["status"])
+        self.assertFalse(result["non_auditor_prerequisites_structurally_present"])
+
+    def test_candidate_binding_sha_mismatch_blocks(self):
+        package = valid_package(); package["runtime_binding"]["candidate_sha"] = "b" * 40
+        with self.assertRaises(SafetyError):
+            production_readiness.validate_support_return(package)
+
+    def test_candidate_package_runtime_wsgi_mismatch_blocks(self):
+        package = valid_package(); package["candidate_package"]["wsgi_sha256"] = h(b"other-wsgi")
+        with self.assertRaises(SafetyError):
+            production_readiness.validate_support_return(package)
+
+    def test_binding_actual_wsgi_mismatch_blocks(self):
+        package = valid_package(); package["runtime_binding"]["actual_wsgi_sha256"] = h(b"other-wsgi")
+        with self.assertRaises(SafetyError):
+            production_readiness.validate_support_return(package)
+
+    def test_binding_runtime_payload_mismatch_blocks(self):
+        package = valid_package(); package["runtime_binding"]["runtime_payload_sha256"] = h(b"other-runtime")
+        with self.assertRaises(SafetyError):
+            production_readiness.validate_support_return(package)
+
+    def test_negative_binding_or_package_preflight_blocks(self):
+        package = valid_package(); package["runtime_binding"]["binding_valid"] = False
+        with self.assertRaises(SafetyError): production_readiness.validate_support_return(package)
+        package = valid_package(); package["candidate_package"]["package_preflight_pass"] = False
+        with self.assertRaises(SafetyError): production_readiness.validate_support_return(package)
+
     def test_reference_source_cannot_satisfy_live_reconciliation(self):
-        package = valid_package()
-        package["evidence_classes"]["source"] = "REFERENCE_ONLY"
+        package = valid_package(); package["evidence_classes"]["source"] = "REFERENCE_ONLY"
         result = production_readiness.build_deployment_readiness(package)
         self.assertEqual("BLOCKED_EXTERNAL", result["checks"]["source_reconciliation"]["status"])
 
@@ -108,96 +169,62 @@ class SupportReturnValidationTests(unittest.TestCase):
         result = production_readiness.build_deployment_readiness(package)
         self.assertEqual("BLOCKED_EXTERNAL", result["checks"]["passenger_python_311"]["status"])
 
-    def test_candidate_sha_mismatch_blocks(self):
-        package = valid_package()
-        package["lifecycle"]["candidate_sha"] = "b" * 40
-        with self.assertRaises(SafetyError):
-            production_readiness.validate_support_return(package)
+    def test_lifecycle_candidate_sha_mismatch_blocks(self):
+        package = valid_package(); package["lifecycle"]["candidate_sha"] = "b" * 40
+        with self.assertRaises(SafetyError): production_readiness.validate_support_return(package)
 
-    def test_exact_reconciliation_with_unreviewed_difference_blocks(self):
-        package = valid_package()
-        package["reconciliation"]["unreviewed_difference_count"] = 1
-        with self.assertRaises(SafetyError):
-            production_readiness.validate_support_return(package)
-
-    def test_exact_reconciliation_without_startup_accounting_blocks(self):
-        package = valid_package()
-        package["reconciliation"]["startup_accounted"] = False
-        with self.assertRaises(SafetyError):
-            production_readiness.validate_support_return(package)
+    def test_exact_reconciliation_requires_zero_differences_and_startup(self):
+        package = valid_package(); package["reconciliation"]["unreviewed_difference_count"] = 1
+        with self.assertRaises(SafetyError): production_readiness.validate_support_return(package)
+        package = valid_package(); package["reconciliation"]["startup_accounted"] = False
+        with self.assertRaises(SafetyError): production_readiness.validate_support_return(package)
 
     def test_manifest_count_disagreement_blocks(self):
-        package = valid_package()
-        package["reconciliation"]["server_file_count"] = 41
-        with self.assertRaises(SafetyError):
-            production_readiness.validate_support_return(package)
+        package = valid_package(); package["reconciliation"]["server_file_count"] = 41
+        with self.assertRaises(SafetyError): production_readiness.validate_support_return(package)
 
     def test_strong_runtime_claim_requires_application_process(self):
-        package = valid_package()
-        package["runtime"]["collector_context"] = "PRIVATE_CLI_CANDIDATE"
-        with self.assertRaises(SafetyError):
-            production_readiness.validate_support_return(package)
+        package = valid_package(); package["runtime"]["collector_context"] = "PRIVATE_CLI_CANDIDATE"
+        with self.assertRaises(SafetyError): production_readiness.validate_support_return(package)
 
     def test_simulation_with_live_classification_blocks(self):
-        package = valid_package()
-        package["lifecycle"]["mode"] = "TEST_SIMULATION"
-        with self.assertRaises(SafetyError):
-            production_readiness.validate_support_return(package)
+        package = valid_package(); package["lifecycle"]["mode"] = "TEST_SIMULATION"
+        with self.assertRaises(SafetyError): production_readiness.validate_support_return(package)
 
     def test_not_executed_lifecycle_cannot_claim_pass(self):
-        package = valid_package()
-        package["evidence_classes"]["lifecycle"] = "TEST_SIMULATION"
-        package["lifecycle"]["mode"] = "NOT_EXECUTED"
-        with self.assertRaises(SafetyError):
-            production_readiness.validate_support_return(package)
+        package = valid_package(); package["evidence_classes"]["lifecycle"] = "TEST_SIMULATION"; package["lifecycle"]["mode"] = "NOT_EXECUTED"
+        with self.assertRaises(SafetyError): production_readiness.validate_support_return(package)
 
-    def test_privacy_flags_fail_closed(self):
+    def test_privacy_flags_and_unknown_fields_fail_closed(self):
         for field in ("private_values_copied", "raw_response_copied"):
-            package = valid_package()
-            package["privacy"][field] = True
-            with self.subTest(field=field), self.assertRaises(SafetyError):
-                production_readiness.validate_support_return(package)
-
-    def test_unknown_fields_fail_closed(self):
-        package = valid_package()
-        package["runtime"]["note"] = "x"
-        with self.assertRaises(SafetyError):
-            production_readiness.validate_support_return(package)
+            package = valid_package(); package["privacy"][field] = True
+            with self.subTest(field=field), self.assertRaises(SafetyError): production_readiness.validate_support_return(package)
+        package = valid_package(); package["runtime"]["note"] = "x"
+        with self.assertRaises(SafetyError): production_readiness.validate_support_return(package)
 
     def test_malformed_hash_fails_closed(self):
-        package = valid_package()
-        package["server_manifest"]["artifact_sha256"] = "not-a-digest"
-        with self.assertRaises(SafetyError):
-            production_readiness.validate_support_return(package)
+        package = valid_package(); package["candidate_package"]["manifest_sha256"] = "not-a-digest"
+        with self.assertRaises(SafetyError): production_readiness.validate_support_return(package)
 
-    def test_live_failure_keeps_lifecycle_blocked(self):
-        package = valid_package()
-        package["lifecycle"]["health"] = "FAIL"
+    def test_live_failure_and_missing_rollback_keep_gates_blocked(self):
+        package = valid_package(); package["lifecycle"]["health"] = "FAIL"
         result = production_readiness.build_deployment_readiness(package)
         self.assertEqual("BLOCKED_EXTERNAL", result["checks"]["backup_restart_identity_health_smoke_resume"]["status"])
-
-    def test_rollback_not_run_keeps_rollback_blocked(self):
-        package = valid_package()
-        package["lifecycle"]["rollback"] = "NOT_RUN"
+        package = valid_package(); package["lifecycle"]["rollback"] = "NOT_RUN"
         result = production_readiness.build_deployment_readiness(package)
         self.assertEqual("BLOCKED_EXTERNAL", result["checks"]["rollback"]["status"])
 
     def test_current_telegram_auth_is_explicitly_not_applicable(self):
-        result = production_readiness.build_deployment_readiness(valid_package())
-        check = result["checks"]["telegram_user_authorization"]
+        check = production_readiness.build_deployment_readiness(valid_package())["checks"]["telegram_user_authorization"]
         self.assertEqual("NOT_APPLICABLE", check["status"])
         self.assertEqual("USER_TELEGRAM_AUTH_NOT_YET_REQUIRED", check["reason_code"])
 
     def test_public_readiness_mutation_cannot_self_authorize(self):
         result = production_readiness.build_deployment_readiness(valid_package())
-        mutated = copy.deepcopy(result)
-        mutated["promotion_authorized"] = True
-        with self.assertRaises(SafetyError):
-            production_readiness.validate_public_readiness(mutated)
-        mutated = copy.deepcopy(result)
-        mutated["checks"]["production_switch"] = {"status": "PASS", "reason_code": "FAKE_PASS"}
-        with self.assertRaises(SafetyError):
-            production_readiness.validate_public_readiness(mutated)
+        mutated = copy.deepcopy(result); mutated["promotion_authorized"] = True
+        with self.assertRaises(SafetyError): production_readiness.validate_public_readiness(mutated)
+        mutated = copy.deepcopy(result); mutated["checks"]["production_switch"] = {"status": "PASS", "reason_code": "FAKE_PASS"}
+        with self.assertRaises(SafetyError): production_readiness.validate_public_readiness(mutated)
 
     def test_public_output_contains_only_bounded_status_accounting(self):
         result = production_readiness.build_deployment_readiness(valid_package())
