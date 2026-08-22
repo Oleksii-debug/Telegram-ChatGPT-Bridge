@@ -21,9 +21,23 @@ jobs:
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: '3.11'
+      - name: Verify hash-locked Telegram runtime dependencies
+        run: python -m pip install --require-hashes -r requirements.lock
+      - name: Verify Passenger bootstrap resolves unified WSGI surface
+        run: |
+          python - <<'PY'
+          import sys
+          import passenger_wsgi
+          from bridge.integrated_app import application as unified_application
+          assert passenger_wsgi.application is unified_application
+          assert passenger_wsgi.application.__module__ == 'bridge.integrated_app'
+          assert not any(name == 'telethon' or name.startswith('telethon.') for name in sys.modules)
+          print('PASSENGER_UNIFIED_BOOTSTRAP_PASS')
+          PY
       - name: Compile guard, integrated application and operations tooling
         run: >-
           python -m py_compile
+          passenger_wsgi.py
           bridge/app.py
           bridge/integrated_app.py
           tools/secret_scan.py
@@ -68,6 +82,7 @@ jobs:
           tests/test_dev_a_integration.py
           tests/test_dev_a_provenance.py
           tests/test_dev_a_candidate_contracts.py
+          tests/test_release_package_envelope.py
       - name: Validate unified ChatGPT Action schema offline
         run: python tools/build_action_openapi.py --validate-only
       - name: Validate truthful candidate coverage and API inventory
