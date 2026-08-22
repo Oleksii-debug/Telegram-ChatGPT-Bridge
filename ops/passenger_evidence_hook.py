@@ -6,7 +6,13 @@ JSON marker bound to the Auditor-approved candidate SHA and expected
 ``passenger_wsgi.py`` SHA-256, then restarts that exact Passenger application.
 The application process writes bounded private runtime + binding reports only if
 Python 3.11, Passenger context, application import and WSGI identity are genuinely
-confirmed.  Evidence collection is fail-isolated from application availability.
+confirmed. Evidence collection is fail-isolated from application availability.
+
+The preferred integration keeps ``passenger_wsgi.py`` call-free: the exported
+``bridge.app.application`` may invoke ``collect_if_armed_from_bridge_app`` at the
+start of its WSGI ``__call__``. That executes only inside the actual process that
+serves a request, remains inert without the owner-private marker, and performs no
+Telegram/network operation.
 """
 from __future__ import annotations
 
@@ -105,7 +111,8 @@ def validate_binding_report(payload: object) -> dict:
         raise SafetyError("Passenger binding runtime payload invalid")
     if payload.get("private_values_copied") is not False:
         raise SafetyError("Passenger binding privacy flag invalid")
-    base = dict(payload); provided = base.pop("payload_sha256", None)
+    base = dict(payload)
+    provided = base.pop("payload_sha256", None)
     if not isinstance(provided, str) or not SHA256_RE.fullmatch(provided) or provided != canonical_json_sha256(base):
         raise SafetyError("Passenger binding report tamper hash mismatch")
     return dict(payload)
@@ -146,3 +153,25 @@ def collect_if_armed(*, app_root: Path, wsgi_file: Path, home: Path | None = Non
         # Application availability is not coupled to evidence collection.
         # No exception text/path/value is logged or returned.
         return "PASSENGER_EVIDENCE_BLOCKED"
+
+
+def collect_if_armed_from_bridge_app(app_module_file: str | Path, *, home: Path | None = None) -> str:
+    """Call-free-WSGI adapter for ``bridge.app.BridgeApplication.__call__``.
+
+    ``app_module_file`` must be the real ``bridge/app.py`` file inside a normal
+    application root. The helper derives the sibling root ``passenger_wsgi.py``
+    and delegates to the exact same fail-closed collector. It never raises to the
+    request path and returns only a bounded status code.
+    """
+    try:
+        app_file = Path(app_module_file).expanduser().resolve(strict=True)
+        if app_file.name != "app.py" or app_file.parent.name != "bridge":
+            return "PASSENGER_EVIDENCE_APP_TOPOLOGY_BLOCKED"
+        app_root = app_file.parent.parent
+        wsgi_file = app_root / "passenger_wsgi.py"
+        wsgi_stat = os.lstat(wsgi_file)
+        if wsgi_file.is_symlink() or not wsgi_file.is_file() or wsgi_stat.st_nlink != 1:
+            return "PASSENGER_EVIDENCE_APP_TOPOLOGY_BLOCKED"
+        return collect_if_armed(app_root=app_root, wsgi_file=wsgi_file, home=home)
+    except Exception:
+        return "PASSENGER_EVIDENCE_APP_TOPOLOGY_BLOCKED"
