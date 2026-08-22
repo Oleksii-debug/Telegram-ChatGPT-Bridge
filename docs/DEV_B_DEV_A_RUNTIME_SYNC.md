@@ -1,45 +1,96 @@
-# DEV_B -> DEV_A runtime integration guidance
+# DEV_B -> DEV_A runtime integration guidance — Release-to-Live Round 2
 
-Latest DEV_A DRAFT PR #9 head observed during this DEV_B run: `c5b63e779901db01d49fdb2aa90bc4870597a138`.
+Latest DEV_A DRAFT PR #9 head observed while writing this checkpoint: `9937d8c4c8335c7f58bc20e7057fbc2e14281499`.
 
-This document is guidance only. DEV_B does not modify DEV_A branch and does not authorize deployment.
+This document is guidance/evidence only. DEV_B does not modify DEV_A branch and does not authorize deployment.
 
-## Compatible interfaces already present
+## What DEV_A has now solved
 
-- `bridge/app.py` exposes the expected callable `bridge.app.application`.
-- Public `GET /health` is bounded JSON and exposes non-secret component readiness.
-- Protected read routing includes `POST /api/v1/dialogs/list`.
-- When the real Telegram backend is intentionally not configured, the read backend fails truthfully with stable code `telegram_backend_unconfigured`; this can be used as a bootstrap-stage authenticated smoke without a live Telegram request.
-- DEV2 runtime/private-evidence/lifecycle files are present on the observed DEV_A head.
+The original package blocker is materially reduced on current PR #9:
 
-## Runtime/release mismatches still present on the latest observed head
+- root `passenger_wsgi.py` exists and canonically exports `from bridge.app import application`;
+- root `requirements.txt` pins `Telethon==1.44.0`;
+- root `requirements.lock` contains the reviewed exact Telethon/pyaes/rsa/pyasn1 closure with SHA-256 hashes;
+- `ops/release_package.py` validates the public startup/dependency envelope;
+- `tools/verify_release_prepare.py` invokes the actual `prepare_versioned_release()` pipeline for an exact Git SHA and verifies the prepared artifact/venv rather than trusting a drifting PR working checkout;
+- canonical WSGI validation now whitelists only docstring + one `bridge.app.application` import + optional exact `__all__`, so executable startup calls fail closed;
+- the release package still carries `deployment_authorized=false` and excludes private runtime material.
 
-1. Root `passenger_wsgi.py` is absent. HOSTiQ factual startup uses `passenger_wsgi.py`, and runtime evidence expects that file to import `bridge.app.application`. A release candidate cannot be called deployable until the exact startup file is part of the approved deployment payload or an equally explicit audited server-side mapping is proven.
-2. Root `requirements.txt` / accepted immutable dependency input is absent. Dependency installation must be bound to the exact approved Python 3.11 environment and immutable dependency identity before production PREPARE can pass.
-3. DEV_A still carries the older DEV2 `ops/hostiq_lifecycle.py`; DEV_B PR #11 has a stricter adapter and must be consumed semantically rather than overwritten in the opposite direction.
+The earlier AST negative-test defect observed on `c25a597f...` / `8de1d7bb...` has been repaired in current `ops/release_package.py` by statement-level allowlisting; do not regress to direct `tree.body` `ast.Call` checks.
 
-## DEV_B runtime adapter changes to integrate
+## Exact DEV_B provenance gap currently present
 
-- Health requires exact keys `ok`, `service`, `ready`, `components`.
-- `service` must equal `telegram-bridge`.
-- components must be exactly auth/backend/storage/rate_limit with configured/unconfigured states.
-- `ready` must agree with component state. HTTP 200 alone and legacy `{status: ok}` do not pass.
-- Strict mode fails `ready=false`. Explicit pre-Telegram bootstrap mode may accept truthful not-ready health only as `HEALTH_BOOTSTRAP_NOT_READY`.
-- Authenticated bootstrap probe is fixed to `POST /api/v1/dialogs/list`. With a server-private bearer reference, exact structured 503 `telegram_backend_unconfigured` can count as authenticated-app proof only in explicit bootstrap mode. Wrong paths, write paths, arbitrary 4xx/5xx and malformed JSON fail.
-- Private bearer/SHA/hook files are accessed through `ops/private_control.py` using descriptor-relative `O_NOFOLLOW`, pre-open metadata versus `fstat` identity checks, owner/mode/link validation and bounded reads. Private hooks execute from the already-opened fd through `/proc/self/fd` with stdout/stderr discarded.
-- `ops/server_manifest.py` + `tools/collect_server_manifest.py` provide a hash-only first-hand application-root manifest collector; private/runtime directories are not entered and unreviewed root file classes fail closed.
-- `ops/passenger_evidence_hook.py` is inert unless an owner-private one-time marker exists. When called by the actual audited `passenger_wsgi.py`, it writes a strong private report only if Python 3.11 + Passenger process context + `bridge.app.application` import are genuinely confirmed. CLI Python cannot substitute.
-- Lifecycle tooling never invokes send/reply/forward/send-file/K5.
-- OpenAPI/schema identity is not running release identity. Exact running SHA remains a separate private evidence check bound to the approved candidate.
+`integration/release_to_live_v1.json` on DEV_A head `9937...` explicitly records:
 
-## DEV_A integration action
+- `dev_b.sha = d45dd0bbc81d9db2c764319d766db0d13141532a`;
+- old DEV_B runtime/readiness paths were imported/adapted from that Round-1 checkpoint.
 
-After DEV_B PR #11 exact-head CI is green:
+Therefore DEV_A currently contains a traceable older DEV_B snapshot, not the current Release-to-Live Round-2 semantics from PR #11.
 
-1. selectively integrate DEV_B runtime additions/adapter changes into DEV_A without reverting current application/read/write/QA code;
-2. add audited root `passenger_wsgi.py` importing `bridge.app.application` and calling `collect_if_armed` as documented in `docs/HOSTIQ_ONE_TIME_SUPPORT_PACKAGE.md`;
-3. add the immutable dependency input required by the existing hash-locked deployment tooling;
-4. rerun full integrated CI, DEV_B runtime/readiness suites and DEV_C QA on the resulting exact candidate head;
-5. keep PR DRAFT / no merge / no deployment until Independent Auditor reviews that exact integrated head.
+The current imported `ops/passenger_evidence_hook.py` still uses the obsolete **empty** owner-private marker, writes only one runtime report, and does not bind live evidence to an exact candidate SHA/expected WSGI hash. The current imported `ops/production_readiness.py` is correspondingly pre-v2 and cannot enforce the new exact candidate/runtime binding contract.
 
-No merge or production switch should occur from this guidance alone.
+## Round-2 DEV_B semantics that must be consumed before HOSTiQ live gate
+
+After exact-head DEV_B CI is green, semantically port the current equivalents of:
+
+- `ops/candidate_runtime_preflight.py` — exact SHA-40 candidate envelope; canonical WSGI; exact pinned runtime direct deps; direct Telethon; fully SHA-256 hash-locked runtime lock; optional test input+lock pair; private/runtime artifact exclusion; hash/count/boolean-only result;
+- `tools/validate_candidate_runtime_preflight.py` — one-command owner-private preflight evidence;
+- `ops/passenger_evidence_hook.py` — marker schema binds exact candidate SHA + expected WSGI SHA-256; strong evidence requires actual WSGI hash equality; writes both runtime report and tamper-checked `passenger_runtime_binding.json`; marker consumed only after both reports are durable;
+- `tools/arm_passenger_evidence.py` — derives marker from successful private candidate preflight and uses POSIX `O_NOFOLLOW|O_EXCL` no-clobber creation with owner/mode/inode checks + fsync;
+- `ops/production_readiness.py` support-return **v2** — exact `candidate_package` + `runtime_binding`; top candidate SHA == binding SHA; candidate/runtime/expected/actual WSGI hashes equal; runtime payload hash equality; legacy v1 parseable but unable to satisfy strong Passenger gate;
+- `ops/server_manifest.py` current dependency-input categories including runtime/test locks;
+- current DEV_B tests and `docs/HOSTIQ_ONE_TIME_SUPPORT_PACKAGE.md`.
+
+Do not blindly overwrite DEV_A-specific adaptations in `ops/hostiq_lifecycle.py`, `ops/release_package.py` or provenance files; port semantics and rerun integrated tests.
+
+## Call-free WSGI-compatible Passenger evidence integration
+
+DEV_A's strict canonical `passenger_wsgi.py` policy is compatible with DEV_B without adding calls to the WSGI file.
+
+Keep `passenger_wsgi.py` as:
+
+```python
+from bridge.app import application
+```
+
+The preferred integration point is inside the actual exported application request path. Add the DEV_B helper import to `bridge/app.py` and invoke it at the beginning of `BridgeApplication.__call__`:
+
+```python
+from ops.passenger_evidence_hook import collect_if_armed_from_bridge_app
+
+# at start of BridgeApplication.__call__(...):
+collect_if_armed_from_bridge_app(__file__)
+```
+
+Properties:
+
+- no WSGI startup call, so DEV_A's one-import/call-free bootstrap policy remains intact;
+- no Telegram/network operation;
+- inert when the owner-private exact candidate marker is absent;
+- fail-isolated: helper never raises into request handling;
+- derives actual app root and sibling `passenger_wsgi.py` from real `bridge/app.py` topology;
+- executes only in the process actually serving a WSGI request, which is suitable Passenger application-process evidence;
+- exact candidate SHA + expected/actual WSGI hash binding still applies before report/marker consumption.
+
+This is preferable to weakening `validate_wsgi_contract()` to allow arbitrary startup calls.
+
+## Existing runtime adapter invariants to preserve
+
+- Meaningful health requires exact `ok`, `service`, `ready`, `components`; HTTP 200 alone is not PASS.
+- `service == telegram-bridge`.
+- components are auth/backend/storage/rate_limit with configured/unconfigured states; `ready` must agree.
+- Explicit bootstrap-not-ready mode is distinct from production-ready health.
+- Authenticated bootstrap probe is fixed to harmless read `POST /api/v1/dialogs/list`; structured `telegram_backend_unconfigured` is acceptable only in explicit bootstrap mode and without Telegram access.
+- Private bearer/SHA/hook files use descriptor-safe owner-private reads/execution; no raw output/private values become public evidence.
+- No deployment smoke invokes SEND/REPLY/FORWARD/SEND_FILES/K5.
+- OpenAPI identity is not running release identity.
+
+## Exact next gate
+
+1. DEV_A exact-head CI must succeed, including **Real exact-head non-live release PREPARE** rather than skipping it after an earlier test failure.
+2. The prepared exact SHA must install its lock with `pip --require-hashes` in clean Python 3.11 and prove the exact installed Telethon/pyaes/rsa/pyasn1 versions.
+3. DEV_A must port the current DEV_B Round-2 exact-binding semantics and request-path Passenger adapter without weakening canonical WSGI safety.
+4. Full integrated CI + DEV_B runtime/readiness tests + DEV_C QA must be green on one exact packaged SHA.
+5. Only then may the Independent Auditor decide whether to arm the one-time HOSTiQ live evidence cycle.
+
+No merge, production switch, Passenger restart, Telegram authorization request, live Telegram read/write, or K5 is authorized by this guidance. `USER_TELEGRAM_AUTH_NOT_YET_REQUIRED` remains current.
