@@ -112,6 +112,14 @@ def _reject_unexpected_paths(changed: set[str], allowed: set[str]) -> None:
         raise ProvenanceError("candidate diff contains path outside provenance allowlist")
 
 
+def _validate_override_subset(data: dict[str, Any], path_key: str) -> set[str]:
+    paths = set(data[path_key])
+    overrides = set(data.get("dev_a_overrides", []))
+    if not overrides <= paths:
+        raise ProvenanceError("declared DEV_A override is outside predecessor path set")
+    return overrides
+
+
 def verify_repository() -> dict[str, Any]:
     manifest = _load()
     head = _git("rev-parse", "HEAD")
@@ -138,7 +146,7 @@ def verify_repository() -> dict[str, Any]:
     for lane in ("DEV3", "DEV4", "DEV2"):
         data = predecessors[lane]
         source = str(data["sha"])
-        overrides = set(data.get("dev_a_overrides", []))
+        overrides = _validate_override_subset(data, "paths")
         for path in data["paths"]:
             if path in overrides:
                 continue
@@ -146,7 +154,10 @@ def verify_repository() -> dict[str, Any]:
                 raise ProvenanceError(f"unexpected post-import mutation: {lane}:{path}")
 
     dev5 = predecessors["DEV5"]
+    dev5_overrides = _validate_override_subset(dev5, "ported_paths")
     for path in dev5["ported_paths"]:
+        if path in dev5_overrides:
+            continue
         if _blob("HEAD", path) != _blob(str(dev5["sha"]), path):
             raise ProvenanceError(f"DEV5 portable oracle drift: {path}")
     for path in dev5["rejected_overlaps_preserve_base"]:
@@ -185,6 +196,8 @@ def verify_repository() -> dict[str, Any]:
         "changed_path_count": len(changed),
         "verified_predecessor_count": 4,
         "semantic_merge_count": 4,
+        "dev3_override_count": len(_validate_override_subset(predecessors["DEV3"], "paths")),
+        "adapted_dev5_path_count": len(dev5_overrides),
         "pr2_pr3_overlap_count": overlap_counts["PR2_PR3"],
         "pr2_pr5_overlap_count": overlap_counts["PR2_PR5"],
         "rejected_dev5_overlap_count": len(dev5["rejected_overlaps_preserve_base"]),
