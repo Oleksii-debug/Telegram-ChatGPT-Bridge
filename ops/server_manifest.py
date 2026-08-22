@@ -22,6 +22,10 @@ MAX_TOTAL_BYTES = 250_000_000
 PRIVATE_PARTS = frozenset({"var", "runtime", "session", "sessions", "private", "cache", "tmp", "temp", "backup", "backups", ".git"})
 PRIVATE_NAMES = frozenset({"private_config.json", "connection_info.txt", "credentials.json", "token.json", "bootstrap.json", "setup_state.json"})
 PRIVATE_SUFFIXES = (".session", ".session-journal", ".sqlite", ".sqlite3", ".db", ".log", ".pem", ".key")
+DEPENDENCY_INPUT_NAMES = frozenset({
+    "requirements.txt", "requirements.lock", "requirements-test.txt", "requirements-test.lock",
+    "requirements-dev.txt", "requirements-dev.lock", "constraints.txt", "pyproject.toml", "poetry.lock",
+})
 
 
 def _category(path: str, size: int) -> str:
@@ -42,7 +46,7 @@ def _category(path: str, size: int) -> str:
         return "tests"
     if parts and parts[0] in {"ops", "tools"} and name.endswith((".py", ".sh")):
         return "tooling"
-    if name in {"requirements.txt", "requirements.lock", "requirements-dev.txt", "constraints.txt", "pyproject.toml", "poetry.lock"}:
+    if name in DEPENDENCY_INPUT_NAMES:
         return "dependency_input"
     if parts and parts[0] == "docs" and name.endswith((".md", ".txt", ".json")):
         return "documentation_metadata"
