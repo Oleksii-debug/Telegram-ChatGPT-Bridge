@@ -55,9 +55,9 @@ class ConcurrentBackend:
         raise AssertionError("not needed by this gate")
 
     def download_media(self, **kwargs):
-        source_ref = str(kwargs["source_ref"])
+        file_ref = str(kwargs["file_ref"])
         destination = Path(kwargs["destination"])
-        destination.write_bytes(self.payloads[source_ref])
+        destination.write_bytes(self.payloads[file_ref])
         with self._lock:
             self.download_count += 1
         return {"path": str(destination)}
