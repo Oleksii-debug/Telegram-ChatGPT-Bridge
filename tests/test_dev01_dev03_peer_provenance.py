@@ -21,6 +21,14 @@ EXACT_PATHS = {
 }
 EXCLUDED_WORKFLOW = ".github/workflows/dev03-read.yml"
 
+DEV07_SOURCE_SHA = "feff7ba8bf7bea74ac88b21002c0810ab7a1c8e2"
+DEV07_MERGE_COMMIT = "4884e55ab582c1e906a692499efb6c68575cb8df"
+DEV07_FIRST_PARENT = "9e536dca59eda481bf54ee7e0cb1c78efca7f4d9"
+DEV07_EXACT_PATHS = {
+    "bridge/audit.py",
+    "tests/test_dev07_audit_security.py",
+}
+
 REPOSITORY_GIT_AVAILABLE = (ROOT / ".git").exists()
 requires_repository_git = unittest.skipUnless(
     REPOSITORY_GIT_AVAILABLE,
@@ -100,6 +108,47 @@ class Dev01Dev03PeerProvenanceTests(unittest.TestCase):
         self.assertIn("offset_id", history_tests)
         self.assertIn("display_name", backend)
         self.assertIn("get_sender", read_tests)
+
+
+class Dev01Dev07AuditPeerProvenanceTests(unittest.TestCase):
+    def test_manifest_records_exact_non_authorizing_dev07_audit_sync(self):
+        payload = json.loads(MANIFEST.read_text(encoding="utf-8"))
+        sync = payload["swarm_integrations"]["DEV07_AUDIT_SINK"]
+        self.assertEqual(42, sync["pr"])
+        self.assertEqual(DEV07_SOURCE_SHA, sync["source_sha"])
+        self.assertEqual(DEV07_MERGE_COMMIT, sync["merge_commit"])
+        self.assertEqual(DEV07_FIRST_PARENT, sync["first_parent"])
+        self.assertEqual(DEV07_EXACT_PATHS, set(sync["exact_blob_paths"]))
+        self.assertEqual("A01-10", sync["auditor_finding"])
+        self.assertEqual(32641980105, sync["source_ci_run_id"])
+        self.assertEqual(97200367017, sync["source_ci_job_id"])
+        self.assertFalse(sync["production_mutated"])
+        self.assertFalse(sync["deployment_authorized"])
+
+    @requires_repository_git
+    def test_dev07_audit_merge_parent_order_and_exact_blobs(self):
+        self.assertEqual(
+            [DEV07_FIRST_PARENT, DEV07_SOURCE_SHA],
+            _git("show", "-s", "--format=%P", DEV07_MERGE_COMMIT).split(),
+        )
+        subprocess.run(
+            ["git", "merge-base", "--is-ancestor", DEV07_MERGE_COMMIT, "HEAD"],
+            cwd=ROOT,
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        for path in sorted(DEV07_EXACT_PATHS):
+            with self.subTest(path=path):
+                self.assertEqual(_blob("HEAD", path), _blob(DEV07_SOURCE_SHA, path))
+
+    def test_a01_10_descriptor_bound_oracles_are_present(self):
+        audit = (ROOT / "bridge" / "audit.py").read_text(encoding="utf-8")
+        tests = (ROOT / "tests" / "test_dev07_audit_security.py").read_text(encoding="utf-8")
+        for required in ("O_NOFOLLOW", "dir_fd=parent_fd", "os.fsync", "st_nlink"):
+            self.assertIn(required, audit)
+        for required in ("test_symlink_leaf_is_rejected", "test_hardlink_leaf_is_rejected", "test_parent_inode_replacement_after_construction_is_rejected"):
+            self.assertIn(required, tests)
 
 
 if __name__ == "__main__":
