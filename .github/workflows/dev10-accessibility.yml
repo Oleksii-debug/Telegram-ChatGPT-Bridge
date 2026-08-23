@@ -5,10 +5,13 @@ on:
     paths:
       - 'ops/dev10_accessibility_protocol.py'
       - 'ops/dev10_operator_ux.py'
+      - 'ops/dev10_human_live_gate.py'
       - 'tests/test_dev10_accessibility_protocol.py'
       - 'tests/test_dev10_operator_ux.py'
+      - 'tests/test_dev10_human_live_gate.py'
       - 'docs/DEV10_ACCESSIBILITY_LIVE_E2E_PROTOCOL.md'
       - 'docs/DEV10_OPERATOR_UX_REFERENCE_GAP.md'
+      - 'docs/DEV10_HUMAN_LIVE_EVIDENCE_BINDING.md'
       - '.github/workflows/dev10-accessibility.yml'
 
 permissions:
@@ -32,13 +35,16 @@ jobs:
           python -m py_compile
           ops/dev10_accessibility_protocol.py
           ops/dev10_operator_ux.py
+          ops/dev10_human_live_gate.py
           tests/test_dev10_accessibility_protocol.py
           tests/test_dev10_operator_ux.py
+          tests/test_dev10_human_live_gate.py
       - name: Run DEV10 protocol tests
         run: >-
           python -m unittest -v
           tests.test_dev10_accessibility_protocol
           tests.test_dev10_operator_ux
+          tests.test_dev10_human_live_gate
       - name: Current-tree secret scan
         if: ${{ always() }}
         run: python tools/secret_scan.py --mode current
