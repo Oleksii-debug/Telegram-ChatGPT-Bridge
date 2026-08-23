@@ -55,7 +55,9 @@
     "db76f96909f0fb0f3d38db920006bee929805c76",
     "f2cde94a4200aceea69846b61e8b89f3e4f62a92",
     "f8b2a3ff0d689966e2f88f3c9efc63cbe5cef8a0",
-    "919d7d409564d7c21e46009e1d76cfa5d1fd602d"
+    "919d7d409564d7c21e46009e1d76cfa5d1fd602d",
+    "1c3e810706d77fcdd1e17d8beb2374439a448af0",
+    "2a6ae856640064f7ff4ba3f5f85230c72d7165e4"
   ],
   "runtime_packages": {
     "Telethon": "1.44.0",
@@ -109,13 +111,13 @@
       "tests/test_arm_passenger_evidence.py",
       "tests/test_candidate_runtime_preflight.py",
       "tests/test_devb_production_readiness.py",
-      "tests/test_devb_round2_release.py",
       "tests/test_passenger_evidence_hook.py",
       "tools/arm_passenger_evidence.py",
       "tools/validate_candidate_runtime_preflight.py"
     ],
     "retained_dev_a_adaptations": [
       "ops/server_manifest.py",
+      "tests/test_devb_round2_release.py",
       "tests/test_server_manifest.py"
     ],
     "strict_history_suppression_imported": false
