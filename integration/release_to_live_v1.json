@@ -31,6 +31,12 @@
     "tools/validate_hostiq_support_return.py",
     "tools/verify_release_prepare.py"
   ],
+  "dev_c_validation_paths": [
+    "docs/DEV_C_RELEASE_TO_LIVE_QA.md",
+    "ops/devc_release_qa.py",
+    "tests/test_devc_release_e2e.py",
+    "tests/test_devc_release_qa.py"
+  ],
   "trace_commits": [
     "239574cccc27764082e1b18b72d49a0a073a7665",
     "4216f38354a4a8ec54fc194c15c715ba12928107",
