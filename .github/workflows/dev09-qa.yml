@@ -37,19 +37,19 @@ jobs:
           test -n "$FIRST_DEV09_COMMIT"
           test "$(git rev-parse "$FIRST_DEV09_COMMIT^")" = "$EXPECTED_PARENT"
           git diff --name-only "$EXPECTED_PARENT"...HEAD | sort > /tmp/dev09-paths.txt
-          printf '%s\n' '.github/workflows/dev09-qa.yml' 'tests/test_dev09_swarm_qa.py' | sort > /tmp/dev09-expected.txt
+          printf '%s\n' '.github/workflows/dev09-qa.yml' 'tests/test_dev09_swarm_qa.py' 'tests/test_dev09_cross_lane_contracts.py' | sort > /tmp/dev09-expected.txt
           diff -u /tmp/dev09-expected.txt /tmp/dev09-paths.txt
           echo DEV09_EXACT_PARENT_QA_ONLY_PASS
       - name: Compile DEV09 QA and current integration surface
         run: >-
           python -m py_compile
-          tests/test_dev09_swarm_qa.py
+          tests/test_dev09_swarm_qa.py tests/test_dev09_cross_lane_contracts.py
           bridge/app.py bridge/integrated_app.py
           ops/candidate_contracts.py ops/write_safety.py ops/write_endpoint_policy.py
           ops/candidate_runtime_preflight.py ops/private_control.py
           ops/passenger_evidence_hook.py ops/passenger_probe.py
       - name: Run DEV09 adversarial acceptance QA
-        run: python -m unittest discover -s tests -p 'test_dev09_swarm_qa.py' -v
+        run: python -m unittest discover -s tests -p 'test_dev09*.py' -v
       - name: Run current DEV_B runtime security regressions
         run: |
           set -eu
@@ -77,6 +77,7 @@ jobs:
           (cd "$TMP_ROOT/release" && python -m unittest discover -s tests -v)
           echo DEV09_CLEAN_EXPORT_FULL_REGRESSION_PASS
       - name: Require PREPARE-style isolated venv full regression
+        if: always()
         env:
           EXPECTED_PARENT: c609adfc9a1116aae635a0b14d632a5e59b6c2af
         run: |
@@ -90,6 +91,7 @@ jobs:
           (cd "$TMP_ROOT/release" && .venv/bin/python -m unittest discover -s tests -v)
           echo DEV09_PREPARE_VENV_FULL_REGRESSION_PASS
       - name: Validate current Action schema independently
+        if: always()
         run: python tools/build_action_openapi.py --validate-only
       - name: Current-tree secret scan
         if: always()
