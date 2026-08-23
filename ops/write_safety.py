@@ -379,8 +379,14 @@ class PersistentWriteStore:
                 con.rollback()
                 return
             if row["state"] != TransactionState.RESERVED.value:
+                state = row["state"]
                 con.rollback()
-                if row["state"] in {TransactionState.CALLING.value, TransactionState.AMBIGUOUS.value}:
+                # This path can only race after this invocation already observed
+                # RESERVED. A new CALLING state therefore means another concurrent
+                # commit won the transition; the outcome is not ambiguous yet.
+                if state == TransactionState.CALLING.value:
+                    raise WriteSafetyError("write_in_progress", status=409)
+                if state == TransactionState.AMBIGUOUS.value:
                     raise ReconciliationRequired()
                 raise WriteSafetyError("illegal_write_state_transition", status=409)
             con.execute(
