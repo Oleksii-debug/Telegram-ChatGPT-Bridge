@@ -29,6 +29,32 @@ A pull-request merge ref, PR number, short SHA, generic worktree HEAD, CI-green 
 
 The current canonical source may become fully green while production remains blocked. No user Telegram input follows automatically from source CI.
 
+## Every live prerequisite is exact-SHA-bound
+
+A boolean such as `live_manifest_reconciled=true` or `passenger_application_process_verified=true` is not sufficient evidence by itself. Such a fact can become stale after a new release is deployed. DEV10 therefore validates one bounded `LivePrerequisiteBinding` before a human run can become ready.
+
+The binding contains only privacy-safe fields:
+
+- exact deployed SHA;
+- exact SHA associated with the Independent Auditor release gate;
+- exact SHA associated with live-manifest reconciliation;
+- exact SHA associated with Passenger application-process proof;
+- exact independently observed running SHA;
+- SHA-256 of the private setup surface;
+- boolean verification facts for those stages.
+
+The release-gate SHA, live-manifest SHA, Passenger application SHA and running SHA must each equal the exact deployed SHA. The approved source SHA must also equal that same deployed SHA. A stale `true` boolean from an older release therefore cannot be mixed with a newer deployment.
+
+Fail-closed identity states include:
+
+- `BLOCKED_DEPLOYED_SHA_MISMATCH`;
+- `BLOCKED_RELEASE_GATE_SHA_MISMATCH`;
+- `BLOCKED_LIVE_MANIFEST_SHA_MISMATCH`;
+- `BLOCKED_PASSENGER_SHA_MISMATCH`;
+- `BLOCKED_RUNNING_SHA_MISMATCH`.
+
+The binding schema has no field for server paths, private URLs, bearer tokens, Telegram identifiers, credentials, screenshots, transcripts, message text or session material. Unexpected fields are rejected rather than logged as evidence.
+
 ## Gate before requesting a human NVDA run
 
 A human NVDA run becomes READY only when all of the following refer to the same exact release:
@@ -36,11 +62,11 @@ A human NVDA run becomes READY only when all of the following refer to the same 
 - exact source SHA is valid release identity, not a PR merge ref;
 - source CI is green;
 - exact non-live PREPARE is verified;
-- Independent Auditor release gate exists;
+- Independent Auditor release gate exists and is bound to that exact deployed SHA;
 - exact deployed SHA equals the approved source SHA;
-- fresh live manifest reconciliation is complete;
-- Passenger application-process runtime is verified;
-- running SHA is independently verified;
+- fresh live manifest reconciliation is complete and bound to that exact deployed SHA;
+- Passenger application-process runtime is verified and bound to that exact deployed SHA;
+- running SHA is independently verified and equals that exact deployed SHA;
 - the private one-time setup surface is ready;
 - the setup surface is bound by SHA-256.
 
@@ -82,7 +108,9 @@ A previous human PASS is not portable across releases.
 - setup-surface hash changed -> `STALE_SETUP_SURFACE`;
 - either change invalidates prior human evidence and requires a fresh human run after the new deployment again satisfies the live prerequisites.
 
-This prevents a PASS from an old release, an old private setup page, or a GitHub merge ref from being silently reused for a different production state.
+A previous live prerequisite proof is also not portable: its own recorded SHA must match the current deployed release before it contributes to readiness.
+
+This prevents a PASS from an old release, an old private setup page, a stale runtime proof, or a GitHub merge ref from being silently reused for a different production state.
 
 ## Current project implication
 
