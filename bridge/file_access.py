@@ -8,6 +8,7 @@ stream or upload registered files after their registry metadata has been checked
 from __future__ import annotations
 
 import hashlib
+import io
 import os
 import re
 import secrets
@@ -51,17 +52,18 @@ class UploadFileIdentity:
             raise ValueError("size must be a non-negative integer")
 
 
-class VerifiedUploadFile:
+class VerifiedUploadFile(io.BufferedIOBase):
     """Read-only file-like upload source bound to a verified private inode.
 
-    Only safe upload metadata is copied onto this object. In particular, there
-    is no filesystem-path property: ``name`` is a sanitized display filename and
-    the underlying ``BinaryIO.name`` remains an integer descriptor. Callers must
-    pass this object itself to an upload library; converting back to a path would
-    reopen the TOCTOU gap this class is designed to close.
+    This is a real ``io.IOBase`` stream so upload libraries that preserve stream
+    position only for standard IO objects behave correctly. Only safe upload
+    metadata is copied onto the wrapper: there is no filesystem-path property;
+    ``name`` is a sanitized display filename. Callers must pass this object
+    itself to an upload library rather than reconstructing ``record.path``.
     """
 
     def __init__(self, verified: VerifiedPrivateFile) -> None:
+        super().__init__()
         record = verified.record
         self._handle = verified.handle
         self.file_ref = record.file_ref
@@ -70,37 +72,43 @@ class VerifiedUploadFile:
         self.mime_type = record.mime_type
         self.name = safe_filename(record.name)
 
-    @property
-    def closed(self) -> bool:
-        return self._handle.closed
-
     def read(self, size: int = -1) -> bytes:
+        self._checkClosed()
         return self._handle.read(size)
 
+    def readinto(self, buffer: Any) -> int:
+        self._checkClosed()
+        return self._handle.readinto(buffer)
+
     def seek(self, offset: int, whence: int = os.SEEK_SET) -> int:
+        self._checkClosed()
         return self._handle.seek(offset, whence)
 
     def tell(self) -> int:
+        self._checkClosed()
         return self._handle.tell()
 
     def fileno(self) -> int:
+        self._checkClosed()
         return self._handle.fileno()
 
     def readable(self) -> bool:
-        return self._handle.readable()
+        return not self.closed and self._handle.readable()
 
     def seekable(self) -> bool:
-        return self._handle.seekable()
+        return not self.closed and self._handle.seekable()
+
+    def writable(self) -> bool:
+        return False
 
     def close(self) -> None:
-        if not self._handle.closed:
-            self._handle.close()
-
-    def __enter__(self) -> "VerifiedUploadFile":
-        return self
-
-    def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
-        self.close()
+        if self.closed:
+            return
+        try:
+            if not self._handle.closed:
+                self._handle.close()
+        finally:
+            super().close()
 
 
 class VerifiedUploadBatch:
