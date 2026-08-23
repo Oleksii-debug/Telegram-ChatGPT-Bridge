@@ -160,6 +160,30 @@ def _load_release_override() -> dict[str, Any]:
     if sync.get("strict_history_suppression_imported") is not False:
         raise ProvenanceError("DEV_B strict-history suppression layer must not be imported")
 
+    dev_c = payload.get("dev_c_qa_sync")
+    if not isinstance(dev_c, dict) or dev_c.get("pr") != 16:
+        raise ProvenanceError("DEV_C QA sync provenance missing")
+    if dev_c.get("sha") != "5758bfdcd9ecee4011fc3caaa3c68eb46ee2af19":
+        raise ProvenanceError("DEV_C QA source checkpoint mismatch")
+    if dev_c.get("merge_commit") != "df318aa089f754b7a14f624b7c27cca59758cbe8":
+        raise ProvenanceError("DEV_C QA semantic merge identity mismatch")
+    if dev_c.get("first_parent") != "94c6ab7e3afabd769a63b44b222bfc0bbf067f67":
+        raise ProvenanceError("DEV_C QA first-parent checkpoint mismatch")
+    dev_c_exact = set(_safe_sorted_paths(dev_c.get("exact_blob_paths"), "DEV_C QA exact"))
+    dev_c_adapted = set(_safe_sorted_paths(dev_c.get("adapted_paths"), "DEV_C QA adapted"))
+    if dev_c_exact != {
+        "docs/DEV_C_RELEASE_TO_LIVE_QA.md",
+        "ops/devc_release_qa.py",
+        "tests/test_devc_release_e2e.py",
+    }:
+        raise ProvenanceError("DEV_C QA exact path set mismatch")
+    if dev_c_adapted != {"tests/test_devc_release_qa.py"}:
+        raise ProvenanceError("DEV_C QA adapted path set mismatch")
+    if dev_c_exact & dev_c_adapted or not (dev_c_exact | dev_c_adapted) <= set(paths):
+        raise ProvenanceError("DEV_C QA path accounting invalid")
+    if dev_c.get("production_logic_modified") is not False:
+        raise ProvenanceError("DEV_C QA overlay may not claim production mutation")
+
     if payload.get("private_values_recorded") is not False:
         raise ProvenanceError("release-to-live overlay records private values")
     if payload.get("production_mutated") is not False or payload.get("deployment_authorized") is not False:
@@ -231,6 +255,9 @@ def verify_repository() -> dict[str, Any]:
     dev_b_sync = release_override["dev_b_round2_sync"]
     dev_b_sync_exact = set(dev_b_sync["exact_blob_paths"])
     dev_b_sync_retained = set(dev_b_sync["retained_dev_a_adaptations"])
+    dev_c_sync = release_override["dev_c_qa_sync"]
+    dev_c_exact = set(dev_c_sync["exact_blob_paths"])
+    dev_c_adapted = set(dev_c_sync["adapted_paths"])
 
     overlap_counts = _verify_overlap_matrix(manifest)
 
@@ -241,6 +268,7 @@ def verify_repository() -> dict[str, Any]:
         predecessors["DEV5"]["merge_commit"]: (predecessors["DEV2"]["merge_commit"], predecessors["DEV5"]["sha"]),
         dev_b["merge_commit"]: (dev_b["first_parent"], dev_b["sha"]),
         dev_b_sync["merge_commit"]: (dev_b_sync["first_parent"], dev_b_sync["sha"]),
+        dev_c_sync["merge_commit"]: (dev_c_sync["first_parent"], dev_c_sync["sha"]),
     }
     for commit, expected in expected_parent_sets.items():
         actual = _parents(str(commit))
@@ -295,6 +323,13 @@ def verify_repository() -> dict[str, Any]:
         "tests/test_server_manifest.py",
     }:
         raise ProvenanceError("DEV_B Round-2 retained adaptation set mismatch")
+
+    for path in dev_c_exact:
+        if _blob("HEAD", path) != _blob(str(dev_c_sync["sha"]), path):
+            raise ProvenanceError(f"unexpected DEV_C QA exact-path drift: {path}")
+    if _blob("HEAD", "tests/test_devc_release_qa.py") == _blob(str(dev_c_sync["sha"]), "tests/test_devc_release_qa.py"):
+        raise ProvenanceError("DEV_C adapted QA path unexpectedly reverted to stale source blob")
+
     for forbidden in ("tools/strict_history_secret_scan.py", "tests/test_strict_history_secret_scan.py"):
         if _path_exists("HEAD", forbidden):
             raise ProvenanceError("strict-history suppression layer unexpectedly imported")
@@ -334,8 +369,8 @@ def verify_repository() -> dict[str, Any]:
         "head": head,
         "base": base,
         "changed_path_count": len(changed),
-        "verified_predecessor_count": 6,
-        "semantic_merge_count": 6,
+        "verified_predecessor_count": 7,
+        "semantic_merge_count": 7,
         "dev3_override_count": len(_validate_override_subset(predecessors["DEV3"], "paths")),
         "adapted_dev5_path_count": len(dev5_overrides),
         "dev_b_imported_path_count": len(dev_b_imported),
@@ -343,6 +378,8 @@ def verify_repository() -> dict[str, Any]:
         "dev_b_superseded_path_count": len(dev_b_supersedes),
         "dev_b_round2_sync_path_count": len(dev_b_sync_exact),
         "dev_b_round2_adapted_path_count": len(dev_b_sync_retained),
+        "dev_c_exact_path_count": len(dev_c_exact),
+        "dev_c_adapted_path_count": len(dev_c_adapted),
         "pr2_pr3_overlap_count": overlap_counts["PR2_PR3"],
         "pr2_pr5_overlap_count": overlap_counts["PR2_PR5"],
         "rejected_dev5_overlap_count": len(dev5["rejected_overlaps_preserve_base"]),
