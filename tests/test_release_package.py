@@ -5,6 +5,8 @@ import importlib.util
 import os
 import shutil
 import socket
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -122,6 +124,20 @@ class ReleasePackageContractTests(unittest.TestCase):
     def test_no_meaningless_test_requirement_files_are_present(self):
         self.assertFalse((ROOT / "requirements-test.txt").exists())
         self.assertFalse((ROOT / "requirements-test.lock").exists())
+
+    def test_direct_prepare_cli_can_import_repository_packages(self):
+        completed = subprocess.run(
+            [sys.executable, str(ROOT / "tools" / "verify_release_prepare.py"), "--help"],
+            cwd=ROOT,
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=30,
+        )
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        self.assertIn("--sha", completed.stdout)
+        self.assertIn("--approved-ref", completed.stdout)
 
     def test_exact_prepare_verification_ignores_working_checkout_dependency_drift(self):
         """PR merge-ref bytes must never become the exact release identity source."""
