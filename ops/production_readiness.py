@@ -4,7 +4,9 @@
 This module never authorizes deployment. It validates a bounded, non-secret
 support-return package and emits a machine-readable prerequisite checklist.
 Reference/simulated evidence can exercise contracts but can never satisfy a
-live prerequisite.
+live prerequisite. Schema v2 additionally binds Passenger evidence to the exact
+candidate package identity; legacy v1 remains parseable but cannot satisfy the
+strong runtime gate.
 """
 from __future__ import annotations
 
@@ -73,13 +75,21 @@ def _bool(value: Any, label: str) -> bool:
 
 
 def validate_support_return(payload: dict) -> dict:
-    """Validate the exact non-secret schema expected from a one-time HOSTiQ run."""
-    top = _exact_keys(payload, {
+    """Validate exact bounded non-secret schema from a one-time HOSTiQ run."""
+    if not isinstance(payload, dict):
+        raise SafetyError("support return schema mismatch")
+    version = payload.get("schema_version")
+    common = {
         "schema_version", "candidate_sha", "evidence_classes", "server_manifest",
         "reconciliation", "runtime", "lifecycle", "privacy",
-    }, "support return")
-    if top["schema_version"] != 1:
+    }
+    if version == 1:
+        expected_top = common
+    elif version == 2:
+        expected_top = common | {"candidate_package", "runtime_binding"}
+    else:
         raise SafetyError("support return version mismatch")
+    top = _exact_keys(payload, expected_top, "support return")
     candidate_sha = _sha40(top["candidate_sha"], "candidate")
 
     classes = _exact_keys(top["evidence_classes"], {"source", "runtime", "lifecycle"}, "evidence classes")
@@ -106,12 +116,16 @@ def validate_support_return(payload: dict) -> dict:
     if recon_status == "EXACT_ACCOUNTED" and (differences != 0 or not startup_accounted):
         raise SafetyError("exact reconciliation claim is not semantically supported")
 
-    runtime = _exact_keys(top["runtime"], {
+    runtime_keys = {
         "artifact_sha256", "collector_context", "python_major_minor", "runtime_compliance",
         "application_import_ok", "passenger_context_present", "wsgi_sha256",
-    }, "runtime summary")
+    }
+    if version == 2:
+        runtime_keys.add("payload_sha256")
+    runtime = _exact_keys(top["runtime"], runtime_keys, "runtime summary")
     _sha256(runtime["artifact_sha256"], "runtime artifact")
-    _sha256(runtime["wsgi_sha256"], "WSGI")
+    runtime_wsgi = _sha256(runtime["wsgi_sha256"], "WSGI")
+    runtime_payload = _sha256(runtime["payload_sha256"], "runtime payload") if version == 2 else None
     collector = _enum(runtime["collector_context"], COLLECTOR_CONTEXTS, "collector context")
     if runtime["python_major_minor"] not in {"3.6", "3.7", "3.8", "3.9", "3.10", "3.11", "3.12", "3.13", "3.14"}:
         raise SafetyError("runtime Python major/minor invalid")
@@ -123,6 +137,36 @@ def validate_support_return(payload: dict) -> dict:
             raise SafetyError("strong Passenger runtime claim is not semantically supported")
     if compliance == "NONCOMPLIANT_NOT_PYTHON_3_11" and runtime["python_major_minor"] == "3.11":
         raise SafetyError("runtime noncompliance contradicts Python version")
+
+    if version == 2:
+        package = _exact_keys(top["candidate_package"], {
+            "identity_artifact_sha256", "manifest_sha256", "wsgi_sha256",
+            "requirements_lock_sha256", "package_preflight_pass",
+        }, "candidate package summary")
+        _sha256(package["identity_artifact_sha256"], "candidate package identity artifact")
+        _sha256(package["manifest_sha256"], "candidate package manifest")
+        package_wsgi = _sha256(package["wsgi_sha256"], "candidate package WSGI")
+        _sha256(package["requirements_lock_sha256"], "candidate requirements lock")
+        if _bool(package["package_preflight_pass"], "candidate package preflight") is not True:
+            raise SafetyError("candidate package preflight did not pass")
+
+        binding = _exact_keys(top["runtime_binding"], {
+            "artifact_sha256", "candidate_sha", "expected_wsgi_sha256", "actual_wsgi_sha256",
+            "runtime_payload_sha256", "binding_valid",
+        }, "runtime binding summary")
+        _sha256(binding["artifact_sha256"], "runtime binding artifact")
+        binding_sha = _sha40(binding["candidate_sha"], "runtime binding candidate")
+        expected_wsgi = _sha256(binding["expected_wsgi_sha256"], "runtime binding expected WSGI")
+        actual_wsgi = _sha256(binding["actual_wsgi_sha256"], "runtime binding actual WSGI")
+        binding_runtime_payload = _sha256(binding["runtime_payload_sha256"], "runtime binding payload")
+        if _bool(binding["binding_valid"], "runtime binding valid") is not True:
+            raise SafetyError("runtime binding is not positive")
+        if binding_sha != candidate_sha:
+            raise SafetyError("runtime binding candidate SHA mismatch")
+        if not (package_wsgi == runtime_wsgi == expected_wsgi == actual_wsgi):
+            raise SafetyError("candidate/runtime Passenger WSGI identity mismatch")
+        if binding_runtime_payload != runtime_payload:
+            raise SafetyError("runtime binding payload identity mismatch")
 
     lifecycle = _exact_keys(top["lifecycle"], {
         "mode", "candidate_sha", "backup", "restart", "running_identity", "health",
@@ -145,7 +189,6 @@ def validate_support_return(payload: dict) -> dict:
     if _bool(privacy["private_values_copied"], "private-values copied") or _bool(privacy["raw_response_copied"], "raw-response copied"):
         raise SafetyError("support return privacy boundary violated")
 
-    # Canonical JSON round-trip also rejects custom objects and non-JSON values.
     try:
         canonical = json.loads(json.dumps(top, sort_keys=True, separators=(",", ":"), ensure_ascii=True))
     except (TypeError, ValueError) as exc:
@@ -167,6 +210,7 @@ def build_deployment_readiness(payload: dict) -> dict:
     recon = data["reconciliation"]
     runtime = data["runtime"]
     lifecycle = data["lifecycle"]
+    exact_binding_ok = data["schema_version"] == 2
 
     source_ok = (
         classes["source"] in LIVE_ELIGIBLE
@@ -175,7 +219,8 @@ def build_deployment_readiness(payload: dict) -> dict:
         and recon["startup_accounted"] is True
     )
     runtime_ok = (
-        classes["runtime"] in LIVE_ELIGIBLE
+        exact_binding_ok
+        and classes["runtime"] in LIVE_ELIGIBLE
         and runtime["collector_context"] == "APPLICATION_PROCESS"
         and runtime["python_major_minor"] == "3.11"
         and runtime["runtime_compliance"] == "PYTHON_3_11_APPLICATION_CONTEXT_CONFIRMED"
@@ -192,6 +237,7 @@ def build_deployment_readiness(payload: dict) -> dict:
 
     checks = {
         "source_reconciliation": _check("PASS" if source_ok else "BLOCKED_EXTERNAL", "EXACT_LIVE_SOURCE_ACCOUNTED" if source_ok else "LIVE_SOURCE_EVIDENCE_PENDING"),
+        "exact_candidate_runtime_binding": _check("PASS" if exact_binding_ok else "BLOCKED_EXTERNAL", "EXACT_CANDIDATE_RUNTIME_BOUND" if exact_binding_ok else "EXACT_CANDIDATE_RUNTIME_BINDING_REQUIRED"),
         "passenger_python_311": _check("PASS" if runtime_ok else "BLOCKED_EXTERNAL", "PASSENGER_APPLICATION_CONTEXT_CONFIRMED" if runtime_ok else "PASSENGER_RUNTIME_EVIDENCE_PENDING"),
         "backup_restart_identity_health_smoke_resume": _check("PASS" if lifecycle_ok else "BLOCKED_EXTERNAL", "LIVE_LIFECYCLE_CONFIRMED" if lifecycle_ok else "LIVE_LIFECYCLE_EVIDENCE_PENDING"),
         "rollback": _check("PASS" if rollback_ok else "BLOCKED_EXTERNAL", "LIVE_ROLLBACK_CONFIRMED" if rollback_ok else "LIVE_ROLLBACK_EVIDENCE_PENDING"),
@@ -200,7 +246,7 @@ def build_deployment_readiness(payload: dict) -> dict:
         "production_switch": _check("BLOCKED_EXTERNAL", "DEVELOPER_TOOL_CANNOT_AUTHORIZE_PROMOTION"),
     }
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "candidate_sha": data["candidate_sha"],
         "checks": checks,
         "non_auditor_prerequisites_structurally_present": source_ok and runtime_ok and lifecycle_ok and rollback_ok,
@@ -215,13 +261,14 @@ def validate_public_readiness(payload: dict) -> dict:
         "schema_version", "candidate_sha", "checks", "non_auditor_prerequisites_structurally_present",
         "promotion_authorized", "private_values_copied", "raw_response_copied",
     }, "public readiness")
-    if data["schema_version"] != 1:
+    if data["schema_version"] != 2:
         raise SafetyError("public readiness version mismatch")
     _sha40(data["candidate_sha"], "public readiness candidate")
     checks = data["checks"]
     expected = {
-        "source_reconciliation", "passenger_python_311", "backup_restart_identity_health_smoke_resume",
-        "rollback", "telegram_user_authorization", "independent_auditor_gate", "production_switch",
+        "source_reconciliation", "exact_candidate_runtime_binding", "passenger_python_311",
+        "backup_restart_identity_health_smoke_resume", "rollback", "telegram_user_authorization",
+        "independent_auditor_gate", "production_switch",
     }
     _exact_keys(checks, expected, "public readiness checks")
     for name, item in checks.items():
