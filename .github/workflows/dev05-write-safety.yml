@@ -37,6 +37,7 @@ jobs:
           tests/test_dev05_snapshot_transport.py
           tests/test_dev05_snapshot_factory_guard.py
           tests/test_dev05_safe_exception_phase_guard.py
+          tests/test_burst01_08_exactly_once.py
           tests/test_dev4_write_core.py
           tests/test_dev4_endpoint_policy.py
           tests/test_dev_a_integration.py
@@ -51,7 +52,8 @@ jobs:
             tests.test_dev05_error_code_privacy \
             tests.test_dev05_snapshot_transport \
             tests.test_dev05_snapshot_factory_guard \
-            tests.test_dev05_safe_exception_phase_guard -v
+            tests.test_dev05_safe_exception_phase_guard \
+            tests.test_burst01_08_exactly_once -v
       - name: Re-run canonical write safety regressions
         run: |
           umask 022
