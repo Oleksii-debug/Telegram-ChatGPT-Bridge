@@ -2,24 +2,27 @@
 
 Purpose: one bounded server-side path for factual source/runtime/lifecycle evidence without making the user a recurring cPanel operator.
 
-Status: **PREPARED / NOT AUTHORIZED FOR LIVE SWITCH**. Execute production mutation only after the Independent Auditor approves one exact packaged DEV_A SHA. This package never asks for or returns Telegram credentials/session values, bearer values, setup-route values, private messages/media, environment dumps or raw private logs.
+Status: **PREPARED MECHANISM / NOT AUTHORIZED FOR LIVE EXECUTION OR SWITCH**. Production mutation remains behind Independent Auditor approval of one exact integrated candidate SHA. This package never asks for or returns Telegram credentials/session values, bearer values, setup-route values, private Telegram content, environment dumps or raw private logs.
 
-## 1. Preconditions and exact release identity
+## 1. Preconditions
 
-Support receives only non-secret release identifiers from the Auditor/release owner:
+The exact Auditor-selected candidate must provide root `passenger_wsgi.py`, `requirements.txt`, SHA-256 hash-locked `requirements.lock`, canonical application source and the DEV_B Round-2 evidence tooling. Any test dependency input is valid only as a matching hash-locked input+lock pair.
 
-- exact approved Git SHA-40 and approved ref;
-- exact candidate manifest/release identity hashes;
-- exact `passenger_wsgi.py` SHA-256;
-- exact `requirements.lock` SHA-256;
-- application root `/home/rukadopo/telegram_bridge`;
-- production host `tg-api.rukadopomogy.org.ua`.
+The current canonical production health contract is exact and has seven components:
 
-The candidate is not eligible for this package until it contains root `passenger_wsgi.py`, `requirements.txt`, fully SHA-256 hash-locked `requirements.lock`, and any test dependency input only as an exact `requirements-test.txt` + `requirements-test.lock` pair.
+- `auth`
+- `backend`
+- `storage`
+- `read_rate_limit`
+- `write_store`
+- `write_rate_limit`
+- `telegram_writer`
 
-## 2. Private control/evidence roots
+Each component is exactly `configured` or `unconfigured`; `ready` must equal the conjunction of all seven. Legacy four-component health is not current evidence.
 
-Run as the application account:
+## 2. Private roots
+
+Run only as the application account, under owner-private roots:
 
 ```sh
 umask 077
@@ -27,11 +30,11 @@ install -d -m 700 "$HOME/.telegram_bridge_private_control"
 install -d -m 700 "$HOME/.telegram_bridge_private_evidence"
 ```
 
-No secret is a command-line argument.
+Real values are never committed to Git/Drive/project files.
 
-## 3. Exact candidate package preflight — before Passenger arming
+## 3. Exact candidate preflight
 
-Run against the exact exported/staged candidate, never an approximate source copy. The tool resolves its own repository root and does not depend on the caller's current directory or `PYTHONPATH`:
+Against the exact exported/staged candidate:
 
 ```sh
 python tools/validate_candidate_runtime_preflight.py \
@@ -40,54 +43,49 @@ python tools/validate_candidate_runtime_preflight.py \
   --output "$HOME/.telegram_bridge_private_evidence/candidate_runtime_preflight.json"
 ```
 
-Expected stdout is only `CANDIDATE_RUNTIME_PREFLIGHT_PASS` or `CANDIDATE_RUNTIME_PREFLIGHT_BLOCKED`.
+Only `CANDIDATE_RUNTIME_PREFLIGHT_PASS` or a bounded blocked marker is expected. The preflight checks the exact audited WSGI AST, exact-pinned/hash-locked dependency envelope, Telethon direct requirement, WSGI/dependency hashes, required topology, absence of private runtime payload and `promotion_authorized=false`.
 
-The preflight fails closed unless:
+This is structural evidence only. The exact candidate must separately pass the real non-live `prepare_versioned_release()` path under Python 3.11.
 
-- `passenger_wsgi.py` matches the exact reviewed startup contract in section 6; merely containing the recovered application import is insufficient;
-- runtime direct dependencies are unconditional exact pins and directly include Telethon;
-- every locked package is exact-pinned and has SHA-256 hashes only;
-- direct runtime versions exactly match the lock;
-- optional test requirements occur only as an exact input+lock pair and are hash locked;
-- private/runtime/session/backup/.env/database/key material is absent from the code artifact;
-- required control files are owner-owned regular single-link files;
-- output remains hash/count/boolean-only and `promotion_authorized=false`.
+## 4. Fresh live source manifest
 
-This static preflight does **not** prove transitive dependency completeness. The real non-production `prepare_versioned_release()` must still create a clean Python 3.11 environment and make `pip --require-hashes` succeed; that execution proves the lock is actually installable and transitively complete.
-
-## 4. First-hand live source manifest — no source text export
-
-From the actual live application root/tooling context:
+From the actual HOSTiQ application root/tooling context:
 
 ```sh
-cd /home/rukadopo/telegram_bridge
 python tools/collect_server_manifest.py
 ```
 
-Expected stdout: `SERVER_MANIFEST_PRIVATE_REPORT_WRITTEN` or a bounded blocked code. The collector writes only path/hash/size/reviewed-category facts, skips known private/runtime directories and rejects unknown or unsafe topology. Shell `python3` used here is never Passenger proof.
+The output artifact is hash/path/size/category only. It excludes private/runtime state and must later reconcile to the exact approved candidate. Shell Python is never Passenger proof.
 
-`requirements.txt`, `requirements.lock`, `requirements-test.txt`, and `requirements-test.lock` are reviewed `dependency_input` classes when present. The exact live manifest must later reconcile to the exact approved candidate manifest; no reference snapshot can substitute.
+## 5. Passenger evidence protocol v3 — challenge ownership
 
-## 5. Exact-candidate Passenger arming
+The old empty marker and old schema-v1/v2 strong-runtime semantics are obsolete for the current strong gate.
 
-The old empty marker is obsolete and intentionally rejected. Arming must derive from the successful owner-private candidate preflight so a different candidate or WSGI cannot reuse the evidence cycle. The tool also resolves imports from its own repository location and is safe to launch from a different working directory:
+A raw 256-bit serving challenge is generated by the one-shot probe process and kept only in that process memory and the single HTTPS request header. **The raw challenge is not stored in the marker, evidence files, support return, Git, Drive, logs or stdout.**
+
+Only its SHA-256 digest is supplied to arming:
 
 ```sh
 python tools/arm_passenger_evidence.py \
-  --preflight "$HOME/.telegram_bridge_private_evidence/candidate_runtime_preflight.json"
+  --preflight "$HOME/.telegram_bridge_private_evidence/candidate_runtime_preflight.json" \
+  --challenge-sha256 CHALLENGE_DIGEST_FROM_ONE_SHOT_ORCHESTRATOR
 ```
 
-Expected stdout is only `PASSENGER_EVIDENCE_ARMED_FOR_EXACT_CANDIDATE` or `PASSENGER_EVIDENCE_ARM_BLOCKED`.
+Normal operations should use the one-shot orchestrator in section 7 rather than manually splitting generation/arming/probe.
 
-The tool creates, with no-clobber POSIX semantics, one owner-private marker:
+The v2 arm marker binds:
 
-`$HOME/.telegram_bridge_private_control/collect_passenger_runtime_evidence.once`
+- exact candidate SHA;
+- exact expected `passenger_wsgi.py` SHA-256;
+- serving-request challenge SHA-256.
 
-The marker contains only schema version, exact candidate SHA and expected WSGI SHA-256. It is created descriptor-relative with `O_NOFOLLOW|O_EXCL`, owner/mode/inode checks and `fsync`; an existing/concurrent marker is never overwritten.
+It is owner-private, descriptor-relative, `O_NOFOLLOW|O_EXCL`, no-clobber and fsynced. Existing marker or terminal consumed receipt blocks re-arming.
 
-## 6. Passenger application-process proof — exact canonical WSGI contract
+## 6. Two-phase Passenger proof
 
-The current final-candidate interface is the exact audited direct-hook WSGI shape below. It is intentionally narrow: no arbitrary environment reads, extra imports, conditions, definitions or top-level calls are permitted.
+### 6.1 Startup observation is not strong proof
+
+The canonical startup hook remains narrow and fail-isolated:
 
 ```python
 from pathlib import Path
@@ -100,81 +98,104 @@ collect_if_armed(app_root=_here.parent, wsgi_file=_here)
 __all__ = ["application"]
 ```
 
-An optional module docstring is allowed; after it, the six statements above must match structurally. `ops.candidate_runtime_preflight` independently validates this AST shape before arming, so an unrelated side-effectful wrapper cannot obtain `startup_import_contract_ok=true` merely by importing the right application symbol.
+The exact AST is independently checked by `candidate_runtime_preflight`.
 
-This direct collector is safe only with the **Round 2 exact-binding implementation**. Public Git cannot arm it. Without the owner-private one-shot marker it is inert. When armed, the marker already binds the exact Auditor-approved candidate SHA and expected `passenger_wsgi.py` SHA-256. The collector itself does not contact Telegram or other network services, never authorizes deployment, suppresses exception detail from application output and is fail-isolated from application availability.
+Critically, startup `collect_if_armed()` **cannot emit strong Passenger proof**. `collect_runtime_evidence()` also cannot self-promote to strong state: `application_process=True` plus a fake Passenger-named environment variable remains only `PYTHON_3_11_CANDIDATE_CONTEXT`.
 
-On the real Passenger process, strong evidence requires all of:
+### 6.2 Strong proof requires challenged serving request
 
-- actual Python major/minor 3.11;
-- actual Passenger-context signal;
-- successful `bridge.app.application` import;
-- actual `passenger_wsgi.py` SHA-256 exactly equal to the armed candidate WSGI SHA-256.
+Strong evidence requires the actual WSGI serving path to call:
 
-Only then are both reports written owner-private:
+`collect_if_armed_from_bridge_app(..., environ=environ)`
 
-- `$HOME/.telegram_bridge_private_evidence/passenger_runtime_evidence.json`;
-- `$HOME/.telegram_bridge_private_evidence/passenger_runtime_binding.json`.
+for the real request. The adapter accepts strong promotion only when all of these hold:
 
-The binding report records only exact candidate SHA, expected/actual WSGI hashes, runtime payload hash, tamper hash and `private_values_copied=false`. The marker is consumed only after both private reports are written. Context mismatch or hash mismatch leaves the marker for diagnosis/retry and never degrades application availability.
+- exact application/WSGI topology;
+- application-process candidate evidence;
+- Python 3.11;
+- application import succeeds;
+- advisory Passenger process signal exists;
+- WSGI request method is `GET`;
+- path is exactly `/health`;
+- scheme is HTTPS;
+- WSGI version/protocol/input shape is valid;
+- raw challenge header is exactly 64 lowercase/uppercase hex characters;
+- SHA-256(raw challenge) equals the privately armed digest;
+- actual WSGI SHA-256 equals the armed expected WSGI SHA-256.
 
-`collect_if_armed_from_bridge_app()` remains available as an alternate adapter for a future audited call-free WSGI design, but it is **not** the current final-candidate contract and must not be mixed with the direct-hook shape. Any future switch to that adapter requires DEV_A/DEV_B to change the canonical WSGI contract deliberately and rerun package, preflight, provenance, CI and Auditor gates on the new exact SHA.
+The raw challenge is compared in memory and discarded as a reference after use; no memory-zeroization claim is made.
 
-## 7. Real non-production PREPARE proof
+## 7. One-shot HTTPS probe
 
-Before any production switch, DEV_A/DEV_B/Auditor must have exact evidence that the final packaged SHA has passed the actual existing `prepare_versioned_release()` pipeline under approved Python 3.11:
+The preferred bounded orchestration is:
 
-1. exact approved ref resolves to exact candidate SHA;
-2. Git export/stage is built from that SHA;
-3. clean versioned Python 3.11 environment is created;
-4. runtime and any test locks install with `pip --require-hashes`;
-5. compile/import succeeds;
-6. full tests succeed;
-7. prepared payload manifest is produced;
-8. immutable code tree is sealed/read-only except audited persistent bindings;
-9. production/private paths are not mutated.
+```sh
+python tools/run_passenger_evidence_probe.py \
+  --preflight "$HOME/.telegram_bridge_private_evidence/candidate_runtime_preflight.json" \
+  --control-root "$HOME/.telegram_bridge_private_control" \
+  --evidence-root "$HOME/.telegram_bridge_private_evidence"
+```
 
-A green source CI alone is insufficient. Absence of both `requirements.txt` and `requirements.lock` is no longer acceptable release evidence even though the legacy PREPARE helper would otherwise have no dependency input to install.
+This mechanism is **not authorized to run in production until the Auditor explicitly opens the live-evidence gate**.
 
-## 8. Restart/rollback private hooks
+When authorized, the tool:
 
-Lifecycle tooling accepts only fixed logical names `restart` and `rollback`, mapped by HOSTiQ to the actual managed Python App mechanism under the owner-private control root. Hooks must be owner-private, single-link, non-symlink and executable. DEV_B opens/executes them descriptor-safely, suppresses stdout/stderr, applies a bounded timeout and returns only status codes.
+1. generates a random 256-bit raw challenge in memory;
+2. stores only SHA-256(raw challenge) in the exact-candidate arm marker;
+3. sends the raw value only in `X-Telegram-Bridge-Evidence-Challenge` to exactly `https://tg-api.rukadopomogy.org.ua/health`;
+4. accepts only bounded Telegram Bridge health identity;
+5. requires the same synchronous request to produce valid private runtime binding + consumed receipt;
+6. cross-checks challenge digest, candidate SHA, WSGI, runtime payload, binding payload and serving-probe hashes;
+7. returns only a bounded success/blocked status.
 
-Rollback restores the transaction-bound last-known-good release, triggers the managed restart and preserves private Telegram session/config/state. Never put credentials in hook arguments, filenames or output.
+An HTTP 200 alone is never Passenger proof. If the HTTPS request succeeds but terminal artifacts do not exist or do not match, the one-shot operation is blocked.
 
-## 9. Auditor-authorized live lifecycle
+## 8. Private write / TOCTOU invariant
 
-Only after exact package PREPARE + exact Auditor approval:
+Runtime evidence, binding and consumed receipt use descriptor-relative owner-private no-clobber writes. The write path uses `O_NOFOLLOW|O_EXCL`, file and directory fsync, final inode validation and root identity revalidation. Existing final files are never silently overwritten.
 
-1. verify/create fresh transaction-bound backup;
-2. stage exact approved SHA/artifact;
-3. install the exact hash-locked dependencies in the approved Python 3.11 environment;
-4. validate staged startup/import;
-5. switch immutable code while preserving private bindings;
-6. invoke fixed private `restart` hook; the exact audited WSGI startup then attempts the privately armed, SHA/WSGI-bound Passenger evidence collection;
-7. verify that both owner-private Passenger runtime and binding reports exist and validate; no CLI/shell Python result may substitute;
-8. verify exact running candidate identity;
-9. validate meaningful `GET /health`, not HTTP 200 alone;
-10. verify an unauthenticated protected route rejects without leak;
-11. run only the harmless authenticated read probe `/api/v1/dialogs/list` with a server-private bearer reference;
-12. if Telegram remains intentionally unconfigured, bootstrap mode may accept only the exact structured `telegram_backend_unconfigured` response without contacting Telegram;
-13. verify serving/resume and private-state survival;
-14. verify rollback/rollback-health. Mandatory failure rolls back; unhealthy rollback is `CRITICAL_ROLLBACK_FAILED`.
+The accepted marker is read with an identity snapshot and revalidated before each evidence state transition. The marker is intentionally **not** pathname-unlinked after acceptance. Completion is represented by an immutable consumed receipt bound to:
 
-No send/reply/forward/send-files/K5 operation belongs to deployment smoke.
+- candidate SHA;
+- expected WSGI hash;
+- marker payload hash;
+- marker inode/dev identity hash;
+- runtime payload hash;
+- binding payload hash;
+- serving-probe hash.
 
-## 10. Support-return v2 exact binding
+The receipt makes the cycle terminal and prevents replay/re-arm. Adversarial tests cover root symlink, final symlink/hardlink, predicted temp alias, directory replacement, marker replacement and replay.
 
-Use support-return schema v2 for the release-to-live gate. Legacy v1 remains parseable for historical compatibility but **cannot** satisfy `exact_candidate_runtime_binding` or the strong Passenger prerequisite.
+## 9. Runtime binding v3
 
-V2 adds bounded `candidate_package` and `runtime_binding` summaries. Validation requires:
+Strong private binding contains only bounded non-secret identities:
 
-- runtime-binding candidate SHA == top-level candidate SHA;
-- candidate-package WSGI SHA == runtime WSGI SHA == binding expected WSGI SHA == binding actual WSGI SHA;
-- binding runtime-payload SHA == runtime report payload SHA;
-- candidate package preflight is positive;
-- binding is positive;
-- all privacy flags are false.
+- candidate SHA;
+- expected/actual WSGI hashes;
+- challenge digest;
+- runtime payload hash;
+- serving-probe hash;
+- `serving_request_verified=true`;
+- `private_values_copied=false`;
+- tamper hash.
+
+`serving_probe_sha256` deterministically binds candidate SHA + expected WSGI + challenge digest + runtime payload. A mismatch is a hard failure.
+
+## 10. Support-return v3
+
+Support-return v1/v2 remain parseable as historical evidence. They cannot satisfy the current strong Passenger prerequisite.
+
+Current v3 requires:
+
+- live-eligible source/runtime/lifecycle evidence classes;
+- exact source reconciliation with zero unreviewed differences and startup accounted;
+- candidate package preflight positive;
+- exact candidate/runtime WSGI equality;
+- exact runtime payload equality;
+- `serving_request_verified=true` in runtime and binding;
+- challenge digest and deterministic serving-probe hash validation;
+- bounded lifecycle status;
+- privacy flags false.
 
 Validate the private support-return and public-safe projection with:
 
@@ -184,16 +205,44 @@ python -m tools.validate_hostiq_support_return \
   --output PUBLIC_READINESS.json
 ```
 
-Expected stdout: `HOSTIQ_SUPPORT_RETURN_READY_FOR_AUDITOR` or `HOSTIQ_SUPPORT_RETURN_BLOCKED`.
+Even a structurally complete v3 package forces:
 
-Even a complete v2 package forces `independent_auditor_gate=BLOCKED_EXTERNAL`, `production_switch=BLOCKED_EXTERNAL`, and `promotion_authorized=false`. Developer tooling cannot self-authorize production.
+- `independent_auditor_gate=BLOCKED_EXTERNAL`;
+- `production_switch=BLOCKED_EXTERNAL`;
+- `promotion_authorized=false`.
 
-## 11. Support contact rule
+Developer tooling cannot self-authorize production.
 
-Do not send a duplicate support request while no newer HOSTiQ reply/action is needed. The prior accepted recovery baseline remains authoritative until replaced by newer first-hand evidence: 42 live files / 9 directories, 39 old-manifest matches, known changed startup, empty `install_server.sh` extra, HOSTiQ-private backup, remediated setup gate and zero temporary recovery jobs.
+## 11. Restart/identity/health/smoke/rollback
 
-When the Auditor authorizes the next one-time action, support should be asked for exactly the approved SHA-bound steps above. No recurring cPanel operation by the user is part of the target design.
+Only after exact candidate PREPARE and an explicit Auditor deployment/evidence gate:
+
+1. transaction-bound backup;
+2. exact staged SHA/artifact;
+3. exact hash-locked dependencies in approved Python 3.11 environment;
+4. startup/import verification;
+5. immutable-code switch preserving private bindings;
+6. fixed private restart hook;
+7. challenged Passenger evidence cycle;
+8. exact running SHA verification;
+9. exact seven-component health;
+10. unauthenticated protected-route rejection without leak;
+11. harmless authenticated `POST /api/v1/dialogs/list` read probe only;
+12. serving/resume and private-state survival;
+13. rollback + rollback-health evidence; mandatory failure rolls back and unhealthy rollback is critical.
+
+No send/reply/forward/send-files/K5 operation belongs to deployment smoke.
+
+## 12. Current external boundary
+
+Accepted existing server truth remains: 42 live files / 9 directories, 39 old-manifest matches, known changed startup, empty `install_server.sh` extra, HOSTiQ-private backup, remediated setup gate and zero temporary recovery jobs. Do not regress to `baseline unknown`.
+
+Fresh live manifest, real challenged Passenger evidence, exact running candidate, live lifecycle and rollback are still external facts until actually produced under the Auditor gate.
+
+Do not send duplicate HOSTiQ support requests while no newer support action is needed.
 
 ## Safety boundary
 
-This document does not authorize merge, deploy, Passenger restart, Telegram authorization, live Telegram read/write, or K5. `USER_TELEGRAM_AUTH_NOT_YET_REQUIRED` remains in force until the Auditor changes it.
+**NO MERGE / NO DEPLOY / NO PASSENGER RESTART / NO LIVE TELEGRAM READ/WRITE / NO K5 from this document.**
+
+`USER_TELEGRAM_AUTH_NOT_YET_REQUIRED` remains in force until the Independent Auditor changes it because Telegram authorization becomes the first genuine human blocker.
