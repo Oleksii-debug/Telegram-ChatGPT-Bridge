@@ -1,21 +1,25 @@
 """Descriptor-bound access to registered private files.
 
 The file registry intentionally exposes opaque references, not filesystem paths.
-This module closes the remaining path time-of-check/time-of-use gap for callers
-that must stream a registered file after its registry metadata has been checked.
+This module closes path time-of-check/time-of-use gaps for callers that must
+stream or upload registered files after their registry metadata has been checked.
 """
 
 from __future__ import annotations
 
 import hashlib
 import os
+import re
 import secrets
 import stat
 from dataclasses import dataclass
 from pathlib import Path
-from typing import BinaryIO
+from typing import Any, BinaryIO, Iterator, Sequence
 
+from .filenames import safe_filename
 from .storage import FileRecord, FileRecordStore
+
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
 @dataclass
@@ -28,6 +32,113 @@ class VerifiedPrivateFile:
     def close(self) -> None:
         if not self.handle.closed:
             self.handle.close()
+
+
+@dataclass(frozen=True)
+class UploadFileIdentity:
+    """Expected public identity for one file selected for an external upload."""
+
+    file_ref: str
+    sha256: str
+    size: int
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.file_ref, str) or not self.file_ref:
+            raise ValueError("file_ref is required")
+        if not isinstance(self.sha256, str) or not _SHA256_RE.fullmatch(self.sha256):
+            raise ValueError("sha256 must be lowercase hex")
+        if isinstance(self.size, bool) or not isinstance(self.size, int) or self.size < 0:
+            raise ValueError("size must be a non-negative integer")
+
+
+class VerifiedUploadFile:
+    """Read-only file-like upload source bound to a verified private inode.
+
+    ``name`` is intentionally a safe display filename rather than a filesystem
+    path. The underlying handle remains open and inode-bound until ``close``.
+    Callers must pass this object itself to an upload library; converting it back
+    to ``record.path`` would reopen the TOCTOU gap this class is designed to close.
+    """
+
+    def __init__(self, verified: VerifiedPrivateFile) -> None:
+        self._verified = verified
+        self.name = safe_filename(verified.record.name)
+
+    @property
+    def record(self) -> FileRecord:
+        return self._verified.record
+
+    @property
+    def closed(self) -> bool:
+        return self._verified.handle.closed
+
+    def read(self, size: int = -1) -> bytes:
+        return self._verified.handle.read(size)
+
+    def seek(self, offset: int, whence: int = os.SEEK_SET) -> int:
+        return self._verified.handle.seek(offset, whence)
+
+    def tell(self) -> int:
+        return self._verified.handle.tell()
+
+    def fileno(self) -> int:
+        return self._verified.handle.fileno()
+
+    def readable(self) -> bool:
+        return self._verified.handle.readable()
+
+    def seekable(self) -> bool:
+        return self._verified.handle.seekable()
+
+    def close(self) -> None:
+        self._verified.close()
+
+    def __enter__(self) -> "VerifiedUploadFile":
+        return self
+
+    def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
+        self.close()
+
+
+class VerifiedUploadBatch:
+    """Own a complete set of pinned upload handles as one lifetime boundary."""
+
+    def __init__(self, files: Sequence[VerifiedUploadFile]) -> None:
+        self._files = tuple(files)
+        self._closed = False
+
+    @property
+    def files(self) -> tuple[VerifiedUploadFile, ...]:
+        return self._files
+
+    @property
+    def closed(self) -> bool:
+        return self._closed
+
+    def __len__(self) -> int:
+        return len(self._files)
+
+    def __iter__(self) -> Iterator[VerifiedUploadFile]:
+        return iter(self._files)
+
+    def __getitem__(self, index: int) -> VerifiedUploadFile:
+        return self._files[index]
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        for upload in self._files:
+            try:
+                upload.close()
+            except Exception:
+                pass
+
+    def __enter__(self) -> "VerifiedUploadBatch":
+        return self
+
+    def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
+        self.close()
 
 
 def _directory_flags() -> int:
@@ -159,3 +270,57 @@ def open_verified_file(store: FileRecordStore, file_ref: str) -> VerifiedPrivate
                 os.close(fd)
             except OSError:
                 pass
+
+
+def open_verified_upload_batch(
+    store: FileRecordStore,
+    identities: Sequence[UploadFileIdentity],
+    *,
+    max_files: int = 10,
+) -> VerifiedUploadBatch | None:
+    """Pin an entire SEND_FILES-style selection before any external effect.
+
+    The helper is media/storage-owned and performs no Telegram I/O. It accepts
+    only immutable expected identities, requires unique opaque references, and
+    keeps every verified descriptor open until the returned batch is closed.
+    If any member cannot be opened or does not exactly match the requested
+    size/hash identity, every descriptor opened so far is closed and ``None``
+    is returned. This makes failure safe to classify as pre-effect by a write
+    owner while preventing later pathname reopens from changing uploaded bytes.
+    """
+
+    if isinstance(identities, (str, bytes)) or not isinstance(identities, Sequence):
+        raise ValueError("identities must be a sequence")
+    if isinstance(max_files, bool) or not isinstance(max_files, int) or max_files <= 0:
+        raise ValueError("max_files must be positive")
+    if not identities or len(identities) > max_files:
+        raise ValueError("invalid upload file count")
+
+    refs = [item.file_ref for item in identities]
+    if len(set(refs)) != len(refs):
+        raise ValueError("duplicate upload file_ref")
+
+    opened: list[VerifiedUploadFile] = []
+    try:
+        for identity in identities:
+            verified = open_verified_file(store, identity.file_ref)
+            if verified is None:
+                return None
+            upload = VerifiedUploadFile(verified)
+            if (
+                verified.record.file_ref != identity.file_ref
+                or verified.record.size != identity.size
+                or not secrets.compare_digest(verified.record.sha256, identity.sha256)
+            ):
+                upload.close()
+                return None
+            opened.append(upload)
+        return VerifiedUploadBatch(opened)
+    finally:
+        # Ownership transfers only after the complete batch has been assembled.
+        if len(opened) != len(identities):
+            for upload in opened:
+                try:
+                    upload.close()
+                except Exception:
+                    pass
