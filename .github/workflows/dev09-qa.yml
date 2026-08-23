@@ -1,0 +1,62 @@
+name: DEV09 Independent QA
+
+on:
+  pull_request:
+    branches: [work3/integration-release-candidate]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  dev09-qa:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout exact DEV09 head with full history
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Set up Python 3.11
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.11'
+      - name: Validate exact canonical parent and QA-only path boundary
+        env:
+          EXPECTED_PARENT: f966cc5bffc19d597bf298799e39a9bbbe692b19
+        run: |
+          set -eu
+          test "$(git merge-base "$EXPECTED_PARENT" HEAD)" = "$EXPECTED_PARENT"
+          FIRST_DEV09_COMMIT="$(git rev-list --reverse "$EXPECTED_PARENT"..HEAD | head -n 1)"
+          test -n "$FIRST_DEV09_COMMIT"
+          test "$(git rev-parse "$FIRST_DEV09_COMMIT^")" = "$EXPECTED_PARENT"
+          git diff --name-only "$EXPECTED_PARENT"...HEAD | sort > /tmp/dev09-paths.txt
+          printf '%s\n' '.github/workflows/dev09-qa.yml' 'tests/test_dev09_swarm_qa.py' | sort > /tmp/dev09-expected.txt
+          diff -u /tmp/dev09-expected.txt /tmp/dev09-paths.txt
+          echo DEV09_EXACT_PARENT_QA_ONLY_PASS
+      - name: Compile DEV09 QA and canonical integration surface
+        run: >-
+          python -m py_compile
+          tests/test_dev09_swarm_qa.py
+          bridge/app.py
+          bridge/integrated_app.py
+          ops/candidate_contracts.py
+          ops/write_safety.py
+          ops/write_endpoint_policy.py
+      - name: Run DEV09 independent adversarial and acceptance QA
+        run: python -m unittest discover -s tests -p 'test_dev09_swarm_qa.py' -v
+      - name: Validate current Action schema independently
+        run: python tools/build_action_openapi.py --validate-only
+      - name: Current-tree secret scan
+        if: always()
+        run: python tools/secret_scan.py --mode current
+      - name: Full-history secret scan
+        if: always()
+        run: python tools/secret_scan.py --mode history
+      - name: Preserve no-deploy boundary
+        if: always()
+        run: |
+          test ! -e .cpanel.yml
+          test ! -e ops/ENABLE_HOSTIQ_AUTO_DEPLOY
+          grep -q 'DO NOT MERGE / DO NOT DEPLOY' RECOVERY_BASELINE.md
