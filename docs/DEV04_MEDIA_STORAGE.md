@@ -11,9 +11,10 @@ DEV04 owns media/download/storage/archive mechanics. This slice deliberately doe
 - Telegram/user supplied filenames are normalized to Unicode NFC before use as display/archive metadata.
 - Traversal components, ASCII control/Windows-invalid characters and bidi override/isolate controls are neutralized.
 - Windows device names such as CON/PRN/AUX/NUL/COM1..9/LPT1..9 are not emitted as raw archive/display names.
-- Private on-disk filenames remain opaque random names; public file metadata never contains server paths.
+- Public `file_ref` values remain opaque and never expose server paths; private recovery-origin markers are derived from the random job identity plus item identity and are never returned in public metadata.
 - Integrity/size/topology/limit failures are non-retryable for an immutable download checkpoint item, preventing repeated redownload loops. Availability/FloodWait/RPC-style failures remain retryable.
-- A failed registry write after moving a completed download or ZIP removes the unregistered private file instead of leaking an orphan.
+- Normal registry failures clean unregistered completed downloads/ZIPs instead of leaking ordinary exception-path orphans.
+- Hard process loss after a download has been moved into private storage, or after registry commit but before checkpoint result save, can be recovered on resume without a second Telegram download. Legacy file registries are migrated in place with a private unique origin marker.
 - ZIP source data is opened with `O_NOFOLLOW` where supported and validated by descriptor topology/size.
 - ZIP generation streams from that descriptor and recomputes SHA-256/size while writing. A source swap or same-size content mutation after registry lookup fails closed.
 - ZIP member collisions are resolved under Unicode NFC + casefold and the finished archive is still checked for member count, traversal, collision and CRC integrity.
@@ -32,7 +33,7 @@ These are bounded-operation limits, not a global retention quota. A global multi
 - DEV03/read supplies `(chat, message_id, Telegram file_ref)` and media metadata. DEV04 continues to verify that the opaque ref matches the exact message before Telegram download through the existing backend contract.
 - DEV05/send-files consumes only registered private `file_ref` values. DEV04 does not expose server paths and does not weaken `FileRecordStore.get()` integrity/topology revalidation.
 - DEV07 should adversarially re-audit filename/path/archive topology boundaries and public/private metadata separation.
-- DEV08 should stress same-job locking, cross-job storage concurrency and future atomic retention/quota policy.
+- DEV08 should stress same-job locking, cross-job storage concurrency, crash interleavings and future atomic retention/quota policy.
 - DEV09 should include the DEV04 regressions in exact-head E1-E6/G4-G5 QA. Synthetic tests are not product PASS.
 
 ## Remaining evidence boundary
