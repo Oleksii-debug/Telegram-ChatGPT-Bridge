@@ -64,7 +64,10 @@ class VerifiedUploadFile(io.BufferedIOBase):
     pathname replacement *and* in-place mutation of the registered source.
 
     Only safe upload metadata is copied onto the wrapper. There is no filesystem
-    path property; ``name`` is a sanitized display filename.
+    path property; ``name`` is a sanitized display filename. The underlying
+    writable temporary-file descriptor is deliberately not exposed through the
+    public IO surface, otherwise ``os.write(upload.fileno(), ...)`` could mutate
+    an already verified snapshot after the pre-effect integrity boundary.
     """
 
     def __init__(
@@ -161,7 +164,7 @@ class VerifiedUploadFile(io.BufferedIOBase):
 
     def fileno(self) -> int:
         self._checkClosed()
-        return self._handle.fileno()
+        raise io.UnsupportedOperation("verified upload snapshot descriptor is private")
 
     def readable(self) -> bool:
         return not self.closed and self._handle.readable()
