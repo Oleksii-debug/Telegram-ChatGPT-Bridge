@@ -4,7 +4,15 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from pathlib import Path
+
+# The documented support command may be launched from any working directory.
+# Bootstrap imports from this script's immutable repository location rather than
+# relying on cwd/PYTHONPATH, which is not a valid production-readiness proof.
+_REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
+if str(_REPOSITORY_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPOSITORY_ROOT))
 
 from ops.candidate_runtime_preflight import validate_candidate_release_envelope
 from ops.release_guard import SafetyError, write_json_atomic
