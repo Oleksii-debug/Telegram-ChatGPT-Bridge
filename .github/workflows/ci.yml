@@ -99,6 +99,13 @@ jobs:
           assert len(inventory) == 19
           print('DEV_A_CANDIDATE_CONTRACTS_PASS')
           PY
+      - name: BURST01-15 focused scale/resource regressions (non-authorizing)
+        run: |
+          python -m py_compile bridge/audit.py bridge/downloads.py tests/test_burst01_15_scale_bounds.py
+          python -m unittest discover -s tests -p 'test_burst01_15_scale_bounds.py' -v
+          python -m unittest discover -s tests -p 'test_storage_downloads.py' -v
+          python -m unittest discover -s tests -p 'test_dev04_media_storage.py' -v
+          python -m unittest discover -s tests -p 'test_dev07_audit_security.py' -v
       - name: Verify deterministic integration provenance and overlap decisions
         run: python tools/verify_integration_provenance.py
       - name: Verify single deploy-capable entrypoint
