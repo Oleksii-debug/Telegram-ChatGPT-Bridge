@@ -68,8 +68,6 @@ def _logical_lines(text: str) -> list[str]:
         stripped = raw.strip()
         if not stripped or stripped.startswith("#"):
             continue
-        # Requirement URLs/fragments are intentionally unsupported in this
-        # canonical lock format, so a '#' starts a comment here.
         if "#" in stripped:
             stripped = stripped.split("#", 1)[0].rstrip()
         continued = stripped.endswith("\\")
@@ -146,19 +144,111 @@ def _verify_direct_lock(direct: dict[str, str], locked: dict[str, tuple[str, tup
             raise SafetyError("direct dependency is absent or version-mismatched in lock")
 
 
+def _exact_import(node: ast.AST, module: str, name: str) -> bool:
+    return (
+        isinstance(node, ast.ImportFrom)
+        and node.level == 0
+        and node.module == module
+        and [(alias.name, alias.asname) for alias in node.names] == [(name, None)]
+    )
+
+
+def _valid_wsgi_here_assignment(node: ast.AST) -> bool:
+    if not isinstance(node, ast.Assign) or len(node.targets) != 1:
+        return False
+    target = node.targets[0]
+    value = node.value
+    if not isinstance(target, ast.Name) or target.id != "_here":
+        return False
+    return (
+        isinstance(value, ast.Call)
+        and not value.args
+        and not value.keywords
+        and isinstance(value.func, ast.Attribute)
+        and value.func.attr == "resolve"
+        and isinstance(value.func.value, ast.Call)
+        and isinstance(value.func.value.func, ast.Name)
+        and value.func.value.func.id == "Path"
+        and len(value.func.value.args) == 1
+        and isinstance(value.func.value.args[0], ast.Name)
+        and value.func.value.args[0].id == "__file__"
+        and not value.func.value.keywords
+    )
+
+
+def _valid_wsgi_evidence_call(node: ast.AST) -> bool:
+    if not isinstance(node, ast.Expr) or not isinstance(node.value, ast.Call):
+        return False
+    call = node.value
+    if not isinstance(call.func, ast.Name) or call.func.id != "collect_if_armed" or call.args:
+        return False
+    if [kw.arg for kw in call.keywords] != ["app_root", "wsgi_file"]:
+        return False
+    app_root = call.keywords[0].value
+    wsgi_file = call.keywords[1].value
+    return (
+        isinstance(app_root, ast.Attribute)
+        and app_root.attr == "parent"
+        and isinstance(app_root.value, ast.Name)
+        and app_root.value.id == "_here"
+        and isinstance(wsgi_file, ast.Name)
+        and wsgi_file.id == "_here"
+    )
+
+
+def _valid_wsgi_all_assignment(node: ast.AST) -> bool:
+    if not isinstance(node, ast.Assign) or len(node.targets) != 1:
+        return False
+    target = node.targets[0]
+    value = node.value
+    return (
+        isinstance(target, ast.Name)
+        and target.id == "__all__"
+        and isinstance(value, (ast.List, ast.Tuple))
+        and len(value.elts) == 1
+        and isinstance(value.elts[0], ast.Constant)
+        and value.elts[0].value == "application"
+    )
+
+
 def _validate_wsgi(text: str) -> None:
+    """Require the exact audited Passenger startup contract, nothing broader."""
     try:
         tree = ast.parse(text, filename="passenger_wsgi.py")
     except SyntaxError as exc:
         raise SafetyError("passenger_wsgi.py syntax invalid") from exc
-    found = False
-    for node in ast.walk(tree):
-        if isinstance(node, ast.ImportFrom) and node.module == "bridge.app" and node.level == 0:
-            for alias in node.names:
-                if alias.name == "application" and alias.asname in (None, "application"):
-                    found = True
-    if not found:
-        raise SafetyError("passenger_wsgi.py does not expose bridge.app.application")
+
+    body = list(tree.body)
+    if (
+        body
+        and isinstance(body[0], ast.Expr)
+        and isinstance(body[0].value, ast.Constant)
+        and isinstance(body[0].value.value, str)
+    ):
+        body = body[1:]
+
+    # Canonical audited sequence:
+    # 1) Path import
+    # 2) recovered bridge.app application import
+    # 3) exact privately-armed evidence-hook import
+    # 4) canonical __file__ resolution
+    # 5) exact fail-isolated collector call
+    # 6) __all__ = ["application"]
+    # No extra imports, calls, environment reads, conditions or definitions.
+    if len(body) != 6:
+        raise SafetyError("passenger_wsgi.py statement count mismatch")
+    if not _exact_import(body[0], "pathlib", "Path"):
+        raise SafetyError("passenger_wsgi.py Path import mismatch")
+    if not _exact_import(body[1], "bridge.app", "application"):
+        raise SafetyError("passenger_wsgi.py recovered application import mismatch")
+    if not _exact_import(body[2], "ops.passenger_evidence_hook", "collect_if_armed"):
+        raise SafetyError("passenger_wsgi.py evidence hook import mismatch")
+    if not _valid_wsgi_here_assignment(body[3]):
+        raise SafetyError("passenger_wsgi.py path binding mismatch")
+    if not _valid_wsgi_evidence_call(body[4]):
+        raise SafetyError("passenger_wsgi.py evidence call mismatch")
+    if not _valid_wsgi_all_assignment(body[5]):
+        raise SafetyError("passenger_wsgi.py __all__ contract mismatch")
 
 
 def _reject_private_payload(root: Path) -> None:
@@ -172,8 +262,6 @@ def _reject_private_payload(root: Path) -> None:
             if path.is_symlink() or not stat.S_ISDIR(st.st_mode):
                 raise SafetyError("candidate directory topology unsafe")
             if dirname == ".git":
-                # A working checkout may be validated; git metadata is not part
-                # of git-archive/PREPARE payload and is never traversed here.
                 continue
             if dirname.casefold() in _PRIVATE_DIRS:
                 raise SafetyError("candidate contains forbidden private/runtime directory")

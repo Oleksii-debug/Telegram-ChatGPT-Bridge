@@ -76,6 +76,12 @@ The public validator is:
 
 The command prints only `HOSTIQ_SUPPORT_RETURN_READY_FOR_AUDITOR` or `HOSTIQ_SUPPORT_RETURN_BLOCKED`; it never prints private input or exception details.
 
+## Passenger challenge transport safety
+
+The one-time Passenger serving challenge is bound to the exact production HTTPS `/health` request. `ops.passenger_probe` must never follow HTTP redirects because standard redirect behavior can construct a second request and propagate caller headers to a different URL or origin. A 301/302/303/307/308 response is therefore a bounded `PROBE_REDIRECT_REJECTED` failure. Both cross-origin and same-origin redirects are rejected; the probe validates exactly one origin/path and never treats a redirect chain as Passenger proof.
+
+The challenge remains in caller memory and the initial request header only. Public results contain only bounded status, HTTP status and reason code. Redirect `Location`, response bodies, exception text and the challenge itself are never returned as evidence. This is a source-level safety contract only; it does not claim that a real Passenger request has been executed.
+
 ## Current boundary
 
 No authorized HOSTiQ/SSH/cPanel execution connector is available in this Developer environment. Therefore exact live manifest reconciliation, actual Passenger Python 3.11 application-context identity, deployed/running audited SHA, restart/health/unauth/auth/resume and rollback remain external facts until the one-time server-side action is legitimately executed. No duplicate support request is needed while no newer HOSTiQ reply exists.

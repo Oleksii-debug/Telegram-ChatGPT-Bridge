@@ -54,10 +54,7 @@ class HookResult:
 def run_private_hook(root: Path, hook: Path, *, expected_name: str, timeout: float = 20.0) -> HookResult:
     if expected_name not in SAFE_PRIVATE_HOOK_NAMES:
         raise SafetyError("unsupported private hook name")
-    try:
-        rc = run_private_executable(root, hook, timeout=timeout)
-    except SafetyError:
-        raise
+    rc = run_private_executable(root, hook, timeout=timeout)
     if rc == -1:
         return HookResult(expected_name, "FAIL", None, "HOOK_TIMEOUT")
     if rc != 0:
@@ -139,7 +136,7 @@ def _candidate_health_payload(data: object) -> tuple[bool, bool]:
 
 
 def health_check(url: str, *, timeout: float = DEFAULT_TIMEOUT, allow_bootstrap_not_ready: bool = False) -> HookResult:
-    """Validate the integrated candidate's meaningful bounded health contract."""
+    """Validate the exact integrated candidate seven-component health contract."""
     try:
         status, body, ctype = _request(url, timeout=timeout)
         if status != 200:
