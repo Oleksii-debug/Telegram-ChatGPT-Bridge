@@ -106,15 +106,21 @@ class ContentionTests(unittest.TestCase):
             def resume(): barrier.wait(10); return "resume",request(app,"/api/v1/downloads/resume",{"job_id":job})
             def write(): barrier.wait(10); return "write",request(app,"/api/v1/messages/send/commit",commit)
             with ThreadPoolExecutor(max_workers=18) as pool: results=[f.result(20) for f in [pool.submit(fn) for fn in [read]*6+[resume]*6+[write]*6]]
-            flags=[]; busy_resumes=0
+            flags=[]; busy_resumes=0; write_in_progress=0
             for kind,r in results:
                 if kind=="resume" and r["status"].startswith("409"):
                     error=r.get("payload",{}).get("error",{})
                     self.assertEqual("job_busy",error.get("code"),(kind,r)); self.assertIs(error.get("details",{}).get("retryable"),True,(kind,r)); busy_resumes+=1; continue
+                if kind=="write" and r["status"].startswith("409"):
+                    error=r.get("payload",{}).get("error",{})
+                    self.assertEqual("write_in_progress",error.get("code"),(kind,r)); write_in_progress+=1; continue
                 self.assertTrue(r["status"].startswith("200"),(kind,r))
                 if kind=="resume": self.assertEqual("complete",r["payload"]["data"]["status"])
                 elif kind=="write": flags.append(bool(r["payload"]["data"]["idempotent_replay"]))
             self.assertGreaterEqual(busy_resumes,0)
-            self.assertEqual(downloads,backend.download_count); self.assertEqual(1,len(fake.external_writes)); self.assertEqual(1,flags.count(False)); self.assertEqual(5,flags.count(True))
+            self.assertLessEqual(write_in_progress,5)
+            self.assertEqual(downloads,backend.download_count); self.assertEqual(1,len(fake.external_writes)); self.assertEqual(1,flags.count(False)); self.assertEqual(5-write_in_progress,flags.count(True))
+            settled=request(app,"/api/v1/messages/send/commit",commit)
+            self.assertTrue(settled["status"].startswith("200"),settled); self.assertTrue(settled["payload"]["data"]["idempotent_replay"]); self.assertEqual(1,len(fake.external_writes))
 
 if __name__=="__main__": unittest.main()
