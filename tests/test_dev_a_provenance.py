@@ -105,7 +105,7 @@ class DevAProvenanceTests(unittest.TestCase):
         release = json.loads(RELEASE_OVERRIDE.read_text(encoding="utf-8"))
         sync = release["dev_b_round2_sync"]
         terminal = set(release["dev_b_terminal_sync"]["exact_blob_paths"])
-        self.assertEqual(sync["sha"], "6f943ee15f053acc5b4f1516c16d431023a35d1" if False else "6f943ee15f053acc5b4f15167c16d431023a35d1")
+        self.assertEqual(sync["sha"], "6f943ee15f053acc5b4f15167c16d431023a35d1")
         self.assertEqual(sync["merge_commit"], "919d7d409564d7c21e46009e1d76cfa5d1fd602d")
         self.assertFalse(sync["strict_history_suppression_imported"])
         self.assertEqual(len(sync["exact_blob_paths"]), 9)
