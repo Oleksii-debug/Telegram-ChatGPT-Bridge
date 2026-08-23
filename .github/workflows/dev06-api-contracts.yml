@@ -34,13 +34,15 @@ jobs:
           tests/test_dev06_api_contracts.py
           tests/test_dev06_runtime_conformance.py
           tests/test_dev06_deployed_action_evidence.py
-      - name: Verify DEV06 overlay path isolation
+      - name: Verify DEV06 overlay path isolation on actual merge ref
         env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          EVENT_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
-          test -n "$BASE_SHA"
-          test -n "$HEAD_SHA"
+          test -n "$EVENT_HEAD_SHA"
+          test "$(git rev-list --parents -n 1 HEAD | wc -w)" -eq 3
+          BASE_SHA="$(git rev-parse HEAD^1)"
+          HEAD_SHA="$(git rev-parse HEAD^2)"
+          test "$HEAD_SHA" = "$EVENT_HEAD_SHA"
           git cat-file -e "$BASE_SHA^{commit}"
           git cat-file -e "$HEAD_SHA^{commit}"
           cat > /tmp/dev06.expected <<'EOF'
@@ -58,6 +60,7 @@ jobs:
           git diff --name-only "$BASE_SHA...$HEAD_SHA" | sort > /tmp/dev06.actual
           sort -o /tmp/dev06.expected /tmp/dev06.expected
           diff -u /tmp/dev06.expected /tmp/dev06.actual
+          echo "DEV06_STACKED_BASE_SHA=$BASE_SHA"
           echo DEV06_OVERLAY_PATH_ISOLATION_PASS
       - name: Validate DEV06 authoritative Action schema
         run: python tools/build_dev06_action_openapi.py --validate-only
