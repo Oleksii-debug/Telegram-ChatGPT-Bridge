@@ -289,7 +289,11 @@ def verify_repository() -> dict[str, Any]:
         if _blob("HEAD", path) != _blob(str(dev_b_sync["sha"]), path):
             raise ProvenanceError(f"unexpected DEV_B Round-2 exact-path drift: {path}")
 
-    if dev_b_sync_retained != {"ops/server_manifest.py", "tests/test_server_manifest.py"}:
+    if dev_b_sync_retained != {
+        "ops/server_manifest.py",
+        "tests/test_devb_round2_release.py",
+        "tests/test_server_manifest.py",
+    }:
         raise ProvenanceError("DEV_B Round-2 retained adaptation set mismatch")
     for forbidden in ("tools/strict_history_secret_scan.py", "tests/test_strict_history_secret_scan.py"):
         if _path_exists("HEAD", forbidden):
@@ -338,6 +342,7 @@ def verify_repository() -> dict[str, Any]:
         "dev_b_adapted_path_count": len(dev_b_adapted),
         "dev_b_superseded_path_count": len(dev_b_supersedes),
         "dev_b_round2_sync_path_count": len(dev_b_sync_exact),
+        "dev_b_round2_adapted_path_count": len(dev_b_sync_retained),
         "pr2_pr3_overlap_count": overlap_counts["PR2_PR3"],
         "pr2_pr5_overlap_count": overlap_counts["PR2_PR5"],
         "rejected_dev5_overlap_count": len(dev5["rejected_overlaps_preserve_base"]),
