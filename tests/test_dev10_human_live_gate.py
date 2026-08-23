@@ -190,6 +190,15 @@ class HumanReceiptTests(unittest.TestCase):
             "STALE_SETUP_SURFACE",
         )
 
+    def test_currentness_never_labels_false_pass_current(self):
+        receipt = valid_receipt(criterion="I6", status_announcement_verified=False)
+        with self.assertRaises(HumanLiveGateError):
+            assess_human_receipt_currentness(
+                receipt,
+                current_deployed_sha=SHA_A,
+                current_setup_surface_sha256=SURFACE_A,
+            )
+
     def test_any_deployment_or_setup_change_invalidates_prior_human_evidence(self):
         self.assertFalse(deployment_change_invalidates_human_evidence(
             previous_deployed_sha=SHA_A,
