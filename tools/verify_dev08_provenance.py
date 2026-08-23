@@ -4,9 +4,9 @@
 This is intentionally separate from DEV_A canonical provenance. It never expands
 DEV_A's allowlist and grants no deployment authority. It proves that the final
 DEV08 net diff contains only role-owned reliability/QA files. One branch-history
-exception is explicit: canonical ``ci.yml`` was temporarily instrumented only to
-execute the DEV08 tests, then restored to the exact canonical blob. The verifier
-allows that path in commit history but rejects it from the final net diff.
+exception is explicit: canonical ``ci.yml`` may be temporarily instrumented only
+to execute DEV08 tests, then must be restored to the exact canonical blob. The
+verifier allows that path in commit history but rejects it from the final net diff.
 """
 from __future__ import annotations
 
@@ -20,8 +20,11 @@ ANCHOR_SHA = "f966cc5bffc19d597bf298799e39a9bbbe692b19"
 EXPECTED_FINAL_PATHS = frozenset(
     {
         "docs/DEV08_RELIABILITY_CONCURRENCY_RECOVERY.md",
+        "docs/DEV08_ROUND2_INTERACTION_FINDINGS.md",
         "ops/dev08_reliability.py",
+        "ops/dev08_recovery_extensions.py",
         "tests/test_dev08_reliability.py",
+        "tests/test_dev08_round2.py",
         "tools/verify_dev08_provenance.py",
     }
 )
@@ -91,7 +94,7 @@ def verify() -> dict[str, object]:
         history_union.update(changed)
         current = parent
         commit_count += 1
-        if commit_count > 32:
+        if commit_count > 48:
             raise ProvenanceError("DEV08 overlay commit bound exceeded")
 
     final_paths = _changed_paths(anchor, overlay)
@@ -103,7 +106,7 @@ def verify() -> dict[str, object]:
         raise ProvenanceError("DEV08 validation-only CI instrumentation is not traceable")
 
     result = {
-        "schema": 2,
+        "schema": 3,
         "anchor_sha": anchor,
         "overlay_head_sha": overlay,
         "commit_count": commit_count,
