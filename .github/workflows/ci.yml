@@ -28,6 +28,7 @@ jobs:
           bridge/app.py
           bridge/integrated_app.py
           tools/secret_scan.py
+          tools/workflow_security.py
           tools/parallel_overlap_report.py
           tools/build_action_openapi.py
           tools/verify_integration_provenance.py
@@ -99,6 +100,20 @@ jobs:
           assert len(inventory) == 19
           print('DEV_A_CANDIDATE_CONTRACTS_PASS')
           PY
+      - name: Validate public-repository workflow security policy
+        run: python tools/workflow_security.py
+      - name: BURST01-10 targeted security regression
+        run: >-
+          python -m unittest -v
+          tests.test_secret_scan
+          tests.test_dev07_security
+          tests.test_dev07_audit_security
+          tests.test_dev07_session_lock_security
+          tests.test_dev07_error_privacy
+          tests.test_dev4_endpoint_policy
+          tests.test_dev4_session_lock
+          tests.test_read_app
+          tests.test_dev_a_integration
       - name: Verify deterministic integration provenance and overlap decisions
         run: python tools/verify_integration_provenance.py
       - name: Verify single deploy-capable entrypoint
