@@ -21,6 +21,16 @@ jobs:
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: '3.11'
+      - name: Compile DEV08 reliability round2
+        run: >-
+          python -m py_compile
+          ops/dev08_reliability.py
+          ops/dev08_recovery_extensions.py
+          tests/test_dev08_reliability.py
+          tests/test_dev08_round2.py
+          tools/verify_dev08_provenance.py
+      - name: Run DEV08 reliability round1 + round2
+        run: python -m unittest -v tests.test_dev08_reliability tests.test_dev08_round2
       - name: Compile guard, integrated application and operations tooling
         run: >-
           python -m py_compile
