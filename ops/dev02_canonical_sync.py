@@ -110,13 +110,17 @@ def _show_json(root: Path, sha: str, path: str) -> dict:
 
 
 def _ledger_runtime_sha(ledger: dict) -> str | None:
-    preferred = ledger.get("dev02_runtime_sync")
-    legacy = ledger.get("dev_b_round2_sync")
-    section = preferred if preferred is not None else legacy
-    if not isinstance(section, dict):
-        return None
-    value = section.get("sha")
-    return value if isinstance(value, str) and FULL_SHA_RE.fullmatch(value) else None
+    # Current canonical name is dev_b_terminal_sync.  A future DEV02-specific
+    # spelling may supersede it; the older round2 section remains legacy-only.
+    for key in ("dev02_runtime_sync", "dev_b_terminal_sync", "dev_b_round2_sync"):
+        section = ledger.get(key)
+        if section is None:
+            continue
+        if not isinstance(section, dict):
+            return None
+        value = section.get("sha")
+        return value if isinstance(value, str) and FULL_SHA_RE.fullmatch(value) else None
+    return None
 
 
 def _ledger_accounts_paths(ledger: dict) -> bool:

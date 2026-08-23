@@ -82,6 +82,21 @@ class Dev02CanonicalSyncTests(unittest.TestCase):
             self.assertFalse(result["promotion_authorized"])
             self.assertEqual(result, validate_sync_summary(result))
 
+    def test_current_canonical_terminal_sync_name_is_accepted(self):
+        with tempfile.TemporaryDirectory() as td:
+            root, protocol = self.make_protocol_repo(td)
+            self.write(root, "integration/release_to_live_v1.json", json.dumps({
+                "schema_version": 2,
+                "paths": list(CRITICAL_RUNTIME_PATHS),
+                "dev_b_round2_sync": {"sha": "1" * 40},
+                "dev_b_terminal_sync": {"sha": protocol},
+                "deployment_authorized": False,
+            }, sort_keys=True))
+            candidate = self.commit(root, "terminal-sync")
+            result = verify_candidate_runtime_sync(root, candidate, protocol_sha=protocol)
+            self.assertEqual("READY_FOR_CANONICAL_REVALIDATION", result["status"])
+            self.assertEqual("PASS", result["ledger_binding"])
+
     def test_stale_sha_and_missing_path_accounting_are_distinguished_from_runtime_drift(self):
         with tempfile.TemporaryDirectory() as td:
             root, protocol = self.make_protocol_repo(td)

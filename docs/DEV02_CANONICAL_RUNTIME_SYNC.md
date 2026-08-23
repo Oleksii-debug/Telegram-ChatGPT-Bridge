@@ -58,19 +58,24 @@ errors are never copied to output.
 
 ## Current factual observation
 
-At the 2026-08-23 DEV02 run, canonical PR #9 head
-`c609adfc9a1116aae635a0b14d632a5e59b6c2af` was observed as a descendant of the
-reviewed DEV02 protocol SHA. Critical Passenger/runtime evidence files were
-unchanged from that protocol boundary. However the canonical release ledger
-still named the older `dev_b_round2_sync.sha =
-6f943ee15f053acc5b4f15167c16d431023a35d1` and omitted later critical paths.
-That is a ledger/provenance-accounting defect, not evidence of post-DEV02
-runtime-code drift.
+During the 2026-08-23 DEV02 run, canonical PR #9 first reached
+`c609adfc9a1116aae635a0b14d632a5e59b6c2af`. That candidate was already a
+descendant of the reviewed DEV02 protocol SHA and retained the critical runtime
+bytes, but its provenance/ledger accounting was stale. Recovery Guard failed
+with `unexpected post-import mutation: DEV2:ops/private_evidence.py` even though
+direct blob comparison showed `ops/private_evidence.py` identical at the DEV02
+protocol boundary and the canonical candidate.
 
-The same canonical CI run failed earlier at integration provenance with
-`unexpected post-import mutation: DEV2:ops/private_evidence.py`, while direct
-blob comparison showed `ops/private_evidence.py` identical to the reviewed
-DEV02 protocol version. DEV01 owns repair of canonical provenance accounting.
+DEV01 then advanced canonical PR #9 to
+`cb058b74fcb9fc8afdff52a294b94b54a1c36b71`. The release ledger now explicitly
+contains `dev_b_terminal_sync.sha =
+8f2044d7bca9487815f754d614ab781555671a4b` and accounts the critical DEV02
+runtime paths. The DEV02 verifier therefore recognizes `dev_b_terminal_sync` as
+the current canonical spelling, while retaining `dev02_runtime_sync` as a
+future-compatible spelling and `dev_b_round2_sync` as a legacy fallback.
+
+This source compatibility result still requires the canonical exact-head CI,
+provenance and PREPARE gates to pass. It is not production evidence.
 
 ## Production boundary
 
