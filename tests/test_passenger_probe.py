@@ -110,9 +110,10 @@ class PassengerProbeTests(unittest.TestCase):
         payload = json.loads(self.health())
         self.assertTrue(passenger_probe._bounded_health_identity(self.health(), "application/json"))
         payload["components"]["surprise"] = "configured"
-        # Generic probe accepts a bounded component set because the exact seven-
-        # component contract is independently enforced by hostiq_lifecycle.
-        self.assertTrue(passenger_probe._bounded_health_identity(json.dumps(payload).encode(), "application/json"))
+        # Passenger serving proof must match the same exact seven-component
+        # health contract used by the lifecycle validator. Unknown components
+        # fail closed even when their value looks otherwise acceptable.
+        self.assertFalse(passenger_probe._bounded_health_identity(json.dumps(payload).encode(), "application/json"))
         payload["components"]["surprise"] = "secret-state"
         self.assertFalse(passenger_probe._bounded_health_identity(json.dumps(payload).encode(), "application/json"))
 
