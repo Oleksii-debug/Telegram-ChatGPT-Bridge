@@ -24,9 +24,12 @@ jobs:
           python -m py_compile
           ops/dev06_api_contracts.py
           ops/dev06_runtime_conformance.py
+          ops/dev06_deployed_action_evidence.py
           tools/build_dev06_action_openapi.py
+          tools/verify_dev06_deployed_action.py
           tests/test_dev06_api_contracts.py
           tests/test_dev06_runtime_conformance.py
+          tests/test_dev06_deployed_action_evidence.py
       - name: Verify DEV06 overlay path isolation
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
@@ -40,10 +43,13 @@ jobs:
           .github/workflows/dev06-api-contracts.yml
           docs/DEV06_API_CONTRACTS.md
           ops/dev06_api_contracts.py
+          ops/dev06_deployed_action_evidence.py
           ops/dev06_runtime_conformance.py
           tests/test_dev06_api_contracts.py
+          tests/test_dev06_deployed_action_evidence.py
           tests/test_dev06_runtime_conformance.py
           tools/build_dev06_action_openapi.py
+          tools/verify_dev06_deployed_action.py
           EOF
           git diff --name-only "$BASE_SHA...$HEAD_SHA" | sort > /tmp/dev06.actual
           sort -o /tmp/dev06.expected /tmp/dev06.expected
@@ -51,12 +57,24 @@ jobs:
           echo DEV06_OVERLAY_PATH_ISOLATION_PASS
       - name: Validate DEV06 authoritative Action schema
         run: python tools/build_dev06_action_openapi.py --validate-only
-      - name: Run DEV06 positive adversarial and runtime contracts
+      - name: Run DEV06 positive adversarial runtime and deployment-evidence contracts
         run: |
           umask 022
           python -m unittest \
             tests.test_dev06_api_contracts \
-            tests.test_dev06_runtime_conformance -v
+            tests.test_dev06_runtime_conformance \
+            tests.test_dev06_deployed_action_evidence -v
+      - name: Verify H1 comparison CLI in source-mock mode only
+        env:
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          test -n "$HEAD_SHA"
+          python tools/build_dev06_action_openapi.py > /tmp/dev06-observed-openapi.json
+          python tools/verify_dev06_deployed_action.py \
+            --candidate-sha "$HEAD_SHA" \
+            --observed-schema /tmp/dev06-observed-openapi.json \
+            --source-classification SOURCE_MOCK
+          rm -f /tmp/dev06-observed-openapi.json
       - name: Recheck integrated API and write policy regressions
         run: |
           umask 022
