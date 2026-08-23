@@ -6,9 +6,14 @@ import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
+from bridge.app import BridgeApplication, ReadAppConfig
+from bridge.backend import TelethonReadBackend, TelethonReadConfig
 from bridge.downloads import DownloadManager
+from bridge.errors import BridgeError
 from bridge.storage import CheckpointStore, DownloadItem, FileRecordStore
+from bridge.validation import DateRange
 from ops.dev09_qa_probe import (
     EXPECTED_PARENT_SHA,
     MANIFEST,
@@ -54,6 +59,38 @@ class _FailOnSaveCheckpointStore(CheckpointStore):
         if self.fail_at is not None and self.save_calls == self.fail_at:
             raise RuntimeError("fault_injected_checkpoint_save")
         return super().save(payload)
+
+
+class _CaptureSearchBackend:
+    def __init__(self) -> None:
+        self.kwargs = None
+
+    def search(self, **kwargs):  # type: ignore[no-untyped-def]
+        self.kwargs = dict(kwargs)
+        return SimpleNamespace(items=(), next_cursor=None, scanned=0)
+
+
+class _StrictGlobalTelethonClient:
+    """Minimal fake matching Telethon's global-search precondition.
+
+    entity=None requires a non-empty search/filter/from_user. Current canonical
+    sender-only search supplies none of those server-side constraints.
+    """
+
+    async def connect(self) -> None:
+        return None
+
+    async def is_user_authorized(self) -> bool:
+        return True
+
+    async def disconnect(self) -> None:
+        return None
+
+    def iter_messages(self, entity, limit: int, *, search: str = "", from_user=None):  # type: ignore[no-untyped-def]
+        del limit
+        if entity is None and not search and from_user is None:
+            raise ValueError("global search requires search/filter/from_user")
+        return []
 
 
 class Dev09ExactParentTests(unittest.TestCase):
@@ -194,6 +231,46 @@ class Dev09DownloadDurabilityClosureTests(unittest.TestCase):
             with sqlite3.connect(str(files.db_path)) as connection:
                 final_rows = [str(row[0]) for row in connection.execute("SELECT file_ref FROM files").fetchall()]
             self.assertEqual(final_rows, first_rows)
+
+
+class Dev09GlobalSenderSearchFindingTests(unittest.TestCase):
+    """Executable oracle for the open global sender-only D3/D4 gap.
+
+    This intentionally records the current-parent defect. When DEV03/DEV01
+    integrates a real from_user/global-search design, DEV09 must flip this from
+    reproducer to closure oracle on the new exact parent.
+    """
+
+    def test_api_contract_accepts_sender_only_search_without_chat_or_text(self):
+        backend = _CaptureSearchBackend()
+        app = BridgeApplication(
+            config=ReadAppConfig(auth_secret="synthetic-dev09-token"),
+            backend=backend,  # type: ignore[arg-type]
+        )
+        payload = app._handle_post("search.read", {"sender": "reader"})
+        self.assertEqual(payload["items"], [])
+        self.assertIsNotNone(backend.kwargs)
+        self.assertIsNone(backend.kwargs["chat"])
+        self.assertEqual(backend.kwargs["sender"], "reader")
+        self.assertEqual(backend.kwargs["text"], "")
+
+    def test_current_backend_sender_only_global_search_lacks_server_constraint(self):
+        backend = TelethonReadBackend(
+            client_factory=_StrictGlobalTelethonClient,
+            config=TelethonReadConfig(request_timeout_seconds=2, search_scan_limit=100),
+        )
+        with self.assertRaises(BridgeError) as captured:
+            backend.search(
+                chat=None,
+                sender="reader",
+                text="",
+                dates=DateRange(None, None),
+                limit=10,
+                cursor=None,
+                scan_limit=10,
+            )
+        self.assertEqual(captured.exception.code, "telegram_rpc_error")
+        self.assertEqual(captured.exception.status, 502)
 
 
 class Dev09AcceptanceTruthTests(unittest.TestCase):
