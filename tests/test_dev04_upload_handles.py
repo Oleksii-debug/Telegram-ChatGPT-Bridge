@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import os
 import tempfile
 import unittest
@@ -45,7 +46,7 @@ class VerifiedUploadHandleTests(unittest.TestCase):
     def identity(record) -> UploadFileIdentity:
         return UploadFileIdentity(record.file_ref, record.sha256, record.size)
 
-    def test_exact_identity_yields_read_only_path_free_file_like_object(self) -> None:
+    def test_exact_identity_yields_standard_read_only_path_free_stream(self) -> None:
         record, _ = self.add(
             b"abc",
             physical_name="stored.bin",
@@ -57,11 +58,15 @@ class VerifiedUploadHandleTests(unittest.TestCase):
         try:
             upload = batch[0]
             self.assertIsInstance(upload, VerifiedUploadFile)
+            self.assertIsInstance(upload, io.IOBase)
             self.assertEqual(upload.read(), b"abc")
             self.assertEqual(upload.seek(0), 0)
             self.assertEqual(upload.tell(), 0)
             self.assertTrue(upload.readable())
             self.assertTrue(upload.seekable())
+            self.assertFalse(upload.writable())
+            with self.assertRaises((io.UnsupportedOperation, AttributeError)):
+                upload.write(b"x")
             self.assertEqual(upload.file_ref, record.file_ref)
             self.assertEqual(upload.sha256, record.sha256)
             self.assertEqual(upload.size, 3)
@@ -86,7 +91,6 @@ class VerifiedUploadHandleTests(unittest.TestCase):
             upload = batch[0]
             upload.seek(0)
             self.assertEqual(upload.read(), b"ORIGINAL")
-            self.assertNotEqual(upload.read(), b"REPLACED")
         finally:
             batch.close()
 
@@ -188,6 +192,7 @@ class VerifiedUploadHandleTests(unittest.TestCase):
             names = []
             for item in files:
                 self.assertIsInstance(item, VerifiedUploadFile)
+                self.assertIsInstance(item, io.IOBase)
                 item.seek(0)
                 payloads.append(item.read())
                 names.append(item.name)
