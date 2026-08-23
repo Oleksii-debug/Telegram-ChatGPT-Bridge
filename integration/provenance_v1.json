@@ -145,7 +145,7 @@
     ".github/workflows/ci.yml", "bridge/__init__.py", "bridge/file_access.py", "bridge/filenames.py", "bridge/integrated_app.py",
     "docs/DEV03_SWARM_READ_HARDENING.md", "docs/DEV04_MEDIA_STORAGE.md", "docs/DEV08_DEPLOYMENT_RECOVERY_R3.md",
     "docs/DEV_A_INTEGRATED_RELEASE_CANDIDATE.md", "docs/DEV_A_PROVENANCE_LEDGER.md",
-    "integration/provenance_v1.json", "ops/candidate_contracts.py", "ops/dev08_deploy_recovery.py", "ops/integration_interfaces.py",
+    "integration/provenance_v1.json", "ops/candidate_contracts.py", "ops/deploy_release.py", "ops/dev08_deploy_recovery.py", "ops/integration_interfaces.py",
     "tests/test_dev01_dev03_peer_provenance.py", "tests/test_dev01_dev04_peer_provenance.py", "tests/test_dev01_dev08_authoritative_recovery.py", "tests/test_dev01_dev08_peer_provenance.py",
     "tests/test_dev03_history_offset.py", "tests/test_dev03_swarm_read.py", "tests/test_dev04_media_storage.py",
     "tests/test_dev04_migration_concurrency.py", "tests/test_dev04_private_serving.py", "tests/test_dev07_audit_security.py",
