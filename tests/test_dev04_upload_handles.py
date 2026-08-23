@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import os
+import stat
 import tempfile
 import unittest
 from pathlib import Path
@@ -76,11 +77,12 @@ class VerifiedUploadHandleTests(unittest.TestCase):
             self.assertFalse(hasattr(upload, "path"))
             self.assertFalse(hasattr(upload, "record"))
             self.assertNotIn(str(self.store.root), upload.name)
+            self.assertEqual(stat.S_IMODE(os.fstat(upload.fileno()).st_mode), 0o600)
         finally:
             batch.close()
         self.assertTrue(upload.closed)
 
-    def test_pinned_upload_reads_original_inode_after_path_replacement(self) -> None:
+    def test_snapshot_survives_path_replacement_after_batch_creation(self) -> None:
         record, path = self.add(b"ORIGINAL", physical_name="payload.bin")
         batch = open_verified_upload_batch(self.store, [self.identity(record)])
         self.assertIsNotNone(batch)
@@ -94,7 +96,46 @@ class VerifiedUploadHandleTests(unittest.TestCase):
         finally:
             batch.close()
 
-    def test_identity_mismatch_closes_verified_handle_before_return(self) -> None:
+    def test_snapshot_survives_in_place_source_mutation_after_batch_creation(self) -> None:
+        record, path = self.add(b"ORIGINAL", physical_name="payload.bin")
+        batch = open_verified_upload_batch(self.store, [self.identity(record)])
+        self.assertIsNotNone(batch)
+        assert batch is not None
+        try:
+            with path.open("r+b") as handle:
+                handle.seek(0)
+                handle.write(b"MUTATED!")
+                handle.truncate()
+            upload = batch[0]
+            upload.seek(0)
+            self.assertEqual(upload.read(), b"ORIGINAL")
+        finally:
+            batch.close()
+
+    def test_mutation_between_verified_open_and_snapshot_fails_pre_effect(self) -> None:
+        record, path = self.add(b"ORIGINAL", physical_name="payload.bin")
+        original = open_verified_file
+        captured = []
+
+        def open_then_mutate(store, ref):
+            verified = original(store, ref)
+            self.assertIsNotNone(verified)
+            assert verified is not None
+            captured.append(verified)
+            with path.open("r+b") as handle:
+                handle.seek(0)
+                handle.write(b"MUTATED!")
+                handle.truncate()
+            return verified
+
+        with patch("bridge.file_access.open_verified_file", side_effect=open_then_mutate):
+            self.assertIsNone(
+                open_verified_upload_batch(self.store, [self.identity(record)])
+            )
+        self.assertEqual(len(captured), 1)
+        self.assertTrue(captured[0].handle.closed)
+
+    def test_identity_mismatch_closes_verified_source_before_return(self) -> None:
         record, _ = self.add(b"abc", physical_name="one.bin")
         captured = []
         original = open_verified_file
@@ -111,7 +152,7 @@ class VerifiedUploadHandleTests(unittest.TestCase):
         self.assertEqual(len(captured), 1)
         self.assertTrue(captured[0].handle.closed)
 
-    def test_partial_batch_failure_closes_earlier_handles(self) -> None:
+    def test_partial_batch_failure_closes_earlier_snapshots(self) -> None:
         first, _ = self.add(b"first", physical_name="one.bin")
         second, second_path = self.add(b"second", physical_name="two.bin")
         outside = Path(self.tmp.name) / "outside.bin"
@@ -119,23 +160,27 @@ class VerifiedUploadHandleTests(unittest.TestCase):
         second_path.unlink()
         second_path.symlink_to(outside)
 
-        captured = []
-        original = open_verified_file
+        first_uploads = []
+        original_from_verified = VerifiedUploadFile.from_verified.__func__
 
-        def capture(store, ref):
-            verified = original(store, ref)
-            if verified is not None:
-                captured.append(verified)
-            return verified
+        def capture_snapshot(cls, verified, *, snapshot_dir):
+            upload = original_from_verified(cls, verified, snapshot_dir=snapshot_dir)
+            if upload is not None:
+                first_uploads.append(upload)
+            return upload
 
-        with patch("bridge.file_access.open_verified_file", side_effect=capture):
+        with patch.object(
+            VerifiedUploadFile,
+            "from_verified",
+            classmethod(capture_snapshot),
+        ):
             result = open_verified_upload_batch(
                 self.store,
                 [self.identity(first), self.identity(second)],
             )
         self.assertIsNone(result)
-        self.assertEqual(len(captured), 1)
-        self.assertTrue(captured[0].handle.closed)
+        self.assertEqual(len(first_uploads), 1)
+        self.assertTrue(first_uploads[0].closed)
 
     def test_batch_context_closes_all_handles_on_consumer_exception(self) -> None:
         first, _ = self.add(b"first", physical_name="one.bin")
@@ -161,18 +206,30 @@ class VerifiedUploadHandleTests(unittest.TestCase):
                 open_verified_upload_batch(self.store, [identity, identity])
         opener.assert_not_called()
 
-    def test_invalid_identity_and_file_count_fail_before_open(self) -> None:
+    def test_shape_and_byte_limits_fail_before_open(self) -> None:
         record, _ = self.add(b"abc", physical_name="one.bin")
+        identity = self.identity(record)
+        huge = UploadFileIdentity("opaque", "0" * 64, 101 * 1024 * 1024)
+        medium = UploadFileIdentity("opaque2", "1" * 64, 60 * 1024 * 1024)
         with patch("bridge.file_access.open_verified_file") as opener:
             with self.assertRaises(ValueError):
                 open_verified_upload_batch(self.store, [])
             with self.assertRaises(ValueError):
                 open_verified_upload_batch(self.store, [object()])  # type: ignore[list-item]
             with self.assertRaises(ValueError):
-                open_verified_upload_batch(self.store, [self.identity(record)], max_files=0)
+                open_verified_upload_batch(self.store, [identity], max_files=0)
+            with self.assertRaisesRegex(ValueError, "file too large"):
+                open_verified_upload_batch(self.store, [huge])
+            with self.assertRaisesRegex(ValueError, "batch too large"):
+                open_verified_upload_batch(
+                    self.store,
+                    [medium],
+                    max_file_bytes=100 * 1024 * 1024,
+                    max_total_bytes=50 * 1024 * 1024,
+                )
         opener.assert_not_called()
 
-    def test_fake_external_consumer_receives_pinned_objects_not_paths(self) -> None:
+    def test_fake_external_consumer_receives_snapshots_not_live_paths(self) -> None:
         first, first_path = self.add(b"alpha", physical_name="one.bin")
         second, second_path = self.add(b"beta", physical_name="two.bin")
         batch = open_verified_upload_batch(
@@ -182,8 +239,9 @@ class VerifiedUploadHandleTests(unittest.TestCase):
         self.assertIsNotNone(batch)
         assert batch is not None
 
-        first_path.unlink()
-        first_path.write_bytes(b"MUTATED_ALPHA")
+        with first_path.open("r+b") as handle:
+            handle.write(b"OMEGA")
+            handle.truncate()
         second_path.unlink()
         second_path.write_bytes(b"MUTATED_BETA")
 
