@@ -26,7 +26,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from ops.deploy_release import prepare_versioned_release, verify_prepared_release
+from ops import deploy_release
 from ops.release_guard import SafetyError, sha256_file
 from ops.release_package import build_release_identity, validate_public_release_tree
 
@@ -41,6 +41,10 @@ IDENTITY_ENVELOPE = ("passenger_wsgi.py", "requirements.txt", "requirements.lock
 _STAGE_RE = frozenset({
     "TREE_ENUMERATION",
     "PREPARE",
+    "PREPARE_VENV",
+    "PREPARE_DEPENDENCIES",
+    "PREPARE_COMPILE",
+    "PREPARE_TESTS",
     "PREPARED_VERIFY",
     "PACKAGE_CONTRACT",
     "LOCK_BINDING",
@@ -63,6 +67,8 @@ class ReleasePrepareStageError(SafetyError):
 def _at_stage(stage: str, operation: Callable[[], _T]) -> _T:
     try:
         return operation()
+    except ReleasePrepareStageError:
+        raise
     except SafetyError as exc:
         raise ReleasePrepareStageError(stage) from exc
 
@@ -118,6 +124,47 @@ def _verify_installed_runtime(prepared: Path) -> None:
         raise SafetyError("prepared runtime dependency/import verification failed") from exc
 
 
+def _prepare_subprocess_stage(command: list[str]) -> str:
+    """Map only known PREPARE subprocess shapes to bounded public stage labels."""
+    lowered = [str(part).casefold() for part in command]
+    if "-m" in lowered:
+        index = lowered.index("-m")
+        module = lowered[index + 1] if index + 1 < len(lowered) else ""
+        if module == "venv":
+            return "PREPARE_VENV"
+        if module == "pip" and "install" in lowered:
+            return "PREPARE_DEPENDENCIES"
+        if module == "compileall":
+            return "PREPARE_COMPILE"
+        if module == "unittest":
+            return "PREPARE_TESTS"
+    return "PREPARE"
+
+
+def _prepare_with_bounded_subprocess_stages(**kwargs):
+    """Run the authoritative deploy PREPARE unchanged, adding diagnostics only.
+
+    The deploy engine remains the sole implementation. This wrapper temporarily
+    decorates its internal subprocess helper so a failure reports only one
+    allowlisted stage. It never returns stderr/stdout, paths, command arguments,
+    environment values, or exception text and always restores the original helper.
+    """
+    original_run = deploy_release.run
+
+    def classified_run(command: list[str], *, cwd: Path | None = None, timeout: int = 300) -> None:
+        stage = _prepare_subprocess_stage(command)
+        try:
+            original_run(command, cwd=cwd, timeout=timeout)
+        except SafetyError as exc:
+            raise ReleasePrepareStageError(stage) from exc
+
+    deploy_release.run = classified_run
+    try:
+        return deploy_release.prepare_versioned_release(**kwargs)
+    finally:
+        deploy_release.run = original_run
+
+
 def _build_canonical_envelope_identity(prepared: Path, *, sha: str) -> dict[str, object]:
     """Hash the public canonical startup/dependency envelope, never generated venv paths.
 
@@ -152,7 +199,7 @@ def verify_exact_candidate(repo: Path, sha: str, approved_ref: str) -> dict[str,
         releases_root = Path(tmp) / "releases"
         prepared, meta, manifest_hash = _at_stage(
             "PREPARE",
-            lambda: prepare_versioned_release(
+            lambda: _prepare_with_bounded_subprocess_stages(
                 repo=repo,
                 sha=sha,
                 approved_ref=approved_ref,
@@ -164,7 +211,7 @@ def verify_exact_candidate(repo: Path, sha: str, approved_ref: str) -> dict[str,
         )
         verified = _at_stage(
             "PREPARED_VERIFY",
-            lambda: verify_prepared_release(prepared, manifest_hash),
+            lambda: deploy_release.verify_prepared_release(prepared, manifest_hash),
         )
         if verified != meta:
             raise ReleasePrepareStageError("PREPARED_VERIFY")
