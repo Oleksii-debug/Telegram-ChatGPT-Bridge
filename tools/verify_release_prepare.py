@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -51,17 +52,24 @@ _STAGE_RE = frozenset({
     "RUNTIME_IMPORT",
     "IDENTITY",
 })
+_TEST_ID_RE = re.compile(r"^[A-Za-z0-9_.]{1,220}$")
+_MAX_TEST_DIAGNOSTICS = 8
 _T = TypeVar("_T")
 
 
 class ReleasePrepareStageError(SafetyError):
-    """Stable non-secret PREPARE failure carrying only an allowlisted stage."""
+    """Stable non-secret PREPARE failure with bounded public diagnostics."""
 
-    def __init__(self, stage: str):
+    def __init__(self, stage: str, diagnostics: tuple[str, ...] = ()):
         if stage not in _STAGE_RE:
             stage = "PREPARED_VERIFY"
+        safe: list[str] = []
+        for value in diagnostics[:_MAX_TEST_DIAGNOSTICS]:
+            if isinstance(value, str) and _TEST_ID_RE.fullmatch(value):
+                safe.append(value)
         super().__init__("release PREPARE verification failed")
         self.stage = stage
+        self.diagnostics = tuple(safe)
 
 
 def _at_stage(stage: str, operation: Callable[[], _T]) -> _T:
@@ -141,13 +149,64 @@ def _prepare_subprocess_stage(command: list[str]) -> str:
     return "PREPARE"
 
 
+def _diagnose_prepare_test_failures(command: list[str], cwd: Path | None, timeout: int) -> tuple[str, ...]:
+    """Return only public unittest identifiers; never return test output or exceptions.
+
+    The authoritative PREPARE command remains unchanged and has already failed
+    when this helper runs. A second isolated discovery pass suppresses stdout,
+    stderr, tracebacks and assertion text and emits only failing/erroring test
+    IDs. Those IDs are public repository symbols and are validated again before
+    they can reach CI output.
+    """
+    if cwd is None or not command:
+        return ()
+    expression = r'''
+import contextlib
+import json
+import os
+import unittest
+
+suite = unittest.defaultTestLoader.discover("tests")
+result = unittest.TestResult()
+with open(os.devnull, "w", encoding="utf-8") as sink:
+    with contextlib.redirect_stdout(sink), contextlib.redirect_stderr(sink):
+        suite.run(result)
+ids = sorted({test.id() for test, _ in (result.failures + result.errors)})[:8]
+print(json.dumps(ids, separators=(",", ":")))
+'''
+    env = dict(os.environ)
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
+    try:
+        completed = subprocess.run(
+            [str(command[0]), "-B", "-c", expression],
+            cwd=cwd,
+            env=env,
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=max(30, min(int(timeout), 300)),
+        )
+        payload = json.loads(completed.stdout.strip())
+    except (OSError, subprocess.SubprocessError, json.JSONDecodeError, ValueError, TypeError):
+        return ()
+    if not isinstance(payload, list):
+        return ()
+    safe: list[str] = []
+    for value in payload[:_MAX_TEST_DIAGNOSTICS]:
+        if isinstance(value, str) and _TEST_ID_RE.fullmatch(value):
+            safe.append(value)
+    return tuple(safe)
+
+
 def _prepare_with_bounded_subprocess_stages(**kwargs):
-    """Run the authoritative deploy PREPARE unchanged, adding diagnostics only.
+    """Run authoritative deploy PREPARE unchanged, adding bounded diagnostics only.
 
     The deploy engine remains the sole implementation. This wrapper temporarily
-    decorates its internal subprocess helper so a failure reports only one
-    allowlisted stage. It never returns stderr/stdout, paths, command arguments,
-    environment values, or exception text and always restores the original helper.
+    decorates its internal subprocess helper so a failure reports one allowlisted
+    stage. For PREPARE_TESTS only, public unittest IDs may also be reported.
+    It never returns stderr/stdout, paths, command arguments, environment values,
+    or exception text and always restores the original helper.
     """
     original_run = deploy_release.run
 
@@ -156,7 +215,10 @@ def _prepare_with_bounded_subprocess_stages(**kwargs):
         try:
             original_run(command, cwd=cwd, timeout=timeout)
         except SafetyError as exc:
-            raise ReleasePrepareStageError(stage) from exc
+            diagnostics = ()
+            if stage == "PREPARE_TESTS":
+                diagnostics = _diagnose_prepare_test_failures(command, cwd, timeout)
+            raise ReleasePrepareStageError(stage, diagnostics) from exc
 
     deploy_release.run = classified_run
     try:
@@ -265,7 +327,10 @@ def main(argv: list[str] | None = None) -> int:
     try:
         result = verify_exact_candidate(Path(args.repo), args.sha, args.approved_ref)
     except ReleasePrepareStageError as exc:
-        print(f"RELEASE_PREPARE_BLOCKED:{exc.stage}")
+        suffix = ""
+        if exc.diagnostics:
+            suffix = ":" + "|".join(exc.diagnostics)
+        print(f"RELEASE_PREPARE_BLOCKED:{exc.stage}{suffix}")
         return 2
     except SafetyError:
         print("RELEASE_PREPARE_BLOCKED:UNCLASSIFIED")
