@@ -8,9 +8,11 @@
     "bridge/runtime_wsgi.py",
     "docs/DEV_B_DEV_A_RUNTIME_SYNC.md",
     "docs/DEV_B_HOSTIQ_PRODUCTION_READINESS.md",
+    "docs/DEV_C_RELEASE_TO_LIVE_QA.md",
     "docs/HOSTIQ_ONE_TIME_SUPPORT_PACKAGE.md",
     "integration/release_to_live_v1.json",
     "ops/candidate_runtime_preflight.py",
+    "ops/devc_release_qa.py",
     "ops/hostiq_lifecycle.py",
     "ops/passenger_evidence_hook.py",
     "ops/private_control.py",
@@ -26,6 +28,8 @@
     "tests/test_devb_compile.py",
     "tests/test_devb_production_readiness.py",
     "tests/test_devb_round2_release.py",
+    "tests/test_devc_release_e2e.py",
+    "tests/test_devc_release_qa.py",
     "tests/test_passenger_evidence_hook.py",
     "tests/test_private_control.py",
     "tests/test_release_package.py",
@@ -57,7 +61,9 @@
     "f8b2a3ff0d689966e2f88f3c9efc63cbe5cef8a0",
     "919d7d409564d7c21e46009e1d76cfa5d1fd602d",
     "1c3e810706d77fcdd1e17d8beb2374439a448af0",
-    "2a6ae856640064f7ff4ba3f5f85230c72d7165e4"
+    "2a6ae856640064f7ff4ba3f5f85230c72d7165e4",
+    "df318aa089f754b7a14f624b7c27cca59758cbe8",
+    "964261b55f5f8ca5b615f783f172e35a4da0abc1"
   ],
   "runtime_packages": {
     "Telethon": "1.44.0",
@@ -121,6 +127,21 @@
       "tests/test_server_manifest.py"
     ],
     "strict_history_suppression_imported": false
+  },
+  "dev_c_qa_sync": {
+    "pr": 16,
+    "sha": "5758bfdcd9ecee4011fc3caaa3c68eb46ee2af19",
+    "merge_commit": "df318aa089f754b7a14f624b7c27cca59758cbe8",
+    "first_parent": "94c6ab7e3afabd769a63b44b222bfc0bbf067f67",
+    "exact_blob_paths": [
+      "docs/DEV_C_RELEASE_TO_LIVE_QA.md",
+      "ops/devc_release_qa.py",
+      "tests/test_devc_release_e2e.py"
+    ],
+    "adapted_paths": [
+      "tests/test_devc_release_qa.py"
+    ],
+    "production_logic_modified": false
   },
   "supplemental_runtime_oracle": {
     "source_pr": 13,
