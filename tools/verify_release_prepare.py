@@ -10,15 +10,17 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from typing import Callable, TypeVar
 
 # GitHub Actions and one-time operator validation invoke this file directly as
-# ``python tools/verify_release_prepare.py``.  Direct script execution places
+# ``python tools/verify_release_prepare.py``. Direct script execution places
 # ``tools/`` rather than the repository root on sys.path, so make the public
-# repository package root explicit before importing ``ops``.  This changes only
+# repository package root explicit before importing ``ops``. This changes only
 # module resolution; it does not read environment secrets or private state.
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -35,6 +37,34 @@ EXPECTED_DISTRIBUTIONS = {
     "rsa": "4.9.1",
     "pyasn1": "0.6.4",
 }
+IDENTITY_ENVELOPE = ("passenger_wsgi.py", "requirements.txt", "requirements.lock")
+_STAGE_RE = frozenset({
+    "TREE_ENUMERATION",
+    "PREPARE",
+    "PREPARED_VERIFY",
+    "PACKAGE_CONTRACT",
+    "LOCK_BINDING",
+    "RUNTIME_IMPORT",
+    "IDENTITY",
+})
+_T = TypeVar("_T")
+
+
+class ReleasePrepareStageError(SafetyError):
+    """Stable non-secret PREPARE failure carrying only an allowlisted stage."""
+
+    def __init__(self, stage: str):
+        if stage not in _STAGE_RE:
+            stage = "PREPARED_VERIFY"
+        super().__init__("release PREPARE verification failed")
+        self.stage = stage
+
+
+def _at_stage(stage: str, operation: Callable[[], _T]) -> _T:
+    try:
+        return operation()
+    except SafetyError as exc:
+        raise ReleasePrepareStageError(stage) from exc
 
 
 def _git_paths(repo: Path, sha: str) -> list[str]:
@@ -88,47 +118,83 @@ def _verify_installed_runtime(prepared: Path) -> None:
         raise SafetyError("prepared runtime dependency/import verification failed") from exc
 
 
+def _build_canonical_envelope_identity(prepared: Path, *, sha: str) -> dict[str, object]:
+    """Hash the public canonical startup/dependency envelope, never generated venv paths.
+
+    PREPARE separately binds every generated dependency byte through
+    ``payload_manifest_sha256``. Release identity intentionally represents the
+    reviewed Git-controlled startup/dependency envelope. Recursively scanning
+    generated site-packages would misclassify legitimate library namespaces
+    such as ``telethon/sessions`` as application private runtime state.
+    """
+    with tempfile.TemporaryDirectory(prefix="telegram-bridge-envelope-") as tmp:
+        root = Path(tmp)
+        for name in IDENTITY_ENVELOPE:
+            source = prepared / name
+            if not source.is_file() or source.is_symlink():
+                raise SafetyError("canonical release envelope is missing or unsafe")
+            shutil.copy2(source, root / name)
+        return build_release_identity(root, sha=sha, repository=REPOSITORY_ID)
+
+
 def verify_exact_candidate(repo: Path, sha: str, approved_ref: str) -> dict[str, object]:
     """Verify only bytes exported from ``sha``; never trust working-tree bytes.
 
-    Pull-request workflows normally check out a synthetic merge ref.  The
+    Pull-request workflows normally check out a synthetic merge ref. The
     canonical release identity, dependency lock and startup contract therefore
     must be derived from the exact Git object exported by the deployment
     PREPARE transaction, not from files present in that workflow checkout.
     """
     repo = repo.resolve(strict=True)
-    paths = _git_paths(repo, sha)
+    paths = _at_stage("TREE_ENUMERATION", lambda: _git_paths(repo, sha))
 
     with tempfile.TemporaryDirectory(prefix="telegram-bridge-prepare-") as tmp:
         releases_root = Path(tmp) / "releases"
-        prepared, meta, manifest_hash = prepare_versioned_release(
-            repo=repo,
-            sha=sha,
-            approved_ref=approved_ref,
-            repository_id=REPOSITORY_ID,
-            releases_root=releases_root,
-            python_executable=sys.executable,
-            runtime_entries=[],
+        prepared, meta, manifest_hash = _at_stage(
+            "PREPARE",
+            lambda: prepare_versioned_release(
+                repo=repo,
+                sha=sha,
+                approved_ref=approved_ref,
+                repository_id=REPOSITORY_ID,
+                releases_root=releases_root,
+                python_executable=sys.executable,
+                runtime_entries=[],
+            ),
         )
-        verified = verify_prepared_release(prepared, manifest_hash)
+        verified = _at_stage(
+            "PREPARED_VERIFY",
+            lambda: verify_prepared_release(prepared, manifest_hash),
+        )
         if verified != meta:
-            raise SafetyError("prepared release metadata changed during verification")
+            raise ReleasePrepareStageError("PREPARED_VERIFY")
         if meta.get("sha") != sha:
-            raise SafetyError("prepared release identity does not match candidate SHA")
+            raise ReleasePrepareStageError("PREPARED_VERIFY")
 
         # Validate package/startup/dependency bytes only after the exact Git SHA
-        # has been exported and sealed by PREPARE.  ``paths`` is the exact Git
+        # has been exported and sealed by PREPARE. ``paths`` is the exact Git
         # tree inventory so generated .venv/metadata cannot expand release scope.
-        package = validate_public_release_tree(prepared, paths=paths)
+        package = _at_stage(
+            "PACKAGE_CONTRACT",
+            lambda: validate_public_release_tree(prepared, paths=paths),
+        )
         prepared_lock = prepared / "requirements.lock"
-        if meta.get("requirements_lock_sha256") != sha256_file(prepared_lock):
-            raise SafetyError("prepared release is not bound to the canonical runtime lock")
+        try:
+            lock_hash = sha256_file(prepared_lock)
+        except (OSError, ValueError) as exc:
+            raise ReleasePrepareStageError("LOCK_BINDING") from exc
+        if meta.get("requirements_lock_sha256") != lock_hash:
+            raise ReleasePrepareStageError("LOCK_BINDING")
         if meta.get("requirements_test_lock_sha256") is not None:
-            raise SafetyError("unexpected test-only dependency lock in canonical release")
+            raise ReleasePrepareStageError("LOCK_BINDING")
         if meta.get("immutable_permission_policy") != "no-write-bits-v1":
-            raise SafetyError("prepared release immutable permission policy mismatch")
-        _verify_installed_runtime(prepared)
-        identity = build_release_identity(prepared, sha=sha, repository=REPOSITORY_ID)
+            raise ReleasePrepareStageError("LOCK_BINDING")
+
+        _at_stage("RUNTIME_IMPORT", lambda: _verify_installed_runtime(prepared))
+        identity = _at_stage(
+            "IDENTITY",
+            lambda: _build_canonical_envelope_identity(prepared, sha=sha),
+        )
         return {
             "state": "NONLIVE_PREPARE_VERIFIED",
             "sha": sha,
@@ -151,8 +217,11 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         result = verify_exact_candidate(Path(args.repo), args.sha, args.approved_ref)
-    except SafetyError as exc:
-        print(f"RELEASE_PREPARE_BLOCKED: {type(exc).__name__}")
+    except ReleasePrepareStageError as exc:
+        print(f"RELEASE_PREPARE_BLOCKED:{exc.stage}")
+        return 2
+    except SafetyError:
+        print("RELEASE_PREPARE_BLOCKED:UNCLASSIFIED")
         return 2
     print(json.dumps(result, sort_keys=True, separators=(",", ":")))
     return 0
