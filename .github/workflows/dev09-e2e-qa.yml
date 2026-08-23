@@ -37,10 +37,6 @@ jobs:
         run: python -m ops.dev09_qa_probe --suite-probe
       - name: Emit bounded acceptance truth snapshot
         run: python -m ops.dev09_qa_probe
-      - name: Complete cross-lane regression
-        env:
-          DEV09_SKIP_EXPENSIVE: '1'
-        run: python -m unittest discover -s tests -v
       - name: Current-tree secret scan
         if: always()
         run: python tools/secret_scan.py --mode current

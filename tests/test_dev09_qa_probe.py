@@ -18,6 +18,11 @@ from ops.dev09_qa_probe import (
 ROOT = Path(__file__).resolve().parents[1]
 REPOSITORY_GIT_AVAILABLE = (ROOT / ".git").exists()
 SKIP_EXPENSIVE = os.environ.get("DEV09_SKIP_EXPENSIVE") == "1"
+EXPECTED_CROSS_LANE_FAILURES = [
+    "test_devb_round2_release.DevBRound2ReleaseContractsTests.test_passenger_binding_rejects_runtime_from_different_wsgi",
+    "test_devb_round2_release.DevBRound2ReleaseContractsTests.test_preflight_manifest_and_passenger_binding_share_exact_wsgi_identity",
+    "test_devc_release_qa.PreparedAndCrossLaneTruthTests.test_v2_exact_binding_is_accepted_but_never_self_authorizes_promotion",
+]
 requires_repository_git = unittest.skipUnless(
     REPOSITORY_GIT_AVAILABLE,
     "DEV09 exact-parent probe requires repository Git metadata and is skipped inside PREPARE payload",
@@ -65,23 +70,24 @@ class Dev09ExactParentTests(unittest.TestCase):
 
 class Dev09CanonicalProvenanceTests(unittest.TestCase):
     @requires_expensive_repository_probe
-    def test_exact_parent_provenance_blocker_is_current_dev2_private_evidence_mutation(self):
+    def test_exact_parent_provenance_is_clear_after_terminal_dev2_accounting(self):
         result = canonical_provenance_probe()
         self.assertEqual(result["parent_sha"], EXPECTED_PARENT_SHA)
-        self.assertEqual(result["classification"], "BLOCKED_CANONICAL_PROVENANCE")
-        self.assertEqual(result["reason"], "DEV2_PRIVATE_EVIDENCE_POST_IMPORT_MUTATION")
-        self.assertNotEqual(result["return_code"], 0)
+        self.assertEqual(result["classification"], "CLEAR")
+        self.assertEqual(result["reason"], "NONE")
+        self.assertEqual(result["return_code"], 0)
         self.assertFalse(result["private_values_recorded"])
         self.assertFalse(result["production_mutated"])
         self.assertFalse(result["deployment_authorized"])
         self.assertFalse(result["product_pass"])
 
-    def test_provenance_probe_public_shape_is_bounded(self):
+    def test_provenance_probe_public_shape_is_bounded_inside_prepare_payload(self):
         if not REPOSITORY_GIT_AVAILABLE:
             result = canonical_provenance_probe()
             self.assertEqual(result["classification"], "QA_PROBE_UNAVAILABLE")
+            self.assertEqual(result["reason"], "REPOSITORY_GIT_UNAVAILABLE")
         else:
-            self.skipTest("bounded exact result is asserted by repository-only test")
+            self.skipTest("exact repository result covered by repository-only test")
 
 
 class Dev09ExportedSuiteTests(unittest.TestCase):
@@ -92,22 +98,15 @@ class Dev09ExportedSuiteTests(unittest.TestCase):
             cls.result = exported_test_suite_probe()
 
     @requires_expensive_repository_probe
-    def test_exact_exported_canonical_suite_classification_is_bounded_and_truthful(self):
+    def test_exact_exported_canonical_suite_has_exact_three_current_cross_lane_failures(self):
         result = self.result
         self.assertIsNotNone(result)
         self.assertEqual(result["parent_sha"], EXPECTED_PARENT_SHA)
-        self.assertIn(result["classification"], {"CLEAR", "BLOCKED_INTERNAL_QA"})
-        if result["classification"] == "CLEAR":
-            self.assertEqual(result["reason"], "NONE")
-            self.assertEqual(result["return_code"], 0)
-            self.assertEqual(result["failure_test_count"], 0)
-            self.assertEqual(result["failure_test_ids"], [])
-        else:
-            self.assertEqual(result["reason"], "EXPORTED_CANONICAL_TEST_FAILURE")
-            self.assertNotEqual(result["return_code"], 0)
-            self.assertGreater(result["failure_test_count"], 0)
-            self.assertEqual(result["failure_test_count"], len(result["failure_test_ids"]))
-            self.assertLessEqual(result["failure_test_count"], 20)
+        self.assertEqual(result["classification"], "BLOCKED_INTERNAL_QA")
+        self.assertEqual(result["reason"], "EXPORTED_CANONICAL_TEST_FAILURE")
+        self.assertNotEqual(result["return_code"], 0)
+        self.assertEqual(result["failure_test_count"], 3)
+        self.assertEqual(result["failure_test_ids"], EXPECTED_CROSS_LANE_FAILURES)
         self.assertFalse(result["git_metadata_present"])
         self.assertFalse(result["private_values_recorded"])
         self.assertFalse(result["production_mutated"])

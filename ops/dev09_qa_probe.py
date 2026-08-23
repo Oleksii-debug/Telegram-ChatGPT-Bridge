@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""DEV09 independent QA probes for the exact canonical parent.
+"""DEV09 exact-parent independent QA probes.
 
 QA-only. No network, production mutation, deployment, Passenger restart,
 Telegram authorization, or live Telegram read/write. Public outputs are bounded
@@ -28,11 +28,10 @@ from ops.candidate_contracts import (
 
 ROOT = Path(__file__).resolve().parents[1]
 MANIFEST = ROOT / "integration" / "dev09_qa_v1.json"
-EXPECTED_PARENT_SHA = "c609adfc9a1116aae635a0b14d632a5e59b6c2af"
+EXPECTED_PARENT_SHA = "cb058b74fcb9fc8afdff52a294b94b54a1c36b71"
 MAX_FAILURE_IDS = 20
 _TEST_ID_RE = re.compile(r"\(([A-Za-z0-9_.]+)\) \.\.\. (?:ERROR|FAIL)$")
 _ERROR_HEADER_RE = re.compile(r"^(?:ERROR|FAIL): ([A-Za-z0-9_.]+)$")
-_EXPECTED_PROVENANCE_MARKER = "unexpected post-import mutation: DEV2:ops/private_evidence.py"
 
 
 def _load_manifest(path: Path = MANIFEST) -> dict[str, Any]:
@@ -151,10 +150,15 @@ def exported_test_suite_probe(root: Path = ROOT, sha: str = EXPECTED_PARENT_SHA)
 
 @functools.lru_cache(maxsize=4)
 def canonical_provenance_probe(root: Path = ROOT, sha: str = EXPECTED_PARENT_SHA) -> dict[str, Any]:
-    """Run the canonical provenance verifier against the exact parent in an isolated worktree."""
+    """Run canonical provenance verifier against the exact parent in an isolated worktree."""
     root = root.resolve(strict=True)
     if not (root / ".git").exists():
-        return {**_safe_probe_base(), "classification": "QA_PROBE_UNAVAILABLE", "reason": "REPOSITORY_GIT_UNAVAILABLE", "return_code": -1}
+        return {
+            **_safe_probe_base(),
+            "classification": "QA_PROBE_UNAVAILABLE",
+            "reason": "REPOSITORY_GIT_UNAVAILABLE",
+            "return_code": -1,
+        }
     with tempfile.TemporaryDirectory(prefix="dev09-provenance-") as tmp:
         worktree = Path(tmp) / "canonical"
         try:
@@ -170,14 +174,16 @@ def canonical_provenance_probe(root: Path = ROOT, sha: str = EXPECTED_PARENT_SHA
                 cwd=worktree, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                 text=True, encoding="utf-8", errors="replace", timeout=60, check=False,
             )
-            combined = completed.stdout + "\n" + completed.stderr
             if completed.returncode == 0:
                 classification, reason = "CLEAR", "NONE"
-            elif _EXPECTED_PROVENANCE_MARKER in combined:
-                classification, reason = "BLOCKED_CANONICAL_PROVENANCE", "DEV2_PRIVATE_EVIDENCE_POST_IMPORT_MUTATION"
             else:
-                classification, reason = "BLOCKED_CANONICAL_PROVENANCE", "OTHER_PROVENANCE_FAILURE"
-            return {**_safe_probe_base(), "classification": classification, "reason": reason, "return_code": int(completed.returncode)}
+                classification, reason = "BLOCKED_CANONICAL_PROVENANCE", "PROVENANCE_FAILURE"
+            return {
+                **_safe_probe_base(),
+                "classification": classification,
+                "reason": reason,
+                "return_code": int(completed.returncode),
+            }
         finally:
             subprocess.run(
                 ["git", "worktree", "remove", "--force", str(worktree)],
@@ -198,7 +204,10 @@ def candidate_truth_snapshot() -> dict[str, Any]:
         "product_pass_count": sum(1 for row in coverage if row["product_pass"] is True),
         "route_count": len(inventory),
         "action_operation_count": sum(1 for row in inventory if row["action_operation_id"] is not None),
-        "private_surface_count": sum(1 for row in inventory if any(term in row["path"].casefold() for term in ("setup", "login", "session", "2fa"))),
+        "private_surface_count": sum(
+            1 for row in inventory
+            if any(term in row["path"].casefold() for term in ("setup", "login", "session", "2fa"))
+        ),
         "k5_evidence_class": k5["evidence_class"],
         "k5_explicit_write_approval_required": k5["explicit_write_approval_required"],
         "product_pass": False,
