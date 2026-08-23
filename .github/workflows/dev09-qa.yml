@@ -25,8 +25,13 @@ jobs:
       - name: Validate exact canonical parent and QA-only path boundary
         env:
           EXPECTED_PARENT: c609adfc9a1116aae635a0b14d632a5e59b6c2af
+          ACTUAL_PR_BASE: ${{ github.event.pull_request.base.sha || '' }}
         run: |
           set -eu
+          if [ "${GITHUB_EVENT_NAME}" = "pull_request" ]; then
+            test -n "$ACTUAL_PR_BASE"
+            test "$ACTUAL_PR_BASE" = "$EXPECTED_PARENT"
+          fi
           test "$(git merge-base "$EXPECTED_PARENT" HEAD)" = "$EXPECTED_PARENT"
           FIRST_DEV09_COMMIT="$(git rev-list --reverse "$EXPECTED_PARENT"..HEAD | head -n 1)"
           test -n "$FIRST_DEV09_COMMIT"
