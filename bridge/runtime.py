@@ -212,6 +212,11 @@ class _SQLiteFixedWindowStore:
                 "window_start INTEGER NOT NULL, count INTEGER NOT NULL, "
                 "PRIMARY KEY(namespace, actor_hash, operation_hash))"
             )
+            connection.execute(
+                "CREATE TABLE IF NOT EXISTS fixed_window_clock ("
+                "singleton INTEGER PRIMARY KEY CHECK(singleton=1), "
+                "high_water INTEGER NOT NULL CHECK(high_water>=0))"
+            )
         except sqlite3.Error as exc:
             raise RuntimeBootstrapError("rate_limit_database_unavailable") from exc
         finally:
@@ -241,8 +246,27 @@ class _SQLiteFixedWindowStore:
         actor_hash = self._digest(actor)
         operation_hash = self._digest(operation)
         connection = self._connect()
+        transaction_open = False
         try:
             connection.execute("BEGIN IMMEDIATE")
+            transaction_open = True
+            clock_row = connection.execute(
+                "SELECT high_water FROM fixed_window_clock WHERE singleton=1"
+            ).fetchone()
+            if clock_row is not None and now < int(clock_row[0]):
+                connection.execute("ROLLBACK")
+                transaction_open = False
+                raise RuntimeBootstrapError("rate_limit_clock_moved_backward")
+            if clock_row is None:
+                connection.execute(
+                    "INSERT INTO fixed_window_clock(singleton,high_water) VALUES(1,?)",
+                    (now,),
+                )
+            elif now > int(clock_row[0]):
+                connection.execute(
+                    "UPDATE fixed_window_clock SET high_water=? WHERE singleton=1",
+                    (now,),
+                )
             connection.execute(
                 "DELETE FROM fixed_window_quota WHERE window_start < ?",
                 (window_start - (2 * window_seconds),),
@@ -255,6 +279,7 @@ class _SQLiteFixedWindowStore:
             count = int(row[1]) if row is not None and int(row[0]) == window_start else 0
             if count >= limit:
                 connection.execute("COMMIT")
+                transaction_open = False
                 return False, 0, retry_after
             count += 1
             connection.execute(
@@ -264,12 +289,21 @@ class _SQLiteFixedWindowStore:
                 (namespace, actor_hash, operation_hash, window_start, count),
             )
             connection.execute("COMMIT")
+            transaction_open = False
             return True, limit - count, 0
+        except RuntimeBootstrapError:
+            if transaction_open:
+                try:
+                    connection.execute("ROLLBACK")
+                except sqlite3.Error:
+                    pass
+            raise
         except sqlite3.Error as exc:
-            try:
-                connection.execute("ROLLBACK")
-            except sqlite3.Error:
-                pass
+            if transaction_open:
+                try:
+                    connection.execute("ROLLBACK")
+                except sqlite3.Error:
+                    pass
             raise RuntimeBootstrapError("rate_limit_database_unavailable") from exc
         finally:
             connection.close()
