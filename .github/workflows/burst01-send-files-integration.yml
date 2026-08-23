@@ -1,0 +1,90 @@
+name: BURST01 SEND_FILES Integration
+
+on:
+  pull_request:
+    paths:
+      - 'bridge/file_access.py'
+      - 'bridge/phase_aware_write_app.py'
+      - 'bridge/send_files_snapshot_factory.py'
+      - 'ops/phase_aware_write_adapter.py'
+      - 'ops/secure_write_store.py'
+      - 'ops/structured_safe_write.py'
+      - 'tests/test_burst01_send_files_integration.py'
+      - 'tests/test_burst01_send_files_cleanup.py'
+      - 'tests/test_dev04_upload_handles.py'
+      - 'tests/test_dev05_phase_aware_write.py'
+      - 'tests/test_dev05_structured_safe_errors.py'
+      - 'tests/test_dev05_snapshot_transport.py'
+      - 'tests/test_dev05_snapshot_factory_guard.py'
+      - 'tests/test_dev05_safe_exception_phase_guard.py'
+      - 'tests/test_dev05_effect_boundary_crash.py'
+      - '.github/workflows/burst01-send-files-integration.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  send-files-integration:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Checkout full history
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Set up Python 3.11
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: '3.11'
+          check-latest: false
+      - name: Compile selected cross-lane surface
+        run: >-
+          python -m py_compile
+          bridge/file_access.py
+          bridge/phase_aware_write_app.py
+          bridge/send_files_snapshot_factory.py
+          ops/phase_aware_write_adapter.py
+          ops/secure_write_store.py
+          ops/structured_safe_write.py
+          tests/test_burst01_send_files_integration.py
+          tests/test_burst01_send_files_cleanup.py
+          tests/test_dev04_upload_handles.py
+          tests/test_dev05_phase_aware_write.py
+          tests/test_dev05_structured_safe_errors.py
+          tests/test_dev05_snapshot_transport.py
+          tests/test_dev05_snapshot_factory_guard.py
+          tests/test_dev05_safe_exception_phase_guard.py
+          tests/test_dev05_effect_boundary_crash.py
+      - name: Run cross-lane and source regressions
+        run: |
+          umask 022
+          python -m unittest \
+            tests.test_burst01_send_files_integration \
+            tests.test_burst01_send_files_cleanup \
+            tests.test_dev04_upload_handles \
+            tests.test_dev05_phase_aware_write \
+            tests.test_dev05_structured_safe_errors \
+            tests.test_dev05_snapshot_transport \
+            tests.test_dev05_snapshot_factory_guard \
+            tests.test_dev05_safe_exception_phase_guard \
+            tests.test_dev05_effect_boundary_crash \
+            tests.test_dev4_write_core \
+            tests.test_dev4_endpoint_policy \
+            tests.test_dev_a_integration -v
+      - name: Validate canonical OpenAPI
+        run: python tools/build_action_openapi.py --validate-only
+      - name: Current-tree secret scan
+        if: always()
+        run: python tools/secret_scan.py --mode current
+      - name: Full-history secret scan
+        if: always()
+        run: python tools/secret_scan.py --mode history
+      - name: Verify non-deploy boundary
+        if: always()
+        run: |
+          test -f RECOVERY_BASELINE.md
+          grep -q 'DO NOT MERGE / DO NOT DEPLOY' RECOVERY_BASELINE.md
+          test ! -e .cpanel.yml
+          test ! -e ops/ENABLE_HOSTIQ_AUTO_DEPLOY
