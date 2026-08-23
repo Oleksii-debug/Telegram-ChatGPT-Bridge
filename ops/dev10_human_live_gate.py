@@ -1,13 +1,12 @@
 # -*- coding: utf-8 -*-
 """DEV10 binding between source-green evidence and human/live accessibility evidence.
 
-This module is credential-free and side-effect-free.  It exists to prevent a
-source/PR result, a GitHub pull-request merge ref, or a stale human NVDA result
-from being mistaken for evidence about the release that is actually deployed
-and running.
+This module is credential-free and side-effect-free. It prevents a source/PR
+result, a GitHub pull-request merge ref, or stale human NVDA evidence from being
+mistaken for evidence about the release actually deployed and running.
 
 It never authorizes deployment, Telegram login, a ChatGPT Action live call, or
-Telegram writes.  Human NVDA PASS remains an explicit human result bound to an
+Telegram writes. Human NVDA PASS remains an explicit human result bound to an
 exact deployed SHA and an exact setup-surface hash.
 """
 from __future__ import annotations
@@ -25,6 +24,19 @@ SOURCE_IDENTITY_KINDS = frozenset({"EXACT_BRANCH_HEAD_SHA", "EXACT_RELEASE_SHA"}
 FORBIDDEN_IDENTITY_KINDS = frozenset({"PR_MERGE_REF", "WORKTREE_HEAD", "SHORT_SHA", "PR_NUMBER"})
 HUMAN_CRITERIA = frozenset({"C1", "I1", "I4", "I6"})
 HUMAN_STATUSES = frozenset({"PASS", "FAIL", "BLOCKED"})
+_RECEIPT_KEYS = frozenset({
+    "criterion",
+    "deployed_sha",
+    "setup_surface_sha256",
+    "status",
+    "step_count",
+    "finding_count",
+    "keyboard_only_verified",
+    "spoken_name_role_state_verified",
+    "focus_order_verified",
+    "status_announcement_verified",
+    "no_private_content_recorded",
+})
 
 
 class HumanLiveGateError(ValueError):
@@ -97,9 +109,9 @@ def evaluate_human_live_readiness(
     private_setup_surface_ready: bool,
     telegram_auth_state: str,
 ) -> HumanLiveReadiness:
-    """Evaluate whether a human NVDA run may be *requested*, never whether it passed.
+    """Evaluate whether a human NVDA run may be requested, never whether it passed.
 
-    Source-green evidence is necessary but insufficient.  Human testing becomes
+    Source-green evidence is necessary but insufficient. Human testing becomes
     ready only after exact release identity, audited live reconciliation,
     Passenger application-process proof, running-SHA proof and a private setup
     surface are all present for the same release.
@@ -124,7 +136,14 @@ def evaluate_human_live_readiness(
 
     exact = source_sha == deployed_sha
     prelive_ready = source_ci_green and nonlive_prepare_verified and independent_auditor_release_gate
-    live_ready = prelive_ready and exact and live_manifest_reconciled and passenger_application_process_verified and running_sha_verified and private_setup_surface_ready
+    live_ready = (
+        prelive_ready
+        and exact
+        and live_manifest_reconciled
+        and passenger_application_process_verified
+        and running_sha_verified
+        and private_setup_surface_ready
+    )
 
     if not prelive_ready:
         state = "BLOCKED_PRELIVE_GATE"
@@ -150,34 +169,8 @@ def evaluate_human_live_readiness(
     )
 
 
-_RECEIPT_KEYS = frozenset({
-    "criterion",
-    "deployed_sha",
-    "setup_surface_sha256",
-    "status",
-    "step_count",
-    "finding_count",
-    "keyboard_only_verified",
-    "spoken_name_role_state_verified",
-    "focus_order_verified",
-    "status_announcement_verified",
-    "no_private_content_recorded",
-})
-
-
-def validate_deployed_human_receipt(
-    payload: Mapping[str, Any],
-    *,
-    expected_deployed_sha: str,
-    expected_setup_surface_sha256: str,
-) -> dict[str, Any]:
-    """Validate a privacy-safe human result against the *current deployed surface*.
-
-    No transcripts, control labels, Telegram identifiers, messages, filenames,
-    setup paths or credential values are accepted by the schema.
-    """
-    expected_deployed_sha = _sha40(expected_deployed_sha, "expected_deployed_sha")
-    expected_setup_surface_sha256 = _sha256(expected_setup_surface_sha256, "expected_setup_surface_sha256")
+def _validate_receipt_content(payload: Mapping[str, Any]) -> dict[str, Any]:
+    """Validate receipt schema/content without deciding whether its identity is current."""
     if not isinstance(payload, Mapping) or set(payload) != _RECEIPT_KEYS:
         raise HumanLiveGateError("human receipt schema mismatch")
 
@@ -186,14 +179,10 @@ def validate_deployed_human_receipt(
         raise HumanLiveGateError("criterion is not human-live accessibility evidence")
     deployed_sha = _sha40(payload.get("deployed_sha"), "deployed_sha")
     surface_hash = _sha256(payload.get("setup_surface_sha256"), "setup_surface_sha256")
-    if deployed_sha != expected_deployed_sha:
-        raise HumanLiveGateError("human receipt is stale for deployed SHA")
-    if surface_hash != expected_setup_surface_sha256:
-        raise HumanLiveGateError("human receipt is stale for setup surface")
-
     status = payload.get("status")
     if status not in HUMAN_STATUSES:
         raise HumanLiveGateError("invalid human receipt status")
+
     for key in (
         "keyboard_only_verified",
         "spoken_name_role_state_verified",
@@ -219,7 +208,31 @@ def validate_deployed_human_receipt(
         if any(not payload[key] for key in required):
             raise HumanLiveGateError("human PASS missing criterion-required verification")
 
-    return {key: payload[key] for key in sorted(_RECEIPT_KEYS)}
+    normalized = {key: payload[key] for key in sorted(_RECEIPT_KEYS)}
+    normalized["deployed_sha"] = deployed_sha
+    normalized["setup_surface_sha256"] = surface_hash
+    return normalized
+
+
+def validate_deployed_human_receipt(
+    payload: Mapping[str, Any],
+    *,
+    expected_deployed_sha: str,
+    expected_setup_surface_sha256: str,
+) -> dict[str, Any]:
+    """Validate a privacy-safe human result against the current deployed surface.
+
+    No transcripts, control labels, Telegram identifiers, messages, filenames,
+    setup paths or credential values are accepted by the schema.
+    """
+    expected_deployed_sha = _sha40(expected_deployed_sha, "expected_deployed_sha")
+    expected_setup_surface_sha256 = _sha256(expected_setup_surface_sha256, "expected_setup_surface_sha256")
+    normalized = _validate_receipt_content(payload)
+    if normalized["deployed_sha"] != expected_deployed_sha:
+        raise HumanLiveGateError("human receipt is stale for deployed SHA")
+    if normalized["setup_surface_sha256"] != expected_setup_surface_sha256:
+        raise HumanLiveGateError("human receipt is stale for setup surface")
+    return normalized
 
 
 def assess_human_receipt_currentness(
@@ -228,20 +241,18 @@ def assess_human_receipt_currentness(
     current_deployed_sha: str,
     current_setup_surface_sha256: str,
 ) -> str:
-    """Classify a structurally valid receipt as CURRENT or explicitly STALE.
+    """Return CURRENT only for semantically valid evidence on the current surface.
 
-    This helper is for deciding whether a previous result may be reused.  Any
-    deployment or setup-surface change invalidates the old human result.
+    A malformed or false-PASS receipt fails validation rather than being labelled
+    CURRENT. Any deployment or setup-surface identity change makes a previously
+    valid receipt explicitly stale.
     """
     current_deployed_sha = _sha40(current_deployed_sha, "current_deployed_sha")
     current_setup_surface_sha256 = _sha256(current_setup_surface_sha256, "current_setup_surface_sha256")
-    if not isinstance(payload, Mapping) or set(payload) != _RECEIPT_KEYS:
-        raise HumanLiveGateError("human receipt schema mismatch")
-    receipt_sha = _sha40(payload.get("deployed_sha"), "deployed_sha")
-    receipt_surface = _sha256(payload.get("setup_surface_sha256"), "setup_surface_sha256")
-    if receipt_sha != current_deployed_sha:
+    normalized = _validate_receipt_content(payload)
+    if normalized["deployed_sha"] != current_deployed_sha:
         return "STALE_DEPLOYED_SHA"
-    if receipt_surface != current_setup_surface_sha256:
+    if normalized["setup_surface_sha256"] != current_setup_surface_sha256:
         return "STALE_SETUP_SURFACE"
     return "CURRENT"
 
@@ -261,7 +272,7 @@ def deployment_change_invalidates_human_evidence(
 
 
 def current_source_green_projection(*, source_sha: str, recovery_guard_success: bool, nonlive_prepare_verified: bool) -> dict[str, Any]:
-    """Public source-only projection that is deliberately incapable of human/live PASS."""
+    """Public source-only projection deliberately incapable of human/live PASS."""
     source_sha = _sha40(source_sha, "source_sha")
     _bool(recovery_guard_success, "recovery_guard_success")
     _bool(nonlive_prepare_verified, "nonlive_prepare_verified")
