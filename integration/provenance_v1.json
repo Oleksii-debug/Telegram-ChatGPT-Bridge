@@ -65,7 +65,8 @@
         "tests/test_read_app.py", "tests/test_storage_downloads.py", "tests/test_validation_security.py"
       ],
       "dev_a_overrides": [
-        "bridge/__init__.py", "bridge/app.py", "bridge/archive.py", "bridge/downloads.py", "bridge/storage.py"
+        "bridge/__init__.py", "bridge/app.py", "bridge/archive.py", "bridge/backend.py", "bridge/downloads.py",
+        "bridge/models.py", "bridge/storage.py", "bridge/validation.py"
       ]
     },
     "DEV4": {
@@ -136,17 +137,40 @@
     "candidate_truth_tests": "70985119a21c1951078a8f1b8031ceb3baa3c00b",
     "candidate_truth_ci_gate": "545e963f7ec89ab534fcb8b1dfafdedb9a8d504b",
     "dev04_media_storage_sync": "301817d7e2c1a2fa55435d11ce5c6edc0cef5d71",
-    "dev08_deployment_recovery_oracle_sync": "5e35599cca1162bad9501044dfb6a79fa358e182"
+    "dev08_deployment_recovery_oracle_sync": "5e35599cca1162bad9501044dfb6a79fa358e182",
+    "dev03_read_hardening_sync": "c0a2b443e811eee8460af6c688f30ad3bbdf5f4d"
   },
   "dev_a_paths": [
     ".github/workflows/ci.yml", "bridge/__init__.py", "bridge/file_access.py", "bridge/filenames.py", "bridge/integrated_app.py",
-    "docs/DEV04_MEDIA_STORAGE.md", "docs/DEV08_DEPLOYMENT_RECOVERY_R3.md", "docs/DEV_A_INTEGRATED_RELEASE_CANDIDATE.md", "docs/DEV_A_PROVENANCE_LEDGER.md",
+    "docs/DEV03_SWARM_READ_HARDENING.md", "docs/DEV04_MEDIA_STORAGE.md", "docs/DEV08_DEPLOYMENT_RECOVERY_R3.md",
+    "docs/DEV_A_INTEGRATED_RELEASE_CANDIDATE.md", "docs/DEV_A_PROVENANCE_LEDGER.md",
     "integration/provenance_v1.json", "ops/candidate_contracts.py", "ops/dev08_deploy_recovery.py", "ops/integration_interfaces.py",
-    "tests/test_dev01_dev04_peer_provenance.py", "tests/test_dev01_dev08_peer_provenance.py", "tests/test_dev04_media_storage.py", "tests/test_dev04_migration_concurrency.py",
-    "tests/test_dev04_private_serving.py", "tests/test_dev_a_candidate_contracts.py", "tests/test_dev_a_integration.py",
-    "tests/test_dev_a_provenance.py", "tools/verify_integration_provenance.py"
+    "tests/test_dev01_dev03_peer_provenance.py", "tests/test_dev01_dev04_peer_provenance.py", "tests/test_dev01_dev08_peer_provenance.py",
+    "tests/test_dev03_history_offset.py", "tests/test_dev03_swarm_read.py", "tests/test_dev04_media_storage.py",
+    "tests/test_dev04_migration_concurrency.py", "tests/test_dev04_private_serving.py", "tests/test_dev_a_candidate_contracts.py",
+    "tests/test_dev_a_integration.py", "tests/test_dev_a_provenance.py", "tools/verify_integration_provenance.py"
   ],
   "swarm_integrations": {
+    "DEV03_READ_HARDENING": {
+      "pr": 36,
+      "source_sha": "5c5bd6cea20ac8d977374f1068cb8aec72df1047",
+      "merge_commit": "c0a2b443e811eee8460af6c688f30ad3bbdf5f4d",
+      "first_parent": "2ed817a5e6f9e765757aae1fd91dbe7b30a9190b",
+      "exact_blob_paths": [
+        "bridge/backend.py",
+        "bridge/models.py",
+        "bridge/validation.py",
+        "docs/DEV03_SWARM_READ_HARDENING.md",
+        "tests/test_dev03_history_offset.py",
+        "tests/test_dev03_swarm_read.py"
+      ],
+      "excluded_specialist_paths": [".github/workflows/dev03-read.yml"],
+      "auditor_findings": ["A01-08", "A01-09"],
+      "source_ci_run_id": 32642004555,
+      "source_ci_job_id": 97200427195,
+      "production_mutated": false,
+      "deployment_authorized": false
+    },
     "DEV04_MEDIA_STORAGE": {
       "pr": 37,
       "source_sha": "c10ca6aa40755a88c98e2c200001bc05ca0bcf98",
