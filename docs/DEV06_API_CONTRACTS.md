@@ -36,6 +36,8 @@ Preview operations are non-consequential and perform no Telegram write. Commit o
 
 The generated schema does not infer approval from a prior preview, draft, or earlier conversation turn.
 
+The preview response intentionally exposes the opaque `preview_token` to the Action client because the matching explicit commit must send that exact value back. The token is ephemeral/single-use and must not be logged, but it is **not** declared `writeOnly` or `readOnly`: either directionality marker would misdescribe the actual preview→commit protocol.
+
 ## Request contracts
 
 DEV06 deliberately reuses the mature feature-lane request schemas from the pre-existing Action registry, then validates them through the authoritative route registry. This preserves current bounds for dialog/history/search, media refs, download lists, ZIP lists, write text, message IDs and SEND_FILES opaque file references without duplicating feature business logic.
@@ -44,11 +46,11 @@ All request objects remain `additionalProperties: false`.
 
 ## Runtime response parity
 
-The old generic response declaration did not describe the actual WSGI envelope closely enough. DEV06 now generates operation-specific success schemas matching the current source contract:
+The old generic response declaration did not describe the actual WSGI envelope closely enough. DEV06 generates operation-specific success schemas matching the current source contract:
 
 `ok=true`, `request_id`, and operation-specific `data`.
 
-Read responses cover dialog/message pages, media metadata, private file metadata, download/resume state and archive results. Write preview responses include the preview token/id, action, request fingerprint, expiry and the bounded preview. Write commit responses expose committed state, idempotent replay state, request fingerprint and bounded receipt metadata rather than private request content.
+Read responses cover dialog/message pages, media metadata, private file metadata, download/resume state and archive results. Write preview responses include the preview token/id, action, request fingerprint, expiry and bounded preview. Write commit responses expose committed state, idempotent replay state, request fingerprint and bounded receipt metadata rather than private request content.
 
 Errors match `BridgeError.public_payload()`:
 
@@ -56,9 +58,13 @@ Errors match `BridgeError.public_payload()`:
 
 The generated contract declares the source-visible controlled status family 400/404/409/413/415/429/500/502/503/504 for every Action operation. HTTP 429 also declares a bounded integer `Retry-After` response header, matching the WSGI error path.
 
+`ops/dev06_runtime_conformance.py` adds a second independent boundary: it validates captured source-only WSGI JSON responses against the generated operation response schema. It also checks JSON content type and requires HTTP `Retry-After` on 429 to match the structured body value. The validator implements only the bounded JSON-Schema subset emitted by DEV06 and fails closed on malformed schema structures; it is not a general JSON Schema replacement.
+
+No runtime-conformance test contacts Telegram or production. The write-path tests use the repository's deterministic fake Telegram client and verify zero effect at preview plus exactly one fake effect across commit+idempotent replay.
+
 ## Drift tests
 
-`tests/test_dev06_api_contracts.py` includes positive and adversarial checks for:
+`tests/test_dev06_api_contracts.py` covers registry/OpenAPI positive and adversarial drift, including:
 
 - exact 19 runtime routes / 17 Action operations;
 - only-health-public policy;
@@ -76,11 +82,19 @@ The generated contract declares the source-visible controlled status family 400/
 - missing/extra operation drift;
 - operationId drift and duplication;
 - bearer removal;
-- x-consequential tampering;
+- consequential-marker tampering;
 - response/status/error/header drift;
 - private setup surface injection;
 - secret-field injection;
 - unsafe server URL/path injection.
+
+`tests/test_dev06_runtime_conformance.py` additionally exercises actual source WSGI responses for protected read success, hidden unauthorized 404, rate-limited 429, 415 content-type failure, SEND preview, explicit commit and exact idempotent replay. Negative cases prove rejection of missing/extra response fields, wrong content type, missing/mismatched Retry-After, unknown operation IDs and undeclared statuses.
+
+## Cross-lane integration boundary
+
+DEV06 does not duplicate DEV03/DEV04/DEV05 business logic. Current request schemas are deliberately consumed from the canonical feature-layer registry, while route/auth/classification/response safety remains DEV06-authoritative. When DEV01 semantically integrates newer DEV03 read, DEV04 storage/media, DEV05 write-state or DEV08 reliability changes, DEV06 parity and runtime-response tests must be rerun against that exact canonical combination before Action release.
+
+Internal storage markers, private control/evidence state and setup/session material are not API surface merely because another lane implements them.
 
 ## Truth boundary
 
