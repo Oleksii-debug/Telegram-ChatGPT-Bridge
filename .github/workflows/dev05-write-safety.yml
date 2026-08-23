@@ -1,0 +1,78 @@
+name: DEV05 Write Safety
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  dev05-write-safety:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout full history
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Set up Python 3.11
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.11'
+      - name: Compile DEV05 write-safety slice
+        run: >-
+          python -m py_compile
+          ops/secure_write_store.py
+          ops/structured_safe_write.py
+          ops/phase_aware_write_adapter.py
+          bridge/phase_aware_write_app.py
+          ops/write_safety.py
+          ops/write_endpoint_policy.py
+          ops/telegram_write_adapter.py
+          tests/test_dev05_write_state_security.py
+          tests/test_dev05_phase_aware_write.py
+          tests/test_dev05_structured_safe_errors.py
+          tests/test_dev05_effect_boundary_crash.py
+          tests/test_dev05_error_code_privacy.py
+          tests/test_dev05_snapshot_transport.py
+          tests/test_dev05_snapshot_factory_guard.py
+          tests/test_dev05_safe_exception_phase_guard.py
+          tests/test_burst01_08_exactly_once.py
+          tests/test_dev4_write_core.py
+          tests/test_dev4_endpoint_policy.py
+          tests/test_dev_a_integration.py
+      - name: Run DEV05 adversarial persistent-state tests
+        run: |
+          umask 022
+          python -m unittest \
+            tests.test_dev05_write_state_security \
+            tests.test_dev05_phase_aware_write \
+            tests.test_dev05_structured_safe_errors \
+            tests.test_dev05_effect_boundary_crash \
+            tests.test_dev05_error_code_privacy \
+            tests.test_dev05_snapshot_transport \
+            tests.test_dev05_snapshot_factory_guard \
+            tests.test_dev05_safe_exception_phase_guard \
+            tests.test_burst01_08_exactly_once -v
+      - name: Re-run canonical write safety regressions
+        run: |
+          umask 022
+          python -m unittest \
+            tests.test_dev4_write_core \
+            tests.test_dev4_endpoint_policy \
+            tests.test_dev_a_integration -v
+      - name: Validate canonical OpenAPI write safety
+        run: python tools/build_action_openapi.py --validate-only
+      - name: Current-tree secret scan
+        if: always()
+        run: python tools/secret_scan.py --mode current
+      - name: Full-history secret scan
+        if: always()
+        run: python tools/secret_scan.py --mode history
+      - name: Verify specialist branch remains non-deploying
+        if: always()
+        run: |
+          test -f RECOVERY_BASELINE.md
+          grep -q 'DO NOT MERGE / DO NOT DEPLOY' RECOVERY_BASELINE.md
+          test ! -e .cpanel.yml
+          test ! -e ops/ENABLE_HOSTIQ_AUTO_DEPLOY
