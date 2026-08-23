@@ -3,8 +3,8 @@
 
 CLI collection is deliberately a *candidate context*: it can prove the actual
 interpreter used by the collector, but cannot by itself prove Passenger uses the
-same interpreter.  Only a call made from the application process may emit the
-strong application-context status.
+same interpreter. Strong serving-process evidence is finalized only by the
+privately armed Passenger request path.
 """
 from __future__ import annotations
 
@@ -12,7 +12,6 @@ import argparse
 import hashlib
 import importlib
 import importlib.metadata
-import json
 import os
 import platform
 import stat
@@ -20,15 +19,12 @@ import sys
 from pathlib import Path
 
 try:
-    from ops.release_guard import SafetyError, write_json_atomic
+    from ops.release_guard import SafetyError
 except ImportError:
     class SafetyError(RuntimeError):
         pass
-    def write_json_atomic(path: Path, payload: dict, mode: int = 0o600) -> None:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(payload, sort_keys=True, indent=2), encoding="utf-8")
-        os.chmod(path, mode)
 
+from ops.private_control import write_private_json_no_clobber
 from ops.private_evidence import canonical_json_sha256, validate_runtime_report
 
 APP_IMPORT_TARGET = "bridge.app.application"
@@ -86,6 +82,7 @@ def collect_runtime_evidence(
     *, app_root: Path, wsgi_file: Path,
     application_module: str = "bridge.app", application_name: str = "application",
     application_process: bool = False,
+    serving_request_verified: bool = False,
 ) -> dict:
     app_root = app_root.resolve(strict=True)
     wsgi_file = wsgi_file.resolve(strict=True)
@@ -111,17 +108,18 @@ def collect_runtime_evidence(
     prefix = Path(sys.prefix).resolve()
     base_prefix = Path(getattr(sys, "base_prefix", sys.prefix)).resolve()
     py311 = sys.version_info[:2] == (3, 11)
-    # Presence only; values are never read/serialized. This signal is advisory.
+    # Presence only; values are never read/serialized. This remains advisory and
+    # can never produce STRONG without a separately verified serving request.
     passenger_context_present = any(k in os.environ for k in ("PASSENGER_APP_ENV", "PASSENGER_SPAWN_WORK_DIR"))
     if not py311:
         compliance = "NONCOMPLIANT_NOT_PYTHON_3_11"
-    elif application_process and passenger_context_present and import_ok:
+    elif application_process and serving_request_verified and passenger_context_present and import_ok:
         compliance = "PYTHON_3_11_APPLICATION_CONTEXT_CONFIRMED"
     else:
         compliance = "PYTHON_3_11_CANDIDATE_CONTEXT"
 
     report = {
-        "schema_version": 2,
+        "schema_version": 3,
         "collector_context": "APPLICATION_PROCESS" if application_process else "PRIVATE_CLI_CANDIDATE",
         "python_version": platform.python_version()[:32],
         "python_major_minor": f"{sys.version_info.major}.{sys.version_info.minor}",
@@ -140,6 +138,7 @@ def collect_runtime_evidence(
         "application_import_ok": import_ok,
         "process_cwd_inside_app_root": _cwd_inside(app_root),
         "passenger_context_present": passenger_context_present,
+        "serving_request_verified": bool(serving_request_verified),
         "package_evidence": _package_evidence(),
         "environment_values_recorded": False,
         "request_data_recorded": False,
@@ -152,15 +151,17 @@ def collect_runtime_evidence(
 
 def system_shell_cannot_prove_passenger(report: dict) -> bool:
     validate_runtime_report(report)
-    return report["collector_context"] != "APPLICATION_PROCESS" or report["runtime_compliance"] != "PYTHON_3_11_APPLICATION_CONTEXT_CONFIRMED"
+    return (
+        report["collector_context"] != "APPLICATION_PROCESS"
+        or report["runtime_compliance"] != "PYTHON_3_11_APPLICATION_CONTEXT_CONFIRMED"
+        or report["serving_request_verified"] is not True
+    )
 
 
 def write_private_report(path: Path, evidence: dict) -> None:
     validate_runtime_report(evidence)
     path = path.expanduser()
-    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    os.chmod(path.parent, 0o700)
-    write_json_atomic(path, evidence, mode=0o600)
+    write_private_json_no_clobber(path.parent, path, evidence)
 
 
 def main(argv=None) -> int:
@@ -173,10 +174,11 @@ def main(argv=None) -> int:
         evidence = collect_runtime_evidence(
             app_root=Path(args.app_root), wsgi_file=Path(args.wsgi_file),
             application_process=False,
+            serving_request_verified=False,
         )
         write_private_report(Path(args.output), evidence)
-    except (SafetyError, OSError) as exc:
-        print(f"RUNTIME_EVIDENCE_BLOCKED: {type(exc).__name__}")
+    except (SafetyError, OSError):
+        print("RUNTIME_EVIDENCE_BLOCKED")
         return 2
     print(evidence["runtime_compliance"])
     # CLI evidence cannot by itself be Passenger proof; 0 only means collection succeeded.
