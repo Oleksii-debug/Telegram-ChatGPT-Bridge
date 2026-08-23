@@ -12,10 +12,12 @@ outcome remains AMBIGUOUS in the persistent write store.
 The optional ``upload_batch_factory`` is the cross-lane composition point for
 DEV04's descriptor-verified immutable upload snapshots. The factory receives the
 private file store and the exact commit-bound opaque identities. It must return a
-batch with ``files`` and ``close()``. When configured, DEV05 never reconstructs a
+batch with ``files`` and ``close()``. When configured, DEV05 requires every batch
+member to be a read-only BufferedIOBase-style snapshot and never reconstructs a
 filesystem path: the returned file-like objects stay alive through the mutating
-``send_file`` call and are closed in ``finally``. Factory/identity failures are
-pre-effect; adapter or receipt failures after the mutating boundary are never
+``send_file`` call and are closed in ``finally``. A buggy factory cannot silently
+downgrade the secure path by returning pathname strings. Factory/identity failures
+are pre-effect; adapter or receipt failures after the mutating boundary are never
 reclassified as safe.
 
 Without an injected snapshot factory the legacy pathname path remains available
@@ -34,6 +36,7 @@ activation by itself. DEV01 remains the canonical integration owner.
 """
 from __future__ import annotations
 
+import io
 from collections.abc import Mapping as MappingABC, Sequence
 from typing import Any, Callable, Mapping
 
@@ -78,7 +81,7 @@ class PhaseAwareUnifiedBridgeApplication(UnifiedBridgeApplication):
     def _open_snapshot_batch(
         self,
         payload: Mapping[str, Any],
-    ) -> tuple[Any, tuple[Any, ...]]:
+    ) -> tuple[Any, tuple[io.BufferedIOBase, ...]]:
         """Build/validate a media-owned upload batch entirely before Telegram."""
 
         factory = getattr(self, "_upload_batch_factory", None)
@@ -122,6 +125,8 @@ class PhaseAwareUnifiedBridgeApplication(UnifiedBridgeApplication):
             ):
                 raise ValueError("invalid snapshot batch surface")
             snapshot_files = tuple(files)
+            if not all(isinstance(item, io.BufferedIOBase) for item in snapshot_files):
+                raise ValueError("snapshot factory returned non-stream input")
         except Exception:
             self._close_pre_effect_batch(batch)
             raise SafeWriteMetadataFailure(
