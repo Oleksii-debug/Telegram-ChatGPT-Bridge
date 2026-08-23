@@ -8,10 +8,8 @@
     "bridge/runtime_wsgi.py",
     "docs/DEV_B_DEV_A_RUNTIME_SYNC.md",
     "docs/DEV_B_HOSTIQ_PRODUCTION_READINESS.md",
-    "docs/DEV_C_RELEASE_TO_LIVE_QA.md",
     "docs/HOSTIQ_ONE_TIME_SUPPORT_PACKAGE.md",
     "integration/release_to_live_v1.json",
-    "ops/devc_release_qa.py",
     "ops/hostiq_lifecycle.py",
     "ops/passenger_evidence_hook.py",
     "ops/private_control.py",
@@ -24,8 +22,6 @@
     "tests/test_dev2_lifecycle.py",
     "tests/test_devb_compile.py",
     "tests/test_devb_production_readiness.py",
-    "tests/test_devc_release_e2e.py",
-    "tests/test_devc_release_qa.py",
     "tests/test_passenger_evidence_hook.py",
     "tests/test_private_control.py",
     "tests/test_release_package.py",
@@ -34,6 +30,12 @@
     "tools/collect_server_manifest.py",
     "tools/validate_hostiq_support_return.py",
     "tools/verify_release_prepare.py"
+  ],
+  "dev_c_validation_paths": [
+    "docs/DEV_C_RELEASE_TO_LIVE_QA.md",
+    "ops/devc_release_qa.py",
+    "tests/test_devc_release_e2e.py",
+    "tests/test_devc_release_qa.py"
   ],
   "trace_commits": [
     "239574cccc27764082e1b18b72d49a0a073a7665",
