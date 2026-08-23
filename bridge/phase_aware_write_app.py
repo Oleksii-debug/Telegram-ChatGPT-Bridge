@@ -15,10 +15,15 @@ private file store and the exact commit-bound opaque identities. It must return 
 batch with ``files`` and ``close()``. When configured, DEV05 requires every batch
 member to be a read-only BufferedIOBase-style snapshot and never reconstructs a
 filesystem path: the returned file-like objects stay alive through the mutating
-``send_file`` call and are closed in ``finally``. A buggy factory cannot silently
+``send_file`` call and are closed after it. A buggy factory cannot silently
 downgrade the secure path by returning pathname strings. Factory/identity failures
-are pre-effect; adapter or receipt failures after the mutating boundary are never
-reclassified as safe.
+are pre-effect; adapter, receipt, or cleanup failures after a possible effect are
+never reclassified as safe.
+
+SEND_FILES preview additionally rejects conflicting duplicate opaque file refs
+before any preview is persisted. Exact duplicate identity triples retain the
+canonical dedupe behavior, while one ref cannot be bound to two different
+hash/size identities in the same approved payload.
 
 Without an injected snapshot factory the legacy pathname path remains available
 only for compatibility with the current canonical runtime. That fallback is NOT
@@ -66,6 +71,37 @@ class PhaseAwareUnifiedBridgeApplication(UnifiedBridgeApplication):
         self._upload_batch_factory = upload_batch_factory
 
     @staticmethod
+    def _preview_payload(spec: Any, body: dict[str, Any]) -> dict[str, Any]:
+        """Keep canonical preview shaping and reject conflicting file identities."""
+
+        payload = UnifiedBridgeApplication._preview_payload(spec, body)
+        if getattr(spec, "action", None) != "SEND_FILES":
+            return payload
+
+        raw_files = body.get("files")
+        if not isinstance(raw_files, list):
+            return payload
+
+        seen: dict[str, tuple[Any, Any]] = {}
+        for raw in raw_files:
+            # Canonical shaping already rejects non-mappings and unknown fields.
+            if not isinstance(raw, MappingABC):
+                continue
+            file_ref = raw.get("file_ref")
+            if not isinstance(file_ref, str):
+                continue
+            identity = (raw.get("sha256"), raw.get("size"))
+            previous = seen.get(file_ref)
+            if previous is not None and previous != identity:
+                raise BridgeError(
+                    "Invalid file reference",
+                    status=400,
+                    code="invalid_file_reference",
+                )
+            seen[file_ref] = identity
+        return payload
+
+    @staticmethod
     def _close_pre_effect_batch(batch: Any) -> None:
         """Best-effort cleanup when Telegram has provably not been invoked."""
 
@@ -77,6 +113,35 @@ class PhaseAwareUnifiedBridgeApplication(UnifiedBridgeApplication):
                 # Cleanup failure is not a Telegram effect. Keep the public
                 # failure stable/private and let process teardown reclaim FDs.
                 pass
+
+    @staticmethod
+    def _close_preserving_primary(batch: Any) -> None:
+        """Never let cleanup replace an already-classified adapter/receipt error."""
+
+        close = getattr(batch, "close", None)
+        if callable(close):
+            try:
+                close()
+            except BaseException:
+                # The primary exception already determines whether the external
+                # boundary was crossed. Cleanup must not overwrite that proof.
+                pass
+
+    @staticmethod
+    def _close_after_success(batch: Any) -> None:
+        """Close after a successful RPC/receipt without allowing a false SAFE type."""
+
+        close = getattr(batch, "close", None)
+        if not callable(close):
+            return
+        try:
+            close()
+        except Exception:
+            # A successful adapter/receipt means an external effect may already
+            # exist. Even SafeNoSideEffectFailure from buggy cleanup code cannot
+            # prove otherwise; convert it to an ordinary post-effect failure so
+            # the durable store records AMBIGUOUS/reconciliation-required.
+            raise RuntimeError("post_effect_upload_cleanup_failed") from None
 
     def _open_snapshot_batch(
         self,
@@ -164,14 +229,16 @@ class PhaseAwareUnifiedBridgeApplication(UnifiedBridgeApplication):
                 )
                 # Receipt validation is post-effect. Any exception here remains
                 # ordinary so the durable store records AMBIGUOUS.
-                return self._receipt_metadata(receipt, action)
-            finally:
-                # If close itself fails after a possible Telegram effect, allow
-                # that failure to propagate. The store will conservatively mark
-                # the outcome AMBIGUOUS rather than return a false success.
-                close = getattr(batch, "close", None)
-                if callable(close):
-                    close()
+                result = self._receipt_metadata(receipt, action)
+            except BaseException:
+                self._close_preserving_primary(batch)
+                raise
+
+            # Adapter + receipt succeeded, so any cleanup failure is post-effect.
+            # In particular a nominal SafeNoSideEffectFailure emitted by cleanup
+            # must not be allowed to turn this transaction into FAILED_SAFE.
+            self._close_after_success(batch)
+            return result
 
         # Legacy compatibility path. This preserves current canonical behavior
         # until DEV01 imports/configures DEV04's immutable upload snapshot seam.
