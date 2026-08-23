@@ -174,10 +174,9 @@ def _load_release_override() -> dict[str, Any]:
     if dev_c_exact != {
         "docs/DEV_C_RELEASE_TO_LIVE_QA.md",
         "ops/devc_release_qa.py",
-        "tests/test_devc_release_e2e.py",
     }:
         raise ProvenanceError("DEV_C QA exact path set mismatch")
-    if dev_c_adapted != {"tests/test_devc_release_qa.py"}:
+    if dev_c_adapted != {"tests/test_devc_release_e2e.py", "tests/test_devc_release_qa.py"}:
         raise ProvenanceError("DEV_C QA adapted path set mismatch")
     if dev_c_exact & dev_c_adapted or not (dev_c_exact | dev_c_adapted) <= set(paths):
         raise ProvenanceError("DEV_C QA path accounting invalid")
@@ -327,8 +326,9 @@ def verify_repository() -> dict[str, Any]:
     for path in dev_c_exact:
         if _blob("HEAD", path) != _blob(str(dev_c_sync["sha"]), path):
             raise ProvenanceError(f"unexpected DEV_C QA exact-path drift: {path}")
-    if _blob("HEAD", "tests/test_devc_release_qa.py") == _blob(str(dev_c_sync["sha"]), "tests/test_devc_release_qa.py"):
-        raise ProvenanceError("DEV_C adapted QA path unexpectedly reverted to stale source blob")
+    for path in dev_c_adapted:
+        if _blob("HEAD", path) == _blob(str(dev_c_sync["sha"]), path):
+            raise ProvenanceError(f"DEV_C adapted QA path unexpectedly reverted to stale source blob: {path}")
 
     for forbidden in ("tools/strict_history_secret_scan.py", "tests/test_strict_history_secret_scan.py"):
         if _path_exists("HEAD", forbidden):
@@ -372,6 +372,7 @@ def verify_repository() -> dict[str, Any]:
         "verified_predecessor_count": 7,
         "semantic_merge_count": 7,
         "dev3_override_count": len(_validate_override_subset(predecessors["DEV3"], "paths")),
+        "dev4_override_count": len(_validate_override_subset(predecessors["DEV4"], "paths")),
         "adapted_dev5_path_count": len(dev5_overrides),
         "dev_b_imported_path_count": len(dev_b_imported),
         "dev_b_adapted_path_count": len(dev_b_adapted),
