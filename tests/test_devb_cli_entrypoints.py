@@ -110,13 +110,15 @@ class DevBSupportCliTests(unittest.TestCase):
             )
             self.assertEqual(0, preflight_result.returncode, preflight_result.stderr)
 
+            command = [
+                sys.executable,
+                str(REPO_ROOT / "tools" / "arm_passenger_evidence.py"),
+                "--preflight", str(preflight),
+                "--challenge-sha256", H1,
+                "--control-root", str(control),
+            ]
             arm_result = subprocess.run(
-                [
-                    sys.executable,
-                    str(REPO_ROOT / "tools" / "arm_passenger_evidence.py"),
-                    "--preflight", str(preflight),
-                    "--control-root", str(control),
-                ],
+                command,
                 cwd=outside,
                 env=self._clean_env(),
                 capture_output=True,
@@ -133,15 +135,11 @@ class DevBSupportCliTests(unittest.TestCase):
             payload = json.loads(marker.read_text(encoding="ascii"))
             self.assertEqual(SHA, payload["candidate_sha"])
             self.assertRegex(payload["expected_wsgi_sha256"], r"^[0-9a-f]{64}$")
+            self.assertEqual(H1, payload["request_challenge_sha256"])
 
             # No-clobber semantics are part of the documented one-shot contract.
             repeated = subprocess.run(
-                [
-                    sys.executable,
-                    str(REPO_ROOT / "tools" / "arm_passenger_evidence.py"),
-                    "--preflight", str(preflight),
-                    "--control-root", str(control),
-                ],
+                command,
                 cwd=outside,
                 env=self._clean_env(),
                 capture_output=True,
