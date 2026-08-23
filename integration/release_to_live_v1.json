@@ -6,12 +6,14 @@
   "paths": [
     "bridge/runtime.py",
     "bridge/runtime_wsgi.py",
+    "docs/DEV02_CANONICAL_RUNTIME_SYNC.md",
     "docs/DEV_B_DEV_A_RUNTIME_SYNC.md",
     "docs/DEV_B_HOSTIQ_PRODUCTION_READINESS.md",
     "docs/DEV_C_RELEASE_TO_LIVE_QA.md",
     "docs/HOSTIQ_ONE_TIME_SUPPORT_PACKAGE.md",
     "integration/release_to_live_v1.json",
     "ops/candidate_runtime_preflight.py",
+    "ops/dev02_canonical_sync.py",
     "ops/devb_run_matrix.py",
     "ops/devc_release_qa.py",
     "ops/hostiq_lifecycle.py",
@@ -28,6 +30,8 @@
     "requirements.txt",
     "tests/test_arm_passenger_evidence.py",
     "tests/test_candidate_runtime_preflight.py",
+    "tests/test_dev01_dev02_peer_provenance.py",
+    "tests/test_dev02_canonical_sync.py",
     "tests/test_dev2_baseline_runtime.py",
     "tests/test_dev2_lifecycle.py",
     "tests/test_devb_cli_entrypoints.py",
@@ -49,6 +53,7 @@
     "tools/run_passenger_evidence_probe.py",
     "tools/validate_candidate_runtime_preflight.py",
     "tools/validate_hostiq_support_return.py",
+    "tools/verify_dev02_canonical_sync.py",
     "tools/verify_release_prepare.py"
   ],
   "trace_commits": [
@@ -74,7 +79,8 @@
     "2a6ae856640064f7ff4ba3f5f85230c72d7165e4",
     "df318aa089f754b7a14f624b7c27cca59758cbe8",
     "964261b55f5f8ca5b615f783f172e35a4da0abc1",
-    "c609adfc9a1116aae635a0b14d632a5e59b6c2af"
+    "c609adfc9a1116aae635a0b14d632a5e59b6c2af",
+    "a4fea8431b999e1bab7d95168ce0fc4d2a20305d"
   ],
   "runtime_packages": {
     "Telethon": "1.44.0",
@@ -180,6 +186,23 @@
     ],
     "strict_history_suppression_imported": false,
     "production_mutated": false
+  },
+  "dev02_canonical_revalidation_sync": {
+    "pr": 11,
+    "sha": "d821de179c2d06e2a9bb83565f7a637a2dbec290",
+    "merge_commit": "a4fea8431b999e1bab7d95168ce0fc4d2a20305d",
+    "first_parent": "999709f0ab2daee08fdb5c793419d1c45967238d",
+    "exact_blob_paths": [
+      "docs/DEV02_CANONICAL_RUNTIME_SYNC.md",
+      "ops/dev02_canonical_sync.py",
+      "tests/test_dev02_canonical_sync.py",
+      "tools/verify_dev02_canonical_sync.py"
+    ],
+    "adapted_paths": [
+      "tests/test_devb_compile.py"
+    ],
+    "production_mutated": false,
+    "promotion_authorized": false
   },
   "dev_c_qa_sync": {
     "pr": 16,
