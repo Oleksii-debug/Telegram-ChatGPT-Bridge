@@ -14,12 +14,19 @@ SHA = "a" * 40
 H1 = "1" * 64
 H2 = "2" * 64
 
+CANONICAL_WSGI = (
+    "from pathlib import Path\n"
+    "from bridge.app import application\n"
+    "from ops.passenger_evidence_hook import collect_if_armed\n"
+    "_here = Path(__file__).resolve()\n"
+    "collect_if_armed(app_root=_here.parent, wsgi_file=_here)\n"
+    "__all__ = ['application']\n"
+)
+
 
 class CandidateRuntimePreflightTests(unittest.TestCase):
     def _candidate(self, root: Path) -> None:
-        root.joinpath("passenger_wsgi.py").write_text(
-            "from bridge.app import application\n", encoding="utf-8"
-        )
+        root.joinpath("passenger_wsgi.py").write_text(CANONICAL_WSGI, encoding="utf-8")
         root.joinpath("requirements.txt").write_text(
             "Telethon==1.42.0\n", encoding="utf-8"
         )
@@ -49,6 +56,16 @@ class CandidateRuntimePreflightTests(unittest.TestCase):
             self.assertNotIn("packages", result)
             self.assertNotIn("root", result)
 
+    def test_optional_wsgi_docstring_is_allowed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); self._candidate(root)
+            root.joinpath("passenger_wsgi.py").write_text(
+                '"""bounded startup documentation"""\n' + CANONICAL_WSGI,
+                encoding="utf-8",
+            )
+            result = validate_candidate_release_envelope(root, candidate_sha=SHA)
+            self.assertTrue(result["startup_import_contract_ok"])
+
     def test_missing_wsgi_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp); self._candidate(root)
@@ -56,14 +73,51 @@ class CandidateRuntimePreflightTests(unittest.TestCase):
             with self.assertRaises(SafetyError):
                 validate_candidate_release_envelope(root, candidate_sha=SHA)
 
+    def test_old_call_free_wsgi_is_no_longer_the_reviewed_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); self._candidate(root)
+            root.joinpath("passenger_wsgi.py").write_text(
+                "from bridge.app import application\n", encoding="utf-8"
+            )
+            with self.assertRaises(SafetyError):
+                validate_candidate_release_envelope(root, candidate_sha=SHA)
+
     def test_wrong_wsgi_import_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp); self._candidate(root)
             root.joinpath("passenger_wsgi.py").write_text(
-                "from bridge.integrated_app import application\n", encoding="utf-8"
+                CANONICAL_WSGI.replace(
+                    "from bridge.app import application",
+                    "from bridge.integrated_app import application",
+                ),
+                encoding="utf-8",
             )
             with self.assertRaises(SafetyError):
                 validate_candidate_release_envelope(root, candidate_sha=SHA)
+
+    def test_wsgi_extra_top_level_side_effects_fail_closed(self) -> None:
+        variants = (
+            CANONICAL_WSGI + "print('unexpected')\n",
+            "import os\n" + CANONICAL_WSGI,
+            CANONICAL_WSGI.replace(
+                "_here = Path(__file__).resolve()",
+                "_here = Path(os.getenv('HOME', '.')).resolve()",
+            ),
+            CANONICAL_WSGI.replace(
+                "collect_if_armed(app_root=_here.parent, wsgi_file=_here)",
+                "collect_if_armed(wsgi_file=_here, app_root=_here.parent)",
+            ),
+            CANONICAL_WSGI.replace(
+                "__all__ = ['application']",
+                "__all__ = ['application', 'other']",
+            ),
+        )
+        for source in variants:
+            with self.subTest(source=source.splitlines()[-1]), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp); self._candidate(root)
+                root.joinpath("passenger_wsgi.py").write_text(source, encoding="utf-8")
+                with self.assertRaises(SafetyError):
+                    validate_candidate_release_envelope(root, candidate_sha=SHA)
 
     def test_requirements_without_lock_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -157,7 +211,7 @@ class CandidateRuntimePreflightTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp); self._candidate(root)
             target = root.joinpath("real_wsgi.py")
-            target.write_text("from bridge.app import application\n", encoding="utf-8")
+            target.write_text(CANONICAL_WSGI, encoding="utf-8")
             root.joinpath("passenger_wsgi.py").unlink()
             os.symlink(target, root.joinpath("passenger_wsgi.py"))
             with self.assertRaises(SafetyError):

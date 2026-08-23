@@ -28,6 +28,17 @@ class PrivateControlTests(unittest.TestCase):
             root = self.root(td); path = self.file(root, content="hello")
             self.assertEqual("hello", private_control.read_private_text(root, path))
 
+    def test_read_identity_can_bind_later_transition(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = self.root(td); path = self.file(root, content="hello")
+            text, identity = private_control.read_private_text_with_identity(root, path)
+            self.assertEqual("hello", text)
+            private_control.verify_private_file_identity(root, path, identity)
+            replacement = Path(td) / "replacement"; replacement.write_text("hello", encoding="utf-8"); os.chmod(replacement, 0o600)
+            path.unlink(); replacement.rename(path)
+            with self.assertRaises(SafetyError):
+                private_control.verify_private_file_identity(root, path, identity)
+
     def test_broad_root_and_file_modes_fail_closed(self):
         with tempfile.TemporaryDirectory() as td:
             root = self.root(td); path = self.file(root)
@@ -71,7 +82,6 @@ class PrivateControlTests(unittest.TestCase):
             triggered = {"done": False}
 
             def racing_open(target, flags, *args, **kwargs):
-                # Only replace immediately before opening the leaf relative to a dirfd.
                 if target == "value" and kwargs.get("dir_fd") is not None and not triggered["done"]:
                     triggered["done"] = True
                     path.unlink()
@@ -82,6 +92,63 @@ class PrivateControlTests(unittest.TestCase):
                 with self.assertRaises(SafetyError):
                     private_control.read_private_text(root, path)
             self.assertTrue(triggered["done"])
+
+    def test_private_json_no_clobber_creates_owner_only_file(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = self.root(td); out = root / "evidence.json"
+            identity = private_control.write_private_json_no_clobber(root, out, {"safe": True})
+            self.assertTrue(out.is_file())
+            self.assertEqual(0o600, out.stat().st_mode & 0o777)
+            self.assertEqual(private_control.private_identity_sha256(identity), private_control.private_identity_sha256(identity))
+            with self.assertRaises(SafetyError):
+                private_control.write_private_json_no_clobber(root, out, {"safe": False})
+
+    def test_private_write_rejects_root_and_final_symlinks_or_hardlinks(self):
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td); target_root = base / "target"; target_root.mkdir(mode=0o700); os.chmod(target_root, 0o700)
+            alias = base / "alias"; alias.symlink_to(target_root, target_is_directory=True)
+            with self.assertRaises(SafetyError):
+                private_control.write_private_json_no_clobber(alias, alias / "evidence.json", {"safe": True})
+        with tempfile.TemporaryDirectory() as td:
+            root = self.root(td); outside = Path(td) / "outside"; outside.write_text("unchanged", encoding="utf-8"); os.chmod(outside, 0o600)
+            final = root / "evidence.json"; final.symlink_to(outside)
+            with self.assertRaises(SafetyError):
+                private_control.write_private_json_no_clobber(root, final, {"safe": True})
+            self.assertEqual("unchanged", outside.read_text(encoding="utf-8"))
+        with tempfile.TemporaryDirectory() as td:
+            root = self.root(td); outside = Path(td) / "outside"; outside.write_text("unchanged", encoding="utf-8"); os.chmod(outside, 0o600)
+            final = root / "evidence.json"; os.link(outside, final)
+            with self.assertRaises(SafetyError):
+                private_control.write_private_json_no_clobber(root, final, {"safe": True})
+
+    def test_preexisting_predicted_temp_symlink_cannot_be_followed(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = self.root(td); final = root / "evidence.json"; outside = Path(td) / "outside"; outside.write_text("unchanged", encoding="utf-8"); os.chmod(outside, 0o600)
+            token = "ab" * 12
+            predicted = root / f".{final.name}.{token}.tmp"
+            predicted.symlink_to(outside)
+            with mock.patch.object(private_control.secrets, "token_hex", return_value=token):
+                with self.assertRaises(SafetyError):
+                    private_control.write_private_json_no_clobber(root, final, {"safe": True})
+            self.assertEqual("unchanged", outside.read_text(encoding="utf-8"))
+
+    def test_private_write_detects_directory_replacement(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = self.root(td); final = root / "evidence.json"; moved = Path(td) / "moved"
+            real_lstat = os.lstat
+            calls = {"root": 0}
+            def racing_lstat(path, *args, **kwargs):
+                if Path(path) == root:
+                    calls["root"] += 1
+                    if calls["root"] == 2:
+                        root.rename(moved)
+                        root.mkdir(mode=0o700); os.chmod(root, 0o700)
+                return real_lstat(path, *args, **kwargs)
+            with mock.patch.object(private_control.os, "lstat", side_effect=racing_lstat):
+                with self.assertRaises(SafetyError):
+                    private_control.write_private_json_no_clobber(root, final, {"safe": True})
+            self.assertGreaterEqual(calls["root"], 2)
+            self.assertFalse(final.exists())
 
     def test_secure_executable_success_nonzero_and_timeout(self):
         with tempfile.TemporaryDirectory() as td:
