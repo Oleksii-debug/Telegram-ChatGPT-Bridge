@@ -19,6 +19,7 @@ from tools.verify_integration_provenance import (
 class DevAProvenanceTests(unittest.TestCase):
     def test_exact_candidate_provenance_is_machine_verifiable(self):
         result = verify_repository()
+        release = json.loads(RELEASE_OVERRIDE.read_text(encoding="utf-8"))
         self.assertEqual(result["schema_version"], 2)
         self.assertEqual(result["base"], "26a2df12c350f670a703b236edc3648f339b64a9")
         self.assertEqual(result["verified_predecessor_count"], 5)
@@ -26,7 +27,11 @@ class DevAProvenanceTests(unittest.TestCase):
         self.assertEqual(result["dev_b_imported_path_count"], 16)
         self.assertEqual(result["dev_b_adapted_path_count"], 4)
         self.assertEqual(result["dev_b_superseded_path_count"], 2)
-        self.assertEqual(result["release_to_live_path_count"], 23)
+        self.assertEqual(result["release_to_live_path_count"], len(release["paths"]))
+        self.assertTrue(
+            {"bridge/runtime.py", "bridge/runtime_wsgi.py", "tests/test_runtime_bootstrap.py"}
+            <= set(release["paths"])
+        )
         self.assertEqual(result["pr2_pr3_overlap_count"], 7)
         self.assertEqual(result["pr2_pr5_overlap_count"], 3)
         self.assertEqual(result["rejected_dev5_overlap_count"], 7)

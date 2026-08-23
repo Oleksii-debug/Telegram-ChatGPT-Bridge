@@ -117,8 +117,11 @@ class UnifiedReleaseCandidateTests(unittest.TestCase):
         )
 
     def test_recovered_bridge_app_import_target_now_exports_lazy_unified_entrypoint(self):
+        from bridge import runtime_wsgi
+
         self.assertIs(bridge.application, app_module.application)
-        self.assertEqual(app_module.application.__module__, "bridge.integrated_app")
+        self.assertIs(app_module.application, runtime_wsgi.application)
+        self.assertEqual(app_module.application.__module__, "bridge.runtime_wsgi")
 
     def test_canonical_read_registry_and_openapi_runtime_paths_are_exactly_equal(self):
         parity = set(validate_unified_registry())
