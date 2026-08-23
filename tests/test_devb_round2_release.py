@@ -7,6 +7,16 @@ from ops import candidate_runtime_preflight, passenger_evidence_hook, server_man
 from ops.release_guard import SafetyError
 
 
+CANONICAL_WSGI = (
+    "from pathlib import Path\n"
+    "from bridge.app import application\n"
+    "from ops.passenger_evidence_hook import collect_if_armed\n"
+    "_here = Path(__file__).resolve()\n"
+    "collect_if_armed(app_root=_here.parent, wsgi_file=_here)\n"
+    "__all__ = ['application']\n"
+)
+
+
 class DevBRound2ReleaseContractsTests(unittest.TestCase):
     SHA = "a" * 40
     HASH = "b" * 64
@@ -17,7 +27,7 @@ class DevBRound2ReleaseContractsTests(unittest.TestCase):
         path.write_text(data, encoding="utf-8")
 
     def package(self, root: Path) -> None:
-        self.write(root, "passenger_wsgi.py", "from bridge.app import application\n")
+        self.write(root, "passenger_wsgi.py", CANONICAL_WSGI)
         self.write(root, "install_server.sh", "")
         self.write(root, "requirements.txt", "Telethon==1.42.0\n")
         self.write(root, "requirements.lock", f"Telethon==1.42.0 --hash=sha256:{self.HASH}\n")
