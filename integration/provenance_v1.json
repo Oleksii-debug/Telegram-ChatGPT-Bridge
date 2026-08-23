@@ -135,13 +135,14 @@
     "candidate_truth_contracts": "c9c162b78460024b2bec407a05d3d34e26b34f81",
     "candidate_truth_tests": "70985119a21c1951078a8f1b8031ceb3baa3c00b",
     "candidate_truth_ci_gate": "545e963f7ec89ab534fcb8b1dfafdedb9a8d504b",
-    "dev04_media_storage_sync": "301817d7e2c1a2fa55435d11ce5c6edc0cef5d71"
+    "dev04_media_storage_sync": "301817d7e2c1a2fa55435d11ce5c6edc0cef5d71",
+    "dev08_deployment_recovery_oracle_sync": "5e35599cca1162bad9501044dfb6a79fa358e182"
   },
   "dev_a_paths": [
     ".github/workflows/ci.yml", "bridge/__init__.py", "bridge/file_access.py", "bridge/filenames.py", "bridge/integrated_app.py",
-    "docs/DEV04_MEDIA_STORAGE.md", "docs/DEV_A_INTEGRATED_RELEASE_CANDIDATE.md", "docs/DEV_A_PROVENANCE_LEDGER.md",
-    "integration/provenance_v1.json", "ops/candidate_contracts.py", "ops/integration_interfaces.py",
-    "tests/test_dev01_dev04_peer_provenance.py", "tests/test_dev04_media_storage.py", "tests/test_dev04_migration_concurrency.py",
+    "docs/DEV04_MEDIA_STORAGE.md", "docs/DEV08_DEPLOYMENT_RECOVERY_R3.md", "docs/DEV_A_INTEGRATED_RELEASE_CANDIDATE.md", "docs/DEV_A_PROVENANCE_LEDGER.md",
+    "integration/provenance_v1.json", "ops/candidate_contracts.py", "ops/dev08_deploy_recovery.py", "ops/integration_interfaces.py",
+    "tests/test_dev01_dev04_peer_provenance.py", "tests/test_dev01_dev08_peer_provenance.py", "tests/test_dev04_media_storage.py", "tests/test_dev04_migration_concurrency.py",
     "tests/test_dev04_private_serving.py", "tests/test_dev_a_candidate_contracts.py", "tests/test_dev_a_integration.py",
     "tests/test_dev_a_provenance.py", "tools/verify_integration_provenance.py"
   ],
@@ -167,6 +168,25 @@
       "auditor_finding": "A01-06",
       "source_ci_run_id": 32641698071,
       "source_ci_job_id": 97199658228,
+      "production_mutated": false,
+      "deployment_authorized": false
+    },
+    "DEV08_DEPLOYMENT_RECOVERY_ORACLE": {
+      "pr": 48,
+      "source_sha": "2916828628a091a9edd8c4992d9db8834ac1ff68",
+      "merge_commit": "5e35599cca1162bad9501044dfb6a79fa358e182",
+      "first_parent": "4ebfceb153e94840fa046af88cee1131e0705657",
+      "exact_blob_paths": [
+        "docs/DEV08_DEPLOYMENT_RECOVERY_R3.md",
+        "ops/dev08_deploy_recovery.py"
+      ],
+      "excluded_specialist_paths": [
+        "tests/test_dev08_deploy_recovery.py",
+        "tools/verify_dev08_r3_provenance.py"
+      ],
+      "source_validation_run_id": 32646112339,
+      "source_validation_job_id": 97210515630,
+      "production_runtime_modified": false,
       "production_mutated": false,
       "deployment_authorized": false
     }
