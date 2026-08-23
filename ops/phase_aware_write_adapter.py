@@ -13,12 +13,22 @@ execution is still strictly before the first call to ``send_message``,
 been invoked, any exception/timeout remains a normal ``TelegramContractError``
 so the persistent store records AMBIGUOUS and never performs a blind resend.
 
+SEND_FILES additionally supports the DEV04 snapshot-safe upload contract without
+reconstructing a filesystem path. A verified upload object is accepted only as a
+read-only, seekable ``io.BufferedIOBase`` carrying bounded opaque identity
+metadata; its exact object identity is passed to the Telegram client. Mixed
+legacy-path/snapshot batches fail before the effect boundary. The media owner is
+still responsible for constructing and closing the verified snapshots; this
+adapter only preserves that already-verified lifetime/identity through the
+mutating RPC call.
+
 No Telegram connection is created at import time and no credentials are stored
 or logged by this module.
 """
 from __future__ import annotations
 
 import asyncio
+import io
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Sequence
 
@@ -36,6 +46,10 @@ from ops.telegram_write_adapter import (
 from ops.write_safety import SafeNoSideEffectFailure
 
 
+_MAX_UPLOAD_FILE_BYTES = 100 * 1024 * 1024
+_MAX_UPLOAD_TOTAL_BYTES = 250 * 1024 * 1024
+
+
 @dataclass
 class _EffectBoundary:
     """Monotonic marker for the first potentially mutating Telegram RPC call."""
@@ -46,6 +60,15 @@ class _EffectBoundary:
         self.started = True
 
 
+@dataclass(frozen=True)
+class _SnapshotProof:
+    stream: io.BufferedIOBase
+    file_ref: str
+    sha256: str
+    size: int
+    name: str
+
+
 def _safe_code(exc: TelegramContractError) -> SafeWriteMetadataFailure:
     """Preserve only bounded structured metadata after pre-effect proof."""
 
@@ -54,6 +77,63 @@ def _safe_code(exc: TelegramContractError) -> SafeWriteMetadataFailure:
         status=exc.status,
         retry_after_seconds=exc.retry_after,
     )
+
+
+def _valid_public_file_ref(value: Any) -> bool:
+    return (
+        isinstance(value, str)
+        and 1 <= len(value) <= 128
+        and all(ord(ch) >= 32 for ch in value)
+    )
+
+
+def _valid_snapshot_name(value: Any) -> bool:
+    return (
+        isinstance(value, str)
+        and 1 <= len(value) <= 180
+        and "/" not in value
+        and "\\" not in value
+        and all(ord(ch) >= 32 for ch in value)
+    )
+
+
+def _snapshot_proof(value: Any) -> _SnapshotProof | None:
+    """Validate the cross-lane DEV04 upload-handle surface without path access."""
+
+    if not isinstance(value, io.BufferedIOBase) or value.closed:
+        return None
+    try:
+        if not value.readable() or not value.seekable() or value.writable():
+            return None
+        if value.tell() != 0:
+            return None
+    except (OSError, ValueError, io.UnsupportedOperation):
+        return None
+
+    file_ref = getattr(value, "file_ref", None)
+    digest = getattr(value, "sha256", None)
+    size = getattr(value, "size", None)
+    name = getattr(value, "name", None)
+    if not _valid_public_file_ref(file_ref):
+        return None
+    if (
+        not isinstance(digest, str)
+        or len(digest) != 64
+        or any(ch not in "0123456789abcdef" for ch in digest)
+    ):
+        return None
+    if isinstance(size, bool) or not isinstance(size, int) or not 1 <= size <= _MAX_UPLOAD_FILE_BYTES:
+        return None
+    if not _valid_snapshot_name(name):
+        return None
+    return _SnapshotProof(value, file_ref, digest, size, name)
+
+
+def _snapshot_still_matches(proof: _SnapshotProof) -> bool:
+    """Revalidate the same snapshot object immediately before crossing effect."""
+
+    current = _snapshot_proof(proof.stream)
+    return current == proof
 
 
 class PhaseAwareTelegramWriteAdapter(TelegramWriteAdapter):
@@ -243,7 +323,7 @@ class PhaseAwareTelegramWriteAdapter(TelegramWriteAdapter):
     async def send_files_async(
         self,
         target: Any,
-        file_paths: Sequence[str],
+        file_paths: Sequence[Any],
         *,
         caption: str = "",
         reply_to_message_id: Any | None = None,
@@ -253,14 +333,37 @@ class PhaseAwareTelegramWriteAdapter(TelegramWriteAdapter):
             file_paths, (str, bytes)
         ):
             raise self._preflight_failure("files_required")
-        paths = [str(path) for path in file_paths]
-        if not paths or len(paths) > self.config.max_send_files:
+
+        items = list(file_paths)
+        if not items or len(items) > self.config.max_send_files:
             raise self._preflight_failure("invalid_file_count")
-        if any(not path or "\x00" in path for path in paths):
+
+        snapshot_proofs: tuple[_SnapshotProof, ...] = ()
+        if all(isinstance(item, str) for item in items):
+            if any(not item or "\x00" in item for item in items):
+                raise self._preflight_failure("invalid_file_reference")
+            upload_items: list[Any] = items
+        elif all(isinstance(item, io.BufferedIOBase) for item in items):
+            proofs: list[_SnapshotProof] = []
+            for item in items:
+                proof = _snapshot_proof(item)
+                if proof is None:
+                    raise self._preflight_failure("invalid_file_reference")
+                proofs.append(proof)
+            if sum(proof.size for proof in proofs) > _MAX_UPLOAD_TOTAL_BYTES:
+                raise self._preflight_failure("invalid_file_reference", status=413)
+            snapshot_proofs = tuple(proofs)
+            # Preserve exact object identity. Never call str(), reopen a path or
+            # materialize a new stream after the media owner has snapshotted it.
+            upload_items = [proof.stream for proof in proofs]
+        else:
+            # Mixed path/descriptor batches can silently downgrade a verified
+            # snapshot flow back to pathname TOCTOU, so fail closed.
             raise self._preflight_failure("invalid_file_reference")
+
         if not isinstance(caption, str) or len(caption) > self.config.max_send_chars:
             raise self._preflight_failure("caption_too_long", status=413)
-        if voice_note and len(paths) != 1:
+        if voice_note and len(upload_items) != 1:
             raise self._preflight_failure("voice_note_requires_single_file")
 
         async def operation(
@@ -272,10 +375,14 @@ class PhaseAwareTelegramWriteAdapter(TelegramWriteAdapter):
                 reply_id = await self._validate_reply(
                     client, entity, reply_to_message_id
                 )
+            if snapshot_proofs and not all(
+                _snapshot_still_matches(proof) for proof in snapshot_proofs
+            ):
+                raise TelegramContractError("invalid_file_reference", status=409)
             cross_effect()
             sent = await client.send_file(
                 entity,
-                paths,
+                upload_items,
                 caption=caption or None,
                 reply_to=reply_id,
                 voice_note=bool(voice_note),
