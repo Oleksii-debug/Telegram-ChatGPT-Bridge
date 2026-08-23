@@ -24,7 +24,7 @@ jobs:
           python-version: '3.11'
       - name: Validate exact canonical parent and QA-only path boundary
         env:
-          EXPECTED_PARENT: 301817d7e2c1a2fa55435d11ce5c6edc0cef5d71
+          EXPECTED_PARENT: 4ebfceb153e94840fa046af88cee1131e0705657
           ACTUAL_PR_BASE: ${{ github.event.pull_request.base.sha || '' }}
         run: |
           set -eu
@@ -64,7 +64,7 @@ jobs:
           echo DEV09_DEVB_RUNTIME_SECURITY_REGRESSION_PASS
       - name: Require exact-parent clean-export full regression
         env:
-          EXPECTED_PARENT: 301817d7e2c1a2fa55435d11ce5c6edc0cef5d71
+          EXPECTED_PARENT: 4ebfceb153e94840fa046af88cee1131e0705657
         run: |
           set -eu
           TMP_ROOT="$(mktemp -d)"
@@ -76,7 +76,7 @@ jobs:
       - name: Require PREPARE-style isolated venv full regression
         if: always()
         env:
-          EXPECTED_PARENT: 301817d7e2c1a2fa55435d11ce5c6edc0cef5d71
+          EXPECTED_PARENT: 4ebfceb153e94840fa046af88cee1131e0705657
         run: |
           set -eu
           TMP_ROOT="$(mktemp -d)"
