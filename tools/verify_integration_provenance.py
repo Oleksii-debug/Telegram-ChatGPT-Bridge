@@ -15,6 +15,12 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[1]
 MANIFEST = ROOT / "integration" / "provenance_v1.json"
 RELEASE_OVERRIDE = ROOT / "integration" / "release_to_live_v1.json"
+EXPECTED_DEV_C_VALIDATION_PATHS = (
+    "docs/DEV_C_RELEASE_TO_LIVE_QA.md",
+    "ops/devc_release_qa.py",
+    "tests/test_devc_release_e2e.py",
+    "tests/test_devc_release_qa.py",
+)
 
 
 class ProvenanceError(RuntimeError):
@@ -101,6 +107,11 @@ def _load_release_override() -> dict[str, Any]:
     if not _valid_sha(checkpoint):
         raise ProvenanceError("release-to-live source checkpoint invalid")
     paths = _safe_sorted_paths(payload.get("paths"), "release-to-live")
+    dev_c_paths = _safe_sorted_paths(payload.get("dev_c_validation_paths"), "DEV_C validation")
+    if tuple(dev_c_paths) != EXPECTED_DEV_C_VALIDATION_PATHS:
+        raise ProvenanceError("DEV_C validation path set mismatch")
+    if set(dev_c_paths) & set(paths):
+        raise ProvenanceError("DEV_C validation paths overlap canonical release ledger")
     commits = payload.get("trace_commits")
     if not isinstance(commits, list) or not commits:
         raise ProvenanceError("release-to-live trace commits missing")
@@ -198,6 +209,7 @@ def verify_repository() -> dict[str, Any]:
     dev_b_imported = set(dev_b["imported_paths"])
     dev_b_adapted = set(dev_b["adapted_paths"])
     dev_b_supersedes = set(dev_b["supersedes_predecessor_paths"])
+    dev_c_validation_paths = set(release_override["dev_c_validation_paths"])
 
     overlap_counts = _verify_overlap_matrix(manifest)
 
@@ -257,6 +269,7 @@ def verify_repository() -> dict[str, Any]:
     allowed_paths.update(dev5["ported_paths"])
     release_paths = set(release_override["paths"])
     allowed_paths.update(release_paths)
+    allowed_paths.update(dev_c_validation_paths)
 
     changed = {
         line.strip()
@@ -270,6 +283,9 @@ def verify_repository() -> dict[str, Any]:
     missing_release_paths = sorted(path for path in release_paths if path not in changed)
     if missing_release_paths:
         raise ProvenanceError("declared release-to-live path is absent from candidate diff")
+    missing_dev_c_paths = sorted(path for path in dev_c_validation_paths if path not in changed)
+    if missing_dev_c_paths:
+        raise ProvenanceError("declared DEV_C validation path is absent from candidate diff")
 
     safety = manifest["safety_boundary"]
     if safety != {
@@ -293,6 +309,7 @@ def verify_repository() -> dict[str, Any]:
         "dev_b_imported_path_count": len(dev_b_imported),
         "dev_b_adapted_path_count": len(dev_b_adapted),
         "dev_b_superseded_path_count": len(dev_b_supersedes),
+        "dev_c_validation_path_count": len(dev_c_validation_paths),
         "pr2_pr3_overlap_count": overlap_counts["PR2_PR3"],
         "pr2_pr5_overlap_count": overlap_counts["PR2_PR5"],
         "rejected_dev5_overlap_count": len(dev5["rejected_overlaps_preserve_base"]),
