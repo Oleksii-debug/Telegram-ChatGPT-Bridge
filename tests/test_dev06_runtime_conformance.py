@@ -213,7 +213,7 @@ class RuntimeResponseConformanceTests(unittest.TestCase):
         preview = request(
             self.app,
             "/api/v1/messages/send/preview",
-            {"chat": "@synthetic_target", "text": "synthetic draft"},
+            {"chat": "@target_user", "text": "synthetic draft"},
         )
         self.assertEqual(preview["status"], 200)
         self.assert_response_matches("previewTelegramSend", preview)
