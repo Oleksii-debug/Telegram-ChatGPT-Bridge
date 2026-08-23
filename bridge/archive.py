@@ -2,37 +2,32 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
-import re
 import secrets
-import unicodedata
+import stat
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 
 from .errors import BridgeError
+from .filenames import filename_collision_key, safe_filename
 from .storage import FileRecord, FileRecordStore
 
 
 def safe_archive_name(name: str) -> str:
-    candidate = name.replace("\\", "/").split("/")[-1]
-    candidate = re.sub(r"[\x00-\x1f<>:\"|?*]+", "_", candidate)
-    candidate = unicodedata.normalize("NFC", candidate)
-    candidate = candidate.strip(" .") or "file"
-    if candidate in {".", ".."}:
-        candidate = "file"
-    return candidate[:180]
+    return safe_filename(name, "file", limit=180)
 
 
 def _collision_key(name: str) -> str:
-    return unicodedata.normalize("NFC", name).casefold()
+    return filename_collision_key(name)
 
 
 def unique_name(name: str, used: set[str]) -> str:
     """Return a safe member name unique under Unicode-NFC + casefold.
 
-    ZIP consumers differ in case sensitivity and Unicode normalization.  The
+    ZIP consumers differ in case sensitivity and Unicode normalization. The
     archive therefore resolves those collisions deterministically instead of
     emitting two visually/equivalently named members.
     """
@@ -42,7 +37,7 @@ def unique_name(name: str, used: set[str]) -> str:
     candidate = base
     index = 2
     while _collision_key(candidate) in used:
-        candidate = f"{stem} ({index}){suffix}"
+        candidate = safe_archive_name(f"{stem} ({index}){suffix}")
         index += 1
     used.add(_collision_key(candidate))
     return candidate
@@ -53,6 +48,16 @@ class ArchiveLimits:
     max_members: int = 200
     max_total_bytes: int = 750 * 1024 * 1024
     compression: int = zipfile.ZIP_DEFLATED
+
+    def __post_init__(self) -> None:
+        if (
+            isinstance(self.max_members, bool)
+            or isinstance(self.max_total_bytes, bool)
+            or not 1 <= self.max_members <= 500
+            or self.max_total_bytes <= 0
+            or self.compression not in {zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED, zipfile.ZIP_BZIP2, zipfile.ZIP_LZMA}
+        ):
+            raise ValueError("invalid archive limits")
 
 
 class ArchiveBuilder:
@@ -65,6 +70,51 @@ class ArchiveBuilder:
             os.chmod(self.output_dir, 0o700)
         except OSError:
             pass
+
+    @staticmethod
+    def _open_source(record: FileRecord) -> int:
+        """Open an already-registered file without following a path swap."""
+        flags = os.O_RDONLY
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        try:
+            fd = os.open(record.path, flags)
+        except OSError as exc:
+            raise BridgeError("Archive source is unavailable", status=409, code="archive_source_changed") from exc
+        try:
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size != record.size:
+                raise BridgeError("Archive source topology changed", status=409, code="archive_source_changed")
+            return fd
+        except Exception:
+            os.close(fd)
+            raise
+
+    def _write_record(self, zf: zipfile.ZipFile, record: FileRecord, *, arcname: str) -> None:
+        """Stream from a verified descriptor and re-check hash/size while writing."""
+        fd = self._open_source(record)
+        digest = hashlib.sha256()
+        total = 0
+        info = zipfile.ZipInfo(filename=arcname)
+        info.compress_type = self.limits.compression
+        info.external_attr = 0o600 << 16
+        try:
+            with os.fdopen(fd, "rb", closefd=True) as source, zf.open(info, "w") as destination:
+                while True:
+                    chunk = source.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    total += len(chunk)
+                    if total > record.size:
+                        raise BridgeError("Archive source size changed", status=409, code="archive_source_changed")
+                    digest.update(chunk)
+                    destination.write(chunk)
+        except BridgeError:
+            raise
+        except OSError as exc:
+            raise BridgeError("Archive source read failed", status=409, code="archive_source_changed") from exc
+        if total != record.size or not secrets.compare_digest(digest.hexdigest(), record.sha256):
+            raise BridgeError("Archive source integrity changed", status=409, code="archive_source_changed")
 
     def build(self, file_refs: Iterable[str], *, archive_name: str = "telegram-files.zip") -> FileRecord:
         refs = list(dict.fromkeys(file_refs))
@@ -85,11 +135,12 @@ class ArchiveBuilder:
         target = self.output_dir / f"archive_{secrets.token_hex(20)}.zip.part"
         final = self.files.root / f"{secrets.token_hex(20)}.zip"
         used: set[str] = set()
+        registered = False
         try:
             with zipfile.ZipFile(target, "w", compression=self.limits.compression, allowZip64=False) as zf:
                 for record in records:
                     arcname = unique_name(record.name, used)
-                    zf.write(record.path, arcname=arcname)
+                    self._write_record(zf, record, arcname=arcname)
             with zipfile.ZipFile(target, "r") as zf:
                 if len(zf.infolist()) != len(records):
                     raise BridgeError("Archive validation failed", status=500, code="zip_validation_failed")
@@ -110,10 +161,18 @@ class ArchiveBuilder:
                 os.chmod(final, 0o600)
             except OSError:
                 pass
-            return self.files.add(final, name=safe_archive_name(archive_name), mime_type="application/zip")
+            record = self.files.add(final, name=safe_archive_name(archive_name), mime_type="application/zip")
+            registered = True
+            return record
         finally:
             try:
                 if target.exists():
                     target.unlink()
             except OSError:
                 pass
+            if not registered:
+                try:
+                    if final.exists() and final.is_file():
+                        final.unlink()
+                except OSError:
+                    pass

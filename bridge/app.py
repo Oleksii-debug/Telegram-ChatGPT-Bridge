@@ -22,6 +22,7 @@ from .audit import AuditLog
 from .backend import ReadBackend, UnavailableReadBackend
 from .downloads import DownloadManager
 from .errors import BridgeError, HiddenNotFound
+from .file_access import open_verified_file
 from .models import MessageRecord
 from .routes import known_path, resolve_route
 from .security import BearerGuard, FileSigner, RateLimiter, RejectingRateLimiter
@@ -439,29 +440,34 @@ class BridgeApplication:
         self._check_rate("private-file-read")
 
         assert self.files is not None
-        record = self.files.get(ref)
-        if record is None:
+        verified = open_verified_file(self.files, ref)
+        if verified is None:
             raise HiddenNotFound()
-        path_obj = Path(record.path)
-        size = path_obj.stat().st_size
+        record = verified.record
         headers = [
             ("Content-Type", record.mime_type or "application/octet-stream"),
-            ("Content-Length", str(size)),
+            ("Content-Length", str(record.size)),
             ("Cache-Control", "private, no-store"),
             ("X-Content-Type-Options", "nosniff"),
             ("Referrer-Policy", "no-referrer"),
             ("Content-Disposition", "attachment"),
         ]
         self.audit.write("request_ok", request_id=request_id, route="files.content", method="GET", status=200)
-        start_response("200 OK", headers)
+        try:
+            start_response("200 OK", headers)
+        except Exception:
+            verified.close()
+            raise
 
         def body_iter() -> Iterable[bytes]:
-            with path_obj.open("rb") as handle:
+            try:
                 while True:
-                    chunk = handle.read(1024 * 1024)
+                    chunk = verified.handle.read(1024 * 1024)
                     if not chunk:
                         break
                     yield chunk
+            finally:
+                verified.close()
 
         return body_iter()
 
