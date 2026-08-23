@@ -69,13 +69,13 @@ class Dev09CurrentCanonicalTests(unittest.TestCase):
             cls.suite = exported_test_suite_probe()
 
     @requires_expensive_repository_probe
-    def test_exact_parent_provenance_fails_closed_on_new_unaccounted_peer_sync(self):
+    def test_exact_parent_provenance_is_clear_after_peer_sync_accounting(self):
         result = self.provenance
         self.assertIsNotNone(result)
         self.assertEqual(result["parent_sha"], EXPECTED_PARENT_SHA)
-        self.assertEqual(result["classification"], "BLOCKED_CANONICAL_PROVENANCE")
-        self.assertEqual(result["reason"], "PROVENANCE_FAILURE")
-        self.assertNotEqual(result["return_code"], 0)
+        self.assertEqual(result["classification"], "CLEAR")
+        self.assertEqual(result["reason"], "NONE")
+        self.assertEqual(result["return_code"], 0)
         self.assertFalse(result["private_values_recorded"])
         self.assertFalse(result["production_mutated"])
         self.assertFalse(result["deployment_authorized"])
