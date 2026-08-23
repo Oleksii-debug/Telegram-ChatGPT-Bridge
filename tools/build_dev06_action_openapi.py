@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 import sys
 
@@ -11,10 +12,9 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from ops.dev06_api_contracts import (
-    build_chatgpt_action_openapi,
-    serialized_chatgpt_action_openapi,
-    validate_chatgpt_action_schema,
+from ops.dev06_runtime_conformance import (
+    build_compatible_chatgpt_action_openapi,
+    validate_action_compatibility,
 )
 
 
@@ -24,8 +24,8 @@ def main(argv=None) -> int:
     parser.add_argument("--validate-only", action="store_true")
     args = parser.parse_args(argv)
 
-    schema = build_chatgpt_action_openapi(args.base_url)
-    errors = validate_chatgpt_action_schema(schema)
+    schema = build_compatible_chatgpt_action_openapi(args.base_url)
+    errors = validate_action_compatibility(schema)
     if errors:
         for error in errors:
             print(error, file=sys.stderr)
@@ -33,7 +33,7 @@ def main(argv=None) -> int:
     if args.validate_only:
         print("DEV06_ACTION_CONTRACT_PASS")
     else:
-        print(serialized_chatgpt_action_openapi(args.base_url))
+        print(json.dumps(schema, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
     return 0
 
 
