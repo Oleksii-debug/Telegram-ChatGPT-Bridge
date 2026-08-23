@@ -25,6 +25,7 @@ jobs:
         run: >-
           python -m py_compile
           tools/secret_scan.py
+          tools/strict_history_secret_scan.py
           tools/parallel_overlap_report.py
           ops/release_guard.py
           ops/recovery_capture.py
@@ -37,6 +38,7 @@ jobs:
           ops/deployment_lock_policy.py
           ops/integration_interfaces.py
           tests/test_secret_scan.py
+          tests/test_strict_history_secret_scan.py
           tests/test_recovery_ops.py
           tests/test_audit_round5.py
           tests/test_audit_round6.py
@@ -69,7 +71,7 @@ jobs:
         run: python tools/secret_scan.py --mode current
       - name: Full-history secret scan
         if: always()
-        run: python tools/secret_scan.py --mode history
+        run: python -m tools.strict_history_secret_scan
       - name: Verify recovery marker
         if: always()
         run: test -f RECOVERY_BASELINE.md && grep -q 'DO NOT MERGE / DO NOT DEPLOY' RECOVERY_BASELINE.md
