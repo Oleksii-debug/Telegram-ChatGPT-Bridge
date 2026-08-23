@@ -171,7 +171,13 @@ def inspect_existing_evidence_state(*, control_root: Path, evidence_root: Path) 
             evidence_root / BINDING_REPORT_NAME,
             control_root / CONSUMED_RECEIPT_NAME,
         )
-        if any(path.exists() for path in dangling):
+        for path in dangling:
+            try:
+                path.lstat()
+            except FileNotFoundError:
+                continue
+            except OSError as exc:
+                raise SafetyError("Passenger terminal artifact state unavailable") from exc
             raise SafetyError("Passenger terminal artifacts exist without marker")
         return "PASSENGER_EVIDENCE_EXISTING_NOT_ARMED"
     state = _terminal_artifact_state(
