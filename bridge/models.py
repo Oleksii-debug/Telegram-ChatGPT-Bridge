@@ -29,6 +29,12 @@ def _iso_utc(value: datetime | str | None) -> str | None:
     return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
+def canonical_timestamp(value: datetime | str | None) -> str | None:
+    """Return the canonical UTC representation used for read ordering/cursors."""
+
+    return _iso_utc(value)
+
+
 @dataclass(frozen=True)
 class EntityRef:
     id: str
@@ -82,6 +88,13 @@ class MessageRecord:
     reply_to_message_id: int | None = None
     media: tuple[MediaRecord, ...] = field(default_factory=tuple)
 
+    def __post_init__(self) -> None:
+        # Preserve the established internal MessageRecord UTC offset spelling
+        # used by existing integrations while API serialization and cursor
+        # comparisons remain canonically normalized through _iso_utc().
+        if self.timestamp.endswith("Z"):
+            object.__setattr__(self, "timestamp", self.timestamp[:-1] + "+00:00")
+
     def to_dict(self, *, include_text: bool = True) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "id": self.id,
@@ -131,8 +144,11 @@ def decode_cursor(token: str | None) -> dict[str, Any] | None:
     return obj
 
 
-def stable_message_sort(messages: Iterable[MessageRecord], *, reverse: bool = True) -> list[MessageRecord]:
-    def key(m: MessageRecord) -> tuple[str, int]:
-        return (_iso_utc(m.timestamp) or "", int(m.id))
+def message_sort_key(message: MessageRecord) -> tuple[str, int, str]:
+    """Stable total ordering key, including chat identity for global search."""
 
-    return sorted(messages, key=key, reverse=reverse)
+    return (canonical_timestamp(message.timestamp) or "", int(message.id), str(message.chat_id))
+
+
+def stable_message_sort(messages: Iterable[MessageRecord], *, reverse: bool = True) -> list[MessageRecord]:
+    return sorted(messages, key=message_sort_key, reverse=reverse)

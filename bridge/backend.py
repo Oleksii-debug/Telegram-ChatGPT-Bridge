@@ -10,13 +10,26 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import inspect
+import unicodedata
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, AsyncIterator, Awaitable, Callable, Protocol
 
 from .errors import BridgeError
-from .models import DialogRecord, EntityRef, MediaRecord, MessageRecord, Page, decode_cursor, encode_cursor, stable_message_sort
+from .models import (
+    DialogRecord,
+    EntityRef,
+    MediaRecord,
+    MessageRecord,
+    Page,
+    canonical_timestamp,
+    decode_cursor,
+    encode_cursor,
+    message_sort_key,
+    stable_message_sort,
+)
 from .validation import DateRange, normalize_search_text
 
 
@@ -84,14 +97,18 @@ class TelethonReadConfig:
 
 
 class TelethonReadBackend:
-    """Map Telethon-like objects into stable read-side API records.
+    """Map Telethon-like objects into stable read-side API records."""
 
-    ``client_factory`` returns a client or awaitable client. If that client
-    exposes ``connect()``, ``is_user_authorized()`` or ``disconnect()``, the
-    adapter calls those hooks for every bounded operation. Clients without the
-    hooks are treated as externally managed, which keeps deterministic fakes
-    and later server-side session factories easy to integrate.
-    """
+    _ENTITY_NOT_FOUND_ERRORS = frozenset(
+        {
+            "UsernameInvalidError",
+            "UsernameNotOccupiedError",
+            "PeerIdInvalidError",
+            "ChannelInvalidError",
+            "ChatIdInvalidError",
+        }
+    )
+    _FLOOD_WAIT_ERRORS = frozenset({"FloodWaitError", "FloodWait"})
 
     def __init__(
         self,
@@ -111,12 +128,7 @@ class TelethonReadBackend:
 
     @asynccontextmanager
     async def _client_session(self) -> AsyncIterator[Any]:
-        """Bound connect/auth/disconnect to one operation and always clean up.
-
-        Cleanup errors are deliberately not surfaced because they must never
-        replace the original read error or expose backend exception text. A
-        fresh client is requested for the next operation.
-        """
+        """Bound connect/auth/disconnect to one operation and always clean up."""
         client = await self._make_client()
         try:
             connect = getattr(client, "connect", None)
@@ -202,7 +214,7 @@ class TelethonReadBackend:
             username=cls._optional_text(getattr(entity, "username", None)),
             unread_count=max(0, int(getattr(dialog, "unread_count", 0) or 0)),
             pinned=bool(getattr(dialog, "pinned", False)),
-            last_message_at=date.isoformat() if isinstance(date, datetime) else None,
+            last_message_at=canonical_timestamp(date) if isinstance(date, datetime) else None,
         )
 
     @classmethod
@@ -258,15 +270,27 @@ class TelethonReadBackend:
         )
 
     @classmethod
-    async def _message_record(cls, message: Any, chat_id: str) -> MessageRecord:
+    async def _message_record(
+        cls,
+        message: Any,
+        chat_id: str,
+        *,
+        require_sender_details: bool = False,
+    ) -> MessageRecord:
+        sender_id = getattr(message, "sender_id", None)
         sender_obj = None
         getter = getattr(message, "get_sender", None)
         if callable(getter):
             try:
                 sender_obj = await cls._maybe_await(getter())
             except Exception:
+                # History/message reads can still expose the stable sender ID if
+                # optional display metadata is unavailable. A person-name or
+                # username search cannot truthfully return an empty result when
+                # sender resolution itself failed, so that path is strict.
+                if require_sender_details:
+                    raise
                 sender_obj = None
-        sender_id = getattr(message, "sender_id", None)
         sender = None
         if sender_obj is not None:
             sender = EntityRef(
@@ -287,7 +311,7 @@ class TelethonReadBackend:
         return MessageRecord(
             id=int(getattr(message, "id", 0) or 0),
             chat_id=str(getattr(message, "chat_id", None) or chat_id),
-            timestamp=date.isoformat(),
+            timestamp=canonical_timestamp(date) or "1970-01-01T00:00:00Z",
             text=str(getattr(message, "message", None) or ""),
             sender=sender,
             outgoing=bool(getattr(message, "out", False)),
@@ -296,21 +320,123 @@ class TelethonReadBackend:
         )
 
     @staticmethod
-    def _cursor_offset(cursor: str | None, scope: str) -> int:
-        decoded = decode_cursor(cursor)
-        if decoded is None:
-            return 0
-        if set(decoded) != {"v", "scope", "offset"} or decoded.get("v") != 1 or decoded.get("scope") != scope:
-            raise BridgeError("Invalid cursor", code="invalid_cursor")
-        offset = decoded.get("offset")
-        if isinstance(offset, bool) or not isinstance(offset, int) or offset < 0 or offset > 1_000_000:
-            raise BridgeError("Invalid cursor", code="invalid_cursor")
-        return offset
+    def _cursor_signature(scope: str, *parts: str) -> str:
+        material = "\x1f".join((scope, *parts)).encode("utf-8", "strict")
+        return hashlib.sha256(material).hexdigest()[:24]
 
     @staticmethod
-    def _next_cursor(scope: str, offset: int, limit: int, total: int) -> str | None:
-        nxt = offset + limit
-        return encode_cursor({"v": 1, "scope": scope, "offset": nxt}) if nxt < total else None
+    def _invalid_cursor(exc: Exception | None = None) -> BridgeError:
+        error = BridgeError("Invalid cursor", code="invalid_cursor")
+        if exc is not None:
+            error.__cause__ = exc
+        return error
+
+    @classmethod
+    def _message_boundary(
+        cls,
+        cursor: str | None,
+        scope: str,
+        signature: str,
+    ) -> tuple[str, int, str] | None:
+        decoded = decode_cursor(cursor)
+        if decoded is None:
+            return None
+        if set(decoded) != {"v", "scope", "sig", "boundary"}:
+            raise cls._invalid_cursor()
+        if decoded.get("v") != 2 or decoded.get("scope") != scope or decoded.get("sig") != signature:
+            raise cls._invalid_cursor()
+        boundary = decoded.get("boundary")
+        if not isinstance(boundary, list) or len(boundary) != 3:
+            raise cls._invalid_cursor()
+        stamp, message_id, chat_id = boundary
+        if not isinstance(stamp, str) or not stamp or len(stamp) > 64:
+            raise cls._invalid_cursor()
+        if isinstance(message_id, bool) or not isinstance(message_id, int) or message_id < 0 or message_id > 2**63 - 1:
+            raise cls._invalid_cursor()
+        if not isinstance(chat_id, str) or not chat_id or len(chat_id) > 256:
+            raise cls._invalid_cursor()
+        try:
+            normalized = canonical_timestamp(stamp)
+        except BridgeError as exc:
+            raise cls._invalid_cursor(exc) from exc
+        if normalized != stamp:
+            raise cls._invalid_cursor()
+        return stamp, message_id, chat_id
+
+    @classmethod
+    def _dialog_boundary(
+        cls,
+        cursor: str | None,
+        signature: str,
+    ) -> tuple[str, str] | None:
+        decoded = decode_cursor(cursor)
+        if decoded is None:
+            return None
+        if set(decoded) != {"v", "scope", "sig", "boundary"}:
+            raise cls._invalid_cursor()
+        if decoded.get("v") != 2 or decoded.get("scope") != "dialogs" or decoded.get("sig") != signature:
+            raise cls._invalid_cursor()
+        boundary = decoded.get("boundary")
+        if not isinstance(boundary, list) or len(boundary) != 2:
+            raise cls._invalid_cursor()
+        stamp, dialog_id = boundary
+        if not isinstance(stamp, str) or len(stamp) > 64:
+            raise cls._invalid_cursor()
+        if not isinstance(dialog_id, str) or not dialog_id or len(dialog_id) > 256:
+            raise cls._invalid_cursor()
+        if stamp:
+            try:
+                normalized = canonical_timestamp(stamp)
+            except BridgeError as exc:
+                raise cls._invalid_cursor(exc) from exc
+            if normalized != stamp:
+                raise cls._invalid_cursor()
+        return stamp, dialog_id
+
+    @staticmethod
+    def _dialog_key(record: DialogRecord) -> tuple[str, str]:
+        return canonical_timestamp(record.last_message_at) or "", str(record.id)
+
+    @staticmethod
+    def _message_next_cursor(
+        scope: str,
+        signature: str,
+        page: list[MessageRecord],
+        *,
+        has_more: bool,
+    ) -> str | None:
+        if not has_more or not page:
+            return None
+        last = page[-1]
+        stamp, message_id, chat_id = message_sort_key(last)
+        return encode_cursor(
+            {
+                "v": 2,
+                "scope": scope,
+                "sig": signature,
+                "boundary": [stamp, message_id, chat_id],
+            }
+        )
+
+    @classmethod
+    def _dialog_next_cursor(
+        cls,
+        signature: str,
+        page: list[DialogRecord],
+        *,
+        has_more: bool,
+    ) -> str | None:
+        if not has_more or not page:
+            return None
+        stamp, dialog_id = cls._dialog_key(page[-1])
+        return encode_cursor(
+            {
+                "v": 2,
+                "scope": "dialogs",
+                "sig": signature,
+                "boundary": [stamp, dialog_id],
+            }
+        )
 
     def _run(self, coro: Awaitable[Any]) -> Any:
         try:
@@ -322,8 +448,11 @@ class TelethonReadBackend:
         except Exception as exc:
             name = exc.__class__.__name__
             seconds = getattr(exc, "seconds", None)
-            if name == "FloodWaitError" or (isinstance(seconds, int) and seconds > 0):
-                retry = min(max(1, int(seconds or 1)), self.config.flood_wait_cap_seconds)
+            if name in self._FLOOD_WAIT_ERRORS:
+                retry = min(
+                    max(1, int(seconds) if isinstance(seconds, int) and seconds > 0 else 1),
+                    self.config.flood_wait_cap_seconds,
+                )
                 raise BridgeError(
                     "Telegram rate limit encountered",
                     status=429,
@@ -339,18 +468,42 @@ class TelethonReadBackend:
             return [item async for item in iterator]
         return list(iterator)
 
-    async def _iter_messages(self, client: Any, entity: Any, limit: int, *, search: str = "") -> list[Any]:
+    @staticmethod
+    def _supports_named_parameter(callable_obj: Any, parameter: str) -> bool:
+        """Return true only for an explicitly declared callable parameter.
+
+        Production Telethon declares ``offset_id`` explicitly. Generic test
+        fakes that merely accept ``**kwargs`` are not assumed to implement its
+        semantics; they stay on the bounded compatibility path.
+        """
+        try:
+            return parameter in inspect.signature(callable_obj).parameters
+        except (TypeError, ValueError):
+            return False
+
+    async def _iter_messages(
+        self,
+        client: Any,
+        entity: Any,
+        limit: int,
+        *,
+        search: str = "",
+        offset_id: int | None = None,
+    ) -> list[Any]:
+        method = client.iter_messages
         kwargs: dict[str, Any] = {"limit": limit}
         if search:
             kwargs["search"] = search
+        if offset_id is not None and self._supports_named_parameter(method, "offset_id"):
+            kwargs["offset_id"] = offset_id
         try:
-            iterator = client.iter_messages(entity, **kwargs)
+            iterator = method(entity, **kwargs)
         except TypeError:
             # Simple deterministic fakes may intentionally expose only the
             # minimal iter_messages(entity, limit) contract. Filtering remains
-            # deterministic below; real Telethon clients receive server-side
-            # search hints when supported.
-            iterator = client.iter_messages(entity, limit=limit)
+            # deterministic below; real Telethon clients receive supported
+            # server-side search/offset hints.
+            iterator = method(entity, limit=limit)
         if hasattr(iterator, "__aiter__"):
             return [item async for item in iterator]
         return list(iterator)
@@ -362,7 +515,9 @@ class TelethonReadBackend:
         except BridgeError:
             raise
         except Exception as exc:
-            raise BridgeError("Chat not found", status=404, code="chat_not_found") from exc
+            if isinstance(exc, ValueError) or exc.__class__.__name__ in self._ENTITY_NOT_FOUND_ERRORS:
+                raise BridgeError("Chat not found", status=404, code="chat_not_found") from exc
+            raise
 
     def list_dialogs(self, *, limit: int, cursor: str | None, query: str, unread_only: bool) -> Page:
         async def work() -> Page:
@@ -374,23 +529,63 @@ class TelethonReadBackend:
                     records = [d for d in records if needle in normalize_search_text(f"{d.title} {d.username or ''} {d.id}")]
                 if unread_only:
                     records = [d for d in records if d.unread_count > 0]
-                records.sort(key=lambda d: ((d.last_message_at or ""), d.id), reverse=True)
-                offset = self._cursor_offset(cursor, "dialogs")
-                page = records[offset : offset + limit]
-                return Page(tuple(page), self._next_cursor("dialogs", offset, limit, len(records)), min(len(dialogs), self.config.dialog_scan_limit))
+                records.sort(key=self._dialog_key, reverse=True)
+                signature = self._cursor_signature("dialogs", needle, "1" if unread_only else "0")
+                boundary = self._dialog_boundary(cursor, signature)
+                if boundary is not None:
+                    records = [record for record in records if self._dialog_key(record) < boundary]
+                page = records[:limit]
+                has_more = len(records) > limit
+                return Page(
+                    tuple(page),
+                    self._dialog_next_cursor(signature, page, has_more=has_more),
+                    min(len(dialogs), self.config.dialog_scan_limit),
+                )
 
         return self._run(work())
 
     def history(self, *, chat: str, limit: int, cursor: str | None) -> Page:
         async def work() -> Page:
+            signature = self._cursor_signature("history", chat.strip())
+            boundary = self._message_boundary(cursor, "history", signature)
             async with self._client_session() as client:
                 entity = await self._resolve(client, chat)
-                offset = self._cursor_offset(cursor, "history")
-                messages = await self._iter_messages(client, entity, min(self.config.search_scan_limit, limit + 1 + offset))
+                method = client.iter_messages
+                supports_offset = self._supports_named_parameter(method, "offset_id")
+
+                # Telethon history is newest->oldest and ``offset_id`` is an
+                # exclusive older-than boundary. Fetching only limit+1 keeps
+                # every page bounded and lets a cursor traverse histories far
+                # beyond the former fixed search_scan_limit ceiling. Minimal
+                # legacy fakes without explicit offset semantics retain the old
+                # bounded rescan only for non-production compatibility tests.
+                if boundary is None:
+                    fetch_limit = limit + 1
+                    offset_id = None
+                elif supports_offset:
+                    fetch_limit = limit + 1
+                    offset_id = boundary[1]
+                else:
+                    fetch_limit = self.config.search_scan_limit
+                    offset_id = None
+
+                messages = await self._iter_messages(
+                    client,
+                    entity,
+                    fetch_limit,
+                    offset_id=offset_id,
+                )
                 chat_id = str(getattr(entity, "id", chat))
                 records = stable_message_sort([await self._message_record(m, chat_id) for m in messages], reverse=True)
-                page = records[offset : offset + limit]
-                return Page(tuple(page), self._next_cursor("history", offset, limit, len(records)), len(messages))
+                if boundary is not None:
+                    records = [record for record in records if message_sort_key(record) < boundary]
+                page = records[:limit]
+                has_more = len(records) > limit
+                return Page(
+                    tuple(page),
+                    self._message_next_cursor("history", signature, page, has_more=has_more),
+                    len(messages),
+                )
 
         return self._run(work())
 
@@ -406,18 +601,41 @@ class TelethonReadBackend:
         scan_limit: int,
     ) -> Page:
         async def work() -> Page:
+            needle = normalize_search_text(text.strip())
+            sender_raw = sender.strip() if sender else ""
+            sender_cf = normalize_search_text(sender_raw.lstrip("@")) if sender_raw else ""
+            signature = self._cursor_signature(
+                "search",
+                (chat or "").strip(),
+                sender_cf,
+                needle,
+                canonical_timestamp(dates.start) or "",
+                canonical_timestamp(dates.end) or "",
+                str(scan_limit),
+            )
+            boundary = self._message_boundary(cursor, "search", signature)
             async with self._client_session() as client:
                 entity = await self._resolve(client, chat) if chat else None
+                # Preserve user-visible Unicode while giving Telegram a stable
+                # compatibility-normalized server search hint. Local NFKC +
+                # casefold filtering remains authoritative for returned rows.
+                server_search = unicodedata.normalize("NFKC", text.strip()) if text.strip() else ""
                 messages = await self._iter_messages(
                     client,
                     entity,
                     min(scan_limit, self.config.search_scan_limit),
-                    search=text.strip(),
+                    search=server_search,
                 )
                 chat_id = str(getattr(entity, "id", chat or "global"))
-                records = [await self._message_record(m, chat_id) for m in messages]
-                needle = normalize_search_text(text.strip())
-                sender_cf = normalize_search_text(sender.strip()) if sender else ""
+                require_sender_details = bool(sender_cf and not sender_cf.lstrip("-").isdigit())
+                records = [
+                    await self._message_record(
+                        m,
+                        chat_id,
+                        require_sender_details=require_sender_details,
+                    )
+                    for m in messages
+                ]
                 filtered: list[MessageRecord] = []
                 for record in records:
                     stamp = datetime.fromisoformat(record.timestamp.replace("Z", "+00:00"))
@@ -427,14 +645,26 @@ class TelethonReadBackend:
                         continue
                     if sender_cf:
                         stable = record.sender
-                        hay = "" if stable is None else normalize_search_text(f"{stable.id} {stable.username or ''}")
+                        hay = (
+                            ""
+                            if stable is None
+                            else normalize_search_text(
+                                f"{stable.id} {stable.username or ''} {stable.display_name or ''}"
+                            )
+                        )
                         if sender_cf not in hay:
                             continue
                     filtered.append(record)
                 filtered = stable_message_sort(filtered, reverse=True)
-                offset = self._cursor_offset(cursor, "search")
-                page = filtered[offset : offset + limit]
-                return Page(tuple(page), self._next_cursor("search", offset, limit, len(filtered)), len(messages))
+                if boundary is not None:
+                    filtered = [record for record in filtered if message_sort_key(record) < boundary]
+                page = filtered[:limit]
+                has_more = len(filtered) > limit
+                return Page(
+                    tuple(page),
+                    self._message_next_cursor("search", signature, page, has_more=has_more),
+                    len(messages),
+                )
 
         return self._run(work())
 
