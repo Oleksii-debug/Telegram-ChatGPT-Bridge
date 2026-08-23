@@ -1,0 +1,60 @@
+name: BURST01-05 Read Search Correctness
+
+on:
+  pull_request:
+    branches:
+      - work3/integration-release-candidate
+
+permissions:
+  contents: read
+
+jobs:
+  read-search:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout exact specialist head
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Set up Python 3.11
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.11'
+      - name: Bind candidate to reviewed canonical parent
+        run: |
+          set -eu
+          EXPECTED_PARENT=bb1f81502a7eb152a0d84ce015fe4092190806b6
+          git cat-file -e "${EXPECTED_PARENT}^{commit}"
+          test "$(git merge-base HEAD "$EXPECTED_PARENT")" = "$EXPECTED_PARENT"
+      - name: Compile narrow read/runtime overlay
+        run: >-
+          python -m py_compile
+          bridge/read_search_correctness.py
+          bridge/runtime_wsgi.py
+          tests/test_burst01_read_search.py
+      - name: Focused sender-only global search regressions
+        run: python -m unittest tests.test_burst01_read_search -v
+      - name: Preserve inherited DEV03 read contracts
+        run: >-
+          python -m unittest
+          tests.test_dev03_history_offset
+          tests.test_dev03_swarm_read
+          tests.test_backend_read
+          tests.test_read_app
+          tests.test_validation_security
+          -v
+      - name: Preserve production runtime bootstrap contracts
+        run: python -m unittest tests.test_runtime_bootstrap -v
+      - name: Current-tree secret scan
+        if: always()
+        run: python tools/secret_scan.py --mode current
+      - name: Full-history secret scan
+        if: always()
+        run: python tools/secret_scan.py --mode history
+      - name: Preserve no-production-mutation boundary
+        if: always()
+        run: |
+          test ! -e .cpanel.yml
+          test ! -e ops/ENABLE_HOSTIQ_AUTO_DEPLOY
