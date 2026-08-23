@@ -28,6 +28,7 @@ jobs:
           bridge/app.py
           bridge/integrated_app.py
           tools/secret_scan.py
+          tools/workflow_security.py
           tools/parallel_overlap_report.py
           tools/build_action_openapi.py
           tools/verify_integration_provenance.py
@@ -55,6 +56,7 @@ jobs:
           ops/snapshot_candidate.py
           ops/dev5_round2_oracles.py
           tests/test_secret_scan.py
+          tests/test_dev07_security.py
           tests/test_recovery_ops.py
           tests/test_release_package.py
           tests/test_audit_round5.py
@@ -72,6 +74,9 @@ jobs:
           tests/test_dev_a_integration.py
           tests/test_dev_a_provenance.py
           tests/test_dev_a_candidate_contracts.py
+      - name: Validate public-repository workflow security policy
+        if: always()
+        run: python tools/workflow_security.py
       - name: Validate canonical release startup and dependency envelope
         run: |
           python - <<'PY'
