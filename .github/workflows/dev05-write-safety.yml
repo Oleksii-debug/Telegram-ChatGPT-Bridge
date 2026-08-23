@@ -23,17 +23,22 @@ jobs:
         run: >-
           python -m py_compile
           ops/secure_write_store.py
+          ops/phase_aware_write_adapter.py
+          bridge/phase_aware_write_app.py
           ops/write_safety.py
           ops/write_endpoint_policy.py
           ops/telegram_write_adapter.py
           tests/test_dev05_write_state_security.py
+          tests/test_dev05_phase_aware_write.py
           tests/test_dev4_write_core.py
           tests/test_dev4_endpoint_policy.py
           tests/test_dev_a_integration.py
       - name: Run DEV05 adversarial persistent-state tests
         run: |
           umask 022
-          python -m unittest tests.test_dev05_write_state_security -v
+          python -m unittest \
+            tests.test_dev05_write_state_security \
+            tests.test_dev05_phase_aware_write -v
       - name: Re-run canonical write safety regressions
         run: |
           umask 022
