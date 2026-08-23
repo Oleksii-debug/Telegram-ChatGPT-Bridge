@@ -6,7 +6,6 @@ import fcntl
 import hashlib
 import mimetypes
 import os
-import re
 import secrets
 import stat
 from contextlib import contextmanager
@@ -16,17 +15,8 @@ from typing import Any, Iterable, Iterator
 
 from .backend import ReadBackend
 from .errors import BridgeError
+from .filenames import safe_filename
 from .storage import CheckpointStore, DownloadItem, FileRecord, FileRecordStore
-
-
-def safe_filename(name: str | None, fallback: str = "file.bin") -> str:
-    raw = (name or fallback).replace("\\", "/")
-    text = raw.split("/")[-1]
-    text = re.sub(r"[\x00-\x1f<>:\"|?*]+", "_", text)
-    text = re.sub(r"\s+", " ", text).strip(" .")
-    if text in {"", ".", ".."}:
-        text = fallback
-    return text[:180]
 
 
 def _sha256(path: Path) -> str:
@@ -56,6 +46,16 @@ class DownloadLimits:
 
 
 class DownloadManager:
+    _NON_RETRYABLE_FAILURE_CODES = {
+        "bulk_file_limit",
+        "bulk_size_limit",
+        "duplicate_item_id",
+        "file_hash_mismatch",
+        "file_size_mismatch",
+        "file_too_large",
+        "unsafe_backend_path",
+    }
+
     def __init__(
         self,
         *,
@@ -156,6 +156,18 @@ class DownloadManager:
             raise BridgeError("File download failed", status=502, code="media_download_failed")
         return result["files"][0]
 
+    @classmethod
+    def _retryable_failure(cls, error: BridgeError) -> bool:
+        """Classify retry safety independently from broad HTTP status classes.
+
+        Integrity/topology/limit failures are deterministic for the immutable
+        checkpoint item and must not redownload forever merely because some use
+        a 5xx status. Telegram/network availability failures remain retryable.
+        """
+        if error.code in cls._NON_RETRYABLE_FAILURE_CODES:
+            return False
+        return error.status in {409, 429, 502, 503, 504}
+
     def _download_one(self, item: DownloadItem, *, job_id: str) -> FileRecord:
         name = safe_filename(item.name, f"message-{item.message_id}.bin")
         suffix = Path(name).suffix[:16]
@@ -164,6 +176,8 @@ class DownloadManager:
             raise BridgeError("Unsafe staging collision", status=500, code="staging_collision")
         returned: Path | None = None
         resolved: Path | None = None
+        final: Path | None = None
+        registered = False
         try:
             result = self.backend.download_media(
                 chat=item.chat,
@@ -201,12 +215,20 @@ class DownloadManager:
             except OSError:
                 pass
             mime = item.mime_type or mimetypes.guess_type(name)[0] or "application/octet-stream"
-            return self.files.add(final, name=name, mime_type=mime)
+            record = self.files.add(final, name=name, mime_type=mime)
+            registered = True
+            return record
         finally:
             for candidate in {path for path in (target, returned, resolved) if path is not None}:
                 try:
                     if candidate.exists() and candidate.is_file():
                         candidate.unlink()
+                except OSError:
+                    pass
+            if final is not None and not registered:
+                try:
+                    if final.exists() and final.is_file():
+                        final.unlink()
                 except OSError:
                     pass
 
@@ -243,6 +265,9 @@ class DownloadManager:
             for item in items:
                 if item.item_id in payload["results"]:
                     continue
+                prior_failure = payload["failures"].get(item.item_id)
+                if prior_failure is not None and prior_failure.get("retryable") is False:
+                    continue
                 payload["failures"].pop(item.item_id, None)
                 try:
                     record = self._download_one(item, job_id=job_id)
@@ -255,7 +280,7 @@ class DownloadManager:
                     payload["failures"][item.item_id] = {
                         "code": exc.code,
                         "status": exc.status,
-                        "retryable": exc.status in {409, 429, 502, 503, 504},
+                        "retryable": self._retryable_failure(exc),
                     }
                 self.checkpoints.save(payload)
 
