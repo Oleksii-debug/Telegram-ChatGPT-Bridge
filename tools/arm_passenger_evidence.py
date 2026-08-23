@@ -1,10 +1,12 @@
 # -*- coding: utf-8 -*-
-"""Create the one-time Passenger evidence marker from validated package preflight."""
+"""Create one challenge-bound Passenger evidence cycle from validated preflight."""
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
+import secrets
 import stat
 import sys
 from pathlib import Path
@@ -15,7 +17,12 @@ _REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 if str(_REPOSITORY_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPOSITORY_ROOT))
 
-from ops.passenger_evidence_hook import ARM_MARKER_NAME, build_arm_marker
+from ops.passenger_evidence_hook import (
+    ARM_MARKER_NAME,
+    CONSUMED_RECEIPT_NAME,
+    PROBE_CHALLENGE_NAME,
+    build_arm_marker,
+)
 from ops.private_control import read_private_text
 from ops.release_guard import SafetyError
 
@@ -59,59 +66,98 @@ def _private_control_root(path: Path) -> tuple[Path, os.stat_result]:
     return path, st
 
 
-def _write_marker_no_clobber(control: Path, expected_root: os.stat_result, payload: dict) -> Path:
+def _validate_open_control(root_fd: int, expected_root: os.stat_result) -> None:
+    current = os.fstat(root_fd)
+    if (
+        not stat.S_ISDIR(current.st_mode)
+        or current.st_dev != expected_root.st_dev
+        or current.st_ino != expected_root.st_ino
+        or (hasattr(os, "getuid") and current.st_uid != os.getuid())
+        or stat.S_IMODE(current.st_mode) & 0o077
+    ):
+        raise SafetyError("private control root changed during arming")
+
+
+def _artifact_exists(root_fd: int, name: str) -> bool:
+    try:
+        os.stat(name, dir_fd=root_fd, follow_symlinks=False)
+        return True
+    except FileNotFoundError:
+        return False
+
+
+def _write_exclusive(root_fd: int, name: str, raw: bytes) -> None:
+    nofollow = int(getattr(os, "O_NOFOLLOW"))
+    cloexec = int(getattr(os, "O_CLOEXEC", 0))
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | nofollow | cloexec
+    try:
+        fd = os.open(name, flags, 0o600, dir_fd=root_fd)
+    except FileExistsError as exc:
+        raise SafetyError("Passenger evidence control artifact already exists") from exc
+    try:
+        offset = 0
+        while offset < len(raw):
+            written = os.write(fd, raw[offset:])
+            if written <= 0:
+                raise SafetyError("Passenger evidence control write failed")
+            offset += written
+        os.fsync(fd)
+        st = os.fstat(fd)
+        if (
+            not stat.S_ISREG(st.st_mode)
+            or st.st_nlink != 1
+            or (hasattr(os, "getuid") and st.st_uid != os.getuid())
+            or stat.S_IMODE(st.st_mode) & 0o077
+            or st.st_size != len(raw)
+        ):
+            raise SafetyError("Passenger evidence control write validation failed")
+    finally:
+        os.close(fd)
+
+
+def _write_arm_bundle_no_clobber(
+    control: Path,
+    expected_root: os.stat_result,
+    *,
+    challenge: str,
+    marker_payload: dict,
+) -> Path:
     if os.name != "posix" or not hasattr(os, "O_NOFOLLOW") or not hasattr(os, "O_DIRECTORY"):
         raise SafetyError("required POSIX arming primitives unavailable")
+    if len(challenge) != 64 or any(ch not in "0123456789abcdef" for ch in challenge):
+        raise SafetyError("Passenger evidence challenge generation invalid")
+
     nofollow = int(getattr(os, "O_NOFOLLOW"))
     directory = int(getattr(os, "O_DIRECTORY"))
     cloexec = int(getattr(os, "O_CLOEXEC", 0))
     root_fd = os.open(control, os.O_RDONLY | directory | nofollow | cloexec)
-    marker_created = False
+    created: list[str] = []
     try:
-        root_after = os.fstat(root_fd)
-        if (
-            not stat.S_ISDIR(root_after.st_mode)
-            or root_after.st_dev != expected_root.st_dev
-            or root_after.st_ino != expected_root.st_ino
-            or (hasattr(os, "getuid") and root_after.st_uid != os.getuid())
-            or stat.S_IMODE(root_after.st_mode) & 0o077
-        ):
-            raise SafetyError("private control root changed during arming")
-        raw = (json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True) + "\n").encode("ascii")
-        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | nofollow | cloexec
-        try:
-            fd = os.open(ARM_MARKER_NAME, flags, 0o600, dir_fd=root_fd)
-        except FileExistsError as exc:
-            raise SafetyError("Passenger evidence marker already exists") from exc
-        marker_created = True
-        try:
-            offset = 0
-            while offset < len(raw):
-                written = os.write(fd, raw[offset:])
-                if written <= 0:
-                    raise SafetyError("Passenger evidence marker write failed")
-                offset += written
-            os.fsync(fd)
-            st = os.fstat(fd)
-            if (
-                not stat.S_ISREG(st.st_mode)
-                or st.st_nlink != 1
-                or (hasattr(os, "getuid") and st.st_uid != os.getuid())
-                or stat.S_IMODE(st.st_mode) & 0o077
-                or st.st_size != len(raw)
-            ):
-                raise SafetyError("Passenger evidence marker write validation failed")
-        finally:
-            os.close(fd)
+        _validate_open_control(root_fd, expected_root)
+        for name in (ARM_MARKER_NAME, PROBE_CHALLENGE_NAME, CONSUMED_RECEIPT_NAME):
+            if _artifact_exists(root_fd, name):
+                raise SafetyError("Passenger evidence cycle already exists")
+
+        challenge_raw = (challenge + "\n").encode("ascii")
+        marker_raw = (
+            json.dumps(marker_payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True) + "\n"
+        ).encode("ascii")
+        _write_exclusive(root_fd, PROBE_CHALLENGE_NAME, challenge_raw)
+        created.append(PROBE_CHALLENGE_NAME)
+        _write_exclusive(root_fd, ARM_MARKER_NAME, marker_raw)
+        created.append(ARM_MARKER_NAME)
         os.fsync(root_fd)
         return control / ARM_MARKER_NAME
     except Exception:
-        if marker_created:
+        for name in reversed(created):
             try:
-                os.unlink(ARM_MARKER_NAME, dir_fd=root_fd)
-                os.fsync(root_fd)
+                os.unlink(name, dir_fd=root_fd)
             except OSError:
                 pass
+        try:
+            os.fsync(root_fd)
+        except OSError:
+            pass
         raise
     finally:
         os.close(root_fd)
@@ -120,8 +166,19 @@ def _write_marker_no_clobber(control: Path, expected_root: os.stat_result, paylo
 def arm_from_preflight(*, preflight_path: Path, control_root: Path) -> Path:
     preflight = _private_file_json(preflight_path)
     control, root_stat = _private_control_root(control_root)
-    payload = build_arm_marker(preflight["candidate_sha"], preflight["wsgi_sha256"])
-    return _write_marker_no_clobber(control, root_stat, payload)
+    challenge = secrets.token_hex(32)
+    challenge_sha256 = hashlib.sha256(challenge.encode("ascii")).hexdigest()
+    payload = build_arm_marker(
+        preflight["candidate_sha"],
+        preflight["wsgi_sha256"],
+        challenge_sha256,
+    )
+    return _write_arm_bundle_no_clobber(
+        control,
+        root_stat,
+        challenge=challenge,
+        marker_payload=payload,
+    )
 
 
 def main(argv=None) -> int:
@@ -140,6 +197,7 @@ def main(argv=None) -> int:
     except (SafetyError, OSError, ValueError):
         print("PASSENGER_EVIDENCE_ARM_BLOCKED")
         return 2
+    # Never emit the raw challenge, its path, or any private value.
     print("PASSENGER_EVIDENCE_ARMED_FOR_EXACT_CANDIDATE")
     return 0
 
