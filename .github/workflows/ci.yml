@@ -62,6 +62,7 @@ jobs:
           tests/test_secret_scan.py
           tests/test_dev07_security.py
           tests/test_dev07_audit_security.py
+          tests/test_dev07_session_lock_security.py
           tests/test_recovery_ops.py
           tests/test_release_package.py
           tests/test_audit_round5.py
@@ -82,13 +83,15 @@ jobs:
       - name: Validate public-repository workflow security policy
         if: always()
         run: python tools/workflow_security.py
-      - name: DEV07 scanner, workflow, audit and application security regressions
+      - name: DEV07 scanner, workflow, audit, session-lock and application security regressions
         if: always()
         run: >-
           python -m unittest
           tests.test_secret_scan
           tests.test_dev07_security
           tests.test_dev07_audit_security
+          tests.test_dev07_session_lock_security
+          tests.test_dev4_session_lock
           tests.test_read_app
           tests.test_dev_a_integration
           -v
