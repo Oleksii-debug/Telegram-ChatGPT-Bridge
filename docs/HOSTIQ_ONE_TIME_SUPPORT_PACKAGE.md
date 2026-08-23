@@ -31,7 +31,7 @@ No secret is a command-line argument.
 
 ## 3. Exact candidate package preflight — before Passenger arming
 
-Run against the exact exported/staged candidate, never an approximate source copy:
+Run against the exact exported/staged candidate, never an approximate source copy. The tool resolves its own repository root and does not depend on the caller's current directory or `PYTHONPATH`:
 
 ```sh
 python tools/validate_candidate_runtime_preflight.py \
@@ -44,7 +44,7 @@ Expected stdout is only `CANDIDATE_RUNTIME_PREFLIGHT_PASS` or `CANDIDATE_RUNTIME
 
 The preflight fails closed unless:
 
-- `passenger_wsgi.py` exposes `from bridge.app import application`;
+- `passenger_wsgi.py` matches the exact reviewed startup contract in section 6; merely containing the recovered application import is insufficient;
 - runtime direct dependencies are unconditional exact pins and directly include Telethon;
 - every locked package is exact-pinned and has SHA-256 hashes only;
 - direct runtime versions exactly match the lock;
@@ -70,7 +70,7 @@ Expected stdout: `SERVER_MANIFEST_PRIVATE_REPORT_WRITTEN` or a bounded blocked c
 
 ## 5. Exact-candidate Passenger arming
 
-The old empty marker is obsolete and intentionally rejected. Arming must derive from the successful owner-private candidate preflight so a different candidate or WSGI cannot reuse the evidence cycle:
+The old empty marker is obsolete and intentionally rejected. Arming must derive from the successful owner-private candidate preflight so a different candidate or WSGI cannot reuse the evidence cycle. The tool also resolves imports from its own repository location and is safe to launch from a different working directory:
 
 ```sh
 python tools/arm_passenger_evidence.py \
@@ -85,26 +85,26 @@ The tool creates, with no-clobber POSIX semantics, one owner-private marker:
 
 The marker contains only schema version, exact candidate SHA and expected WSGI SHA-256. It is created descriptor-relative with `O_NOFOLLOW|O_EXCL`, owner/mode/inode checks and `fsync`; an existing/concurrent marker is never overwritten.
 
-## 6. Passenger application-process proof — canonical WSGI stays call-free
+## 6. Passenger application-process proof — exact canonical WSGI contract
 
-The preferred integration does **not** add a collector call to `passenger_wsgi.py`. Keep the canonical startup minimal and network-free:
+The current final-candidate interface is the exact audited direct-hook WSGI shape below. It is intentionally narrow: no arbitrary environment reads, extra imports, conditions, definitions or top-level calls are permitted.
 
 ```python
+from pathlib import Path
 from bridge.app import application
+from ops.passenger_evidence_hook import collect_if_armed
+
+_here = Path(__file__).resolve()
+collect_if_armed(app_root=_here.parent, wsgi_file=_here)
+
+__all__ = ["application"]
 ```
 
-Instead, the real exported `bridge.app.application` calls the fail-isolated adapter at the beginning of its WSGI request path. In `bridge/app.py` the integration is conceptually:
+An optional module docstring is allowed; after it, the six statements above must match structurally. `ops.candidate_runtime_preflight` independently validates this AST shape before arming, so an unrelated side-effectful wrapper cannot obtain `startup_import_contract_ok=true` merely by importing the right application symbol.
 
-```python
-from ops.passenger_evidence_hook import collect_if_armed_from_bridge_app
+This direct collector is safe only with the **Round 2 exact-binding implementation**. Public Git cannot arm it. Without the owner-private one-shot marker it is inert. When armed, the marker already binds the exact Auditor-approved candidate SHA and expected `passenger_wsgi.py` SHA-256. The collector itself does not contact Telegram or other network services, never authorizes deployment, suppresses exception detail from application output and is fail-isolated from application availability.
 
-# inside BridgeApplication.__call__(...):
-collect_if_armed_from_bridge_app(__file__)
-```
-
-The return code is ignored by normal request handling. The adapter never raises into the request, never contacts Telegram/network, is inert when no owner-private marker exists, derives the canonical application root and sibling `passenger_wsgi.py`, and delegates to the same exact SHA/WSGI-bound collector. This proves the runtime from the actual process serving a Passenger request while preserving DEV_A's call-free WSGI contract.
-
-Public Git cannot arm the hook. On the real Passenger process, strong evidence requires all of:
+On the real Passenger process, strong evidence requires all of:
 
 - actual Python major/minor 3.11;
 - actual Passenger-context signal;
@@ -118,7 +118,7 @@ Only then are both reports written owner-private:
 
 The binding report records only exact candidate SHA, expected/actual WSGI hashes, runtime payload hash, tamper hash and `private_values_copied=false`. The marker is consumed only after both private reports are written. Context mismatch or hash mismatch leaves the marker for diagnosis/retry and never degrades application availability.
 
-The older direct-call-in-`passenger_wsgi.py` example is no longer the preferred integration because the packaged DEV_A startup policy intentionally requires a minimal call-free WSGI module.
+`collect_if_armed_from_bridge_app()` remains available as an alternate adapter for a future audited call-free WSGI design, but it is **not** the current final-candidate contract and must not be mixed with the direct-hook shape. Any future switch to that adapter requires DEV_A/DEV_B to change the canonical WSGI contract deliberately and rerun package, preflight, provenance, CI and Auditor gates on the new exact SHA.
 
 ## 7. Real non-production PREPARE proof
 
@@ -151,9 +151,9 @@ Only after exact package PREPARE + exact Auditor approval:
 3. install the exact hash-locked dependencies in the approved Python 3.11 environment;
 4. validate staged startup/import;
 5. switch immutable code while preserving private bindings;
-6. invoke fixed private `restart` hook;
-7. verify exact running candidate identity;
-8. trigger one safe request so the armed in-process Passenger evidence adapter can collect the bound runtime report;
+6. invoke fixed private `restart` hook; the exact audited WSGI startup then attempts the privately armed, SHA/WSGI-bound Passenger evidence collection;
+7. verify that both owner-private Passenger runtime and binding reports exist and validate; no CLI/shell Python result may substitute;
+8. verify exact running candidate identity;
 9. validate meaningful `GET /health`, not HTTP 200 alone;
 10. verify an unauthenticated protected route rejects without leak;
 11. run only the harmless authenticated read probe `/api/v1/dialogs/list` with a server-private bearer reference;
