@@ -16,7 +16,10 @@ def application(environ: dict[str, Any], start_response: Callable) -> Iterable[b
     global _default_application
     if _default_application is None:
         try:
-            from .runtime import build_production_application_from_env
+            # BURST01-05 keeps all runtime construction in the canonical builder
+            # but selects the narrow Telethon global-sender correctness overlay.
+            # Import remains network-free and reads no private values.
+            from .read_search_correctness import build_production_application_from_env
 
             _default_application = build_production_application_from_env()
         except Exception:
