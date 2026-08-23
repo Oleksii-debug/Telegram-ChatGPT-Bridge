@@ -28,6 +28,24 @@ class ErrorCodePrivacyTests(unittest.TestCase):
         self.assertNotIn("/home/", rendered)
         self.assertNotIn("account-label", rendered)
 
+    def test_grammar_valid_but_unapproved_private_label_is_rejected(self):
+        # A regex alone is not a privacy boundary. This token satisfies the
+        # public schema grammar but must never pass through unless it is an
+        # explicitly audited protocol code.
+        failure = SafeWriteMetadataFailure(
+            "alice_private_chat",
+            status=503,
+        )
+        self.assertEqual("external_write_rejected", failure.code)
+        error = WriteSafetyMetadataError(
+            "customer_account_12345",
+            status=503,
+        )
+        self.assertEqual("external_write_rejected", error.code)
+        rendered = json.dumps(structured_safe_write_error(error))
+        self.assertNotIn("customer_account_12345", rendered)
+        self.assertNotIn("alice_private_chat", rendered)
+
     def test_legacy_safe_failure_private_code_is_sanitized_before_endpoint(self):
         with tempfile.TemporaryDirectory() as td:
             store = StructuredSafePersistentWriteStore(Path(td) / "writes.sqlite3")
