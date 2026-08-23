@@ -14,12 +14,18 @@ re-raised. If FAILED_SAFE or AMBIGUOUS persistence itself fails, the request is
 never presented as safely retryable: the caller receives reconciliation-required
 while durable CALLING/AMBIGUOUS continues to block a blind exact retry.
 
+Public error metadata is positive-grammar only. A buggy internal callback cannot
+smuggle a target, filename, server path, token fragment or other private label
+through the nominal ``code`` field: invalid codes collapse to one stable generic
+code before serialization.
+
 No raw exception text, Telegram content, target, token or server path is stored
 in these error objects.
 """
 from __future__ import annotations
 
 import json
+import re
 import time
 from typing import Any, Callable, Mapping
 
@@ -31,6 +37,16 @@ from ops.write_safety import (
     WriteAction,
     WriteSafetyError,
 )
+
+
+_PUBLIC_CODE_RE = re.compile(r"^[a-z][a-z0-9_]{0,79}$")
+_GENERIC_SAFE_CODE = "external_write_rejected"
+
+
+def _bounded_code(value: Any, default: str = _GENERIC_SAFE_CODE) -> str:
+    if isinstance(value, str) and _PUBLIC_CODE_RE.fullmatch(value):
+        return value
+    return default
 
 
 def _bounded_status(value: Any, default: int = 502) -> int:
@@ -60,12 +76,12 @@ class SafeWriteMetadataFailure(SafeNoSideEffectFailure):
 
     def __init__(
         self,
-        code: str = "external_write_rejected",
+        code: str = _GENERIC_SAFE_CODE,
         *,
         status: int = 502,
         retry_after_seconds: int | None = None,
     ) -> None:
-        super().__init__(code)
+        super().__init__(_bounded_code(code))
         self.status = _bounded_status(status)
         self.retry_after_seconds = _bounded_retry(retry_after_seconds)
 
@@ -80,7 +96,7 @@ class WriteSafetyMetadataError(WriteSafetyError):
         status: int,
         retry_after_seconds: int | None = None,
     ) -> None:
-        super().__init__(code, status=_bounded_status(status))
+        super().__init__(_bounded_code(code), status=_bounded_status(status))
         self.retry_after_seconds = _bounded_retry(retry_after_seconds)
 
 
@@ -165,7 +181,7 @@ class StructuredSafePersistentWriteStore(SecurePersistentWriteStore):
                 getattr(exc, "retry_after_seconds", None)
             )
             raise WriteSafetyMetadataError(
-                exc.code,
+                _bounded_code(getattr(exc, "code", _GENERIC_SAFE_CODE)),
                 status=status,
                 retry_after_seconds=retry,
             ) from None
@@ -202,7 +218,10 @@ def structured_safe_write_error(exc: BaseException) -> dict[str, Any]:
     """Serialize only stable bounded metadata; never raw exception text."""
 
     if isinstance(exc, WriteSafetyMetadataError):
-        out: dict[str, Any] = {"error": exc.code, "status": exc.status}
+        out: dict[str, Any] = {
+            "error": _bounded_code(exc.code),
+            "status": exc.status,
+        }
         if exc.retry_after_seconds is not None:
             out["retry_after_seconds"] = exc.retry_after_seconds
         return out
