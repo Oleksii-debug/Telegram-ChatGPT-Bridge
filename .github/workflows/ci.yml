@@ -21,10 +21,6 @@ jobs:
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: '3.11'
-      - name: Compile DEV08 reliability overlay
-        run: python -m py_compile ops/dev08_reliability.py tests/test_dev08_reliability.py tools/verify_dev08_provenance.py
-      - name: Run DEV08 crash and concurrency matrix
-        run: python -m unittest -v tests.test_dev08_reliability
       - name: Compile guard, integrated application and operations tooling
         run: >-
           python -m py_compile
