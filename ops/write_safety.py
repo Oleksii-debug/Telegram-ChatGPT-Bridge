@@ -336,17 +336,12 @@ class PersistentWriteStore:
                         con.commit()
                         return "REPLAY", preview, result
                     if state == TransactionState.CALLING.value:
-                        # A concurrent in-process/process commit is already beyond the
-                        # external-effect boundary. Do not mutate it or resend. Startup
-                        # recovery is responsible for converting orphaned CALLING rows
-                        # to AMBIGUOUS after process loss.
                         con.commit()
                         raise WriteSafetyError("write_in_progress", status=409)
                     if state == TransactionState.AMBIGUOUS.value:
                         con.commit()
                         raise ReconciliationRequired()
                     if state == TransactionState.RESERVED.value:
-                        # A process may have died before the CALLING transition; no external call began.
                         con.execute("UPDATE idempotency SET updated_at=? WHERE key_hash=?", (now, key_hash))
                         con.commit()
                         return "RESUME_RESERVED", preview, None
@@ -367,7 +362,14 @@ class PersistentWriteStore:
                     con.rollback()
                 raise
 
-    def _transition_to_calling(self, idempotency_key: str, fingerprint: str, *, now: int) -> None:
+    def _transition_to_calling(self, idempotency_key: str, fingerprint: str, *, now: int) -> dict[str, Any] | None:
+        """Claim the external-call boundary or return a durable raced commit result.
+
+        A caller reaches this method only after observing NEW/RESERVED state. If a
+        concurrent writer commits before this caller acquires the transition lock, the
+        durable result is a replay and must be returned without performing a second
+        external effect.
+        """
         key_hash = self._idempotency_hash(idempotency_key)
         with self._connect() as con:
             con.execute("BEGIN IMMEDIATE")
@@ -375,15 +377,19 @@ class PersistentWriteStore:
             if row is None or row["request_fingerprint"] != fingerprint:
                 con.rollback()
                 raise WriteSafetyError("idempotency_state_missing", status=409)
-            if row["state"] == TransactionState.COMMITTED.value:
+            state = row["state"]
+            if state == TransactionState.COMMITTED.value:
+                if not row["result_json"]:
+                    con.rollback()
+                    raise ReconciliationRequired()
+                result = json.loads(row["result_json"])
+                if not isinstance(result, dict):
+                    con.rollback()
+                    raise ReconciliationRequired()
                 con.rollback()
-                return
-            if row["state"] != TransactionState.RESERVED.value:
-                state = row["state"]
+                return result
+            if state != TransactionState.RESERVED.value:
                 con.rollback()
-                # This path can only race after this invocation already observed
-                # RESERVED. A new CALLING state therefore means another concurrent
-                # commit won the transition; the outcome is not ambiguous yet.
                 if state == TransactionState.CALLING.value:
                     raise WriteSafetyError("write_in_progress", status=409)
                 if state == TransactionState.AMBIGUOUS.value:
@@ -394,6 +400,7 @@ class PersistentWriteStore:
                 (TransactionState.CALLING.value, now, key_hash),
             )
             con.commit()
+            return None
 
     def _commit_result(self, idempotency_key: str, fingerprint: str, result: Mapping[str, Any], *, now: int) -> None:
         key_hash = self._idempotency_hash(idempotency_key)
@@ -464,20 +471,20 @@ class PersistentWriteStore:
         if mode == "REPLAY":
             return CommitResult("COMMITTED", True, fingerprint, cached)
         payload = json.loads(preview["payload_json"])
-        self._transition_to_calling(idempotency_key, fingerprint, now=ts)
+        raced_commit = self._transition_to_calling(idempotency_key, fingerprint, now=ts)
+        if raced_commit is not None:
+            return CommitResult("COMMITTED", True, fingerprint, raced_commit)
         try:
             result = dict(external_write(payload))
         except SafeNoSideEffectFailure as exc:
             self._record_safe_failure(idempotency_key, fingerprint, now=ts)
             raise WriteSafetyError(exc.code, status=502) from None
         except Exception:
-            # The call crossed the external-effect boundary. Never blindly resend.
             self._record_ambiguous(idempotency_key, fingerprint, now=ts)
             raise ReconciliationRequired() from None
         try:
             self._commit_result(idempotency_key, fingerprint, result, now=ts)
         except Exception:
-            # External call returned, but durable result could not be recorded: unknown outcome.
             try:
                 self._record_ambiguous(idempotency_key, fingerprint, now=ts)
             finally:
@@ -555,5 +562,4 @@ class PersistentWriteStore:
             }
             if idempotency_key is not None:
                 metadata["idempotency_sha256"] = self._idempotency_hash(idempotency_key)
-            # No target/chat name, text, caption, file name/path, Telegram exception or token.
             return metadata
