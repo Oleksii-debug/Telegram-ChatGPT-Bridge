@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import inspect
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
 
+from bridge.downloads import DownloadManager
+from bridge.storage import CheckpointStore, DownloadItem, FileRecordStore
 from ops import candidate_runtime_preflight, passenger_evidence_hook
 from ops.production_readiness import build_deployment_readiness, validate_support_return
 from ops.release_guard import SafetyError
@@ -73,6 +76,29 @@ def _legacy_v2_support_return() -> dict:
     }
 
 
+class _DownloadBackend:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def download_media(self, **kwargs):
+        self.calls += 1
+        target = Path(str(kwargs["destination"]))
+        target.write_bytes(b"abc")
+        return {"path": str(target)}
+
+
+class _FailOnceResultCheckpointStore(CheckpointStore):
+    def __init__(self, db_path: Path) -> None:
+        super().__init__(db_path)
+        self.fail_result_save_once = True
+
+    def save(self, payload):
+        if self.fail_result_save_once and isinstance(payload.get("results"), dict) and payload["results"]:
+            self.fail_result_save_once = False
+            raise OSError("synthetic checkpoint interruption")
+        super().save(payload)
+
+
 class HardenedCrossLaneContractTests(unittest.TestCase):
     def test_passenger_arm_marker_now_requires_challenge_digest(self):
         signature = inspect.signature(passenger_evidence_hook.build_arm_marker)
@@ -102,6 +128,49 @@ class HardenedCrossLaneContractTests(unittest.TestCase):
         self.assertEqual(readiness["checks"]["passenger_python_311"]["status"], "BLOCKED_EXTERNAL")
         self.assertFalse(readiness["non_auditor_prerequisites_structurally_present"])
         self.assertFalse(readiness["promotion_authorized"])
+
+    def test_download_registry_checkpoint_interruption_recovers_without_second_download(self):
+        """Independent closure oracle for historical HIGH A01-06 durability gap."""
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            files = FileRecordStore(root / "state" / "files.db", root / "files")
+            checkpoints = _FailOnceResultCheckpointStore(root / "state" / "jobs.db")
+            backend = _DownloadBackend()
+            manager = DownloadManager(
+                backend=backend,
+                files=files,
+                checkpoints=checkpoints,
+                staging_dir=root / "tmp",
+            )
+            item = DownloadItem(
+                "item1",
+                "1",
+                1,
+                "tg_1_0123456789abcdefabcd",
+                "a.txt",
+                "text/plain",
+                3,
+                None,
+            )
+            job_id = checkpoints.create([item])
+
+            with self.assertRaises(OSError):
+                manager.resume(job_id)
+            self.assertEqual(backend.calls, 1)
+            with sqlite3.connect(str(files.db_path)) as connection:
+                self.assertEqual(connection.execute("SELECT COUNT(*) FROM files").fetchone()[0], 1)
+            interrupted = checkpoints.load(job_id)
+            self.assertEqual(interrupted["results"], {})
+
+            resumed = manager.resume(job_id)
+            self.assertEqual(resumed["status"], "complete")
+            self.assertEqual(backend.calls, 1)
+            with sqlite3.connect(str(files.db_path)) as connection:
+                self.assertEqual(connection.execute("SELECT COUNT(*) FROM files").fetchone()[0], 1)
+                self.assertEqual(
+                    connection.execute("SELECT COUNT(*) FROM files WHERE origin_key IS NOT NULL").fetchone()[0],
+                    1,
+                )
 
 
 if __name__ == "__main__":

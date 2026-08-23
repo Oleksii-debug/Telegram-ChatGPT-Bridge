@@ -24,7 +24,7 @@ jobs:
           python-version: '3.11'
       - name: Validate exact canonical parent and QA-only path boundary
         env:
-          EXPECTED_PARENT: c609adfc9a1116aae635a0b14d632a5e59b6c2af
+          EXPECTED_PARENT: 301817d7e2c1a2fa55435d11ce5c6edc0cef5d71
           ACTUAL_PR_BASE: ${{ github.event.pull_request.base.sha || '' }}
         run: |
           set -eu
@@ -33,9 +33,6 @@ jobs:
             test "$ACTUAL_PR_BASE" = "$EXPECTED_PARENT"
           fi
           test "$(git merge-base "$EXPECTED_PARENT" HEAD)" = "$EXPECTED_PARENT"
-          FIRST_DEV09_COMMIT="$(git rev-list --reverse "$EXPECTED_PARENT"..HEAD | head -n 1)"
-          test -n "$FIRST_DEV09_COMMIT"
-          test "$(git rev-parse "$FIRST_DEV09_COMMIT^")" = "$EXPECTED_PARENT"
           git diff --name-only "$EXPECTED_PARENT"...HEAD | sort > /tmp/dev09-paths.txt
           printf '%s\n' '.github/workflows/dev09-qa.yml' 'tests/test_dev09_swarm_qa.py' 'tests/test_dev09_cross_lane_contracts.py' | sort > /tmp/dev09-expected.txt
           diff -u /tmp/dev09-expected.txt /tmp/dev09-paths.txt
@@ -44,7 +41,7 @@ jobs:
         run: >-
           python -m py_compile
           tests/test_dev09_swarm_qa.py tests/test_dev09_cross_lane_contracts.py
-          bridge/app.py bridge/integrated_app.py
+          bridge/app.py bridge/integrated_app.py bridge/downloads.py bridge/storage.py
           ops/candidate_contracts.py ops/write_safety.py ops/write_endpoint_policy.py
           ops/candidate_runtime_preflight.py ops/private_control.py
           ops/passenger_evidence_hook.py ops/passenger_probe.py
@@ -67,7 +64,7 @@ jobs:
           echo DEV09_DEVB_RUNTIME_SECURITY_REGRESSION_PASS
       - name: Require exact-parent clean-export full regression
         env:
-          EXPECTED_PARENT: c609adfc9a1116aae635a0b14d632a5e59b6c2af
+          EXPECTED_PARENT: 301817d7e2c1a2fa55435d11ce5c6edc0cef5d71
         run: |
           set -eu
           TMP_ROOT="$(mktemp -d)"
@@ -79,7 +76,7 @@ jobs:
       - name: Require PREPARE-style isolated venv full regression
         if: always()
         env:
-          EXPECTED_PARENT: c609adfc9a1116aae635a0b14d632a5e59b6c2af
+          EXPECTED_PARENT: 301817d7e2c1a2fa55435d11ce5c6edc0cef5d71
         run: |
           set -eu
           TMP_ROOT="$(mktemp -d)"

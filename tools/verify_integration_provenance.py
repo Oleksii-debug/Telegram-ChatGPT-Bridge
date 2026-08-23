@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Deterministic, non-secret provenance verifier for the DEV_A candidate.
+"""Deterministic, non-secret provenance verifier for the DEV01 canonical candidate.
 
 The verifier uses only Git object identity/path metadata from the public checkout.
 It never reads environment secrets, Telegram content or private server state.
@@ -15,6 +15,44 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[1]
 MANIFEST = ROOT / "integration" / "provenance_v1.json"
 RELEASE_OVERRIDE = ROOT / "integration" / "release_to_live_v1.json"
+
+TERMINAL_DEV_B_SHA = "8f2044d7bca9487815f754d614ab781555671a4b"
+TERMINAL_DEV_B_MERGE = "c609adfc9a1116aae635a0b14d632a5e59b6c2af"
+TERMINAL_DEV_B_FIRST_PARENT = "f135c3ee22e1de229e6820410ffbad85add08e42"
+TERMINAL_DEV_B_EXACT = {
+    "docs/DEV_B_HOSTIQ_PRODUCTION_READINESS.md",
+    "ops/candidate_runtime_preflight.py",
+    "ops/devb_run_matrix.py",
+    "ops/hostiq_lifecycle.py",
+    "ops/passenger_evidence_hook.py",
+    "ops/passenger_probe.py",
+    "ops/private_control.py",
+    "ops/private_evidence.py",
+    "ops/production_readiness.py",
+    "ops/runtime_evidence.py",
+    "tests/test_arm_passenger_evidence.py",
+    "tests/test_candidate_runtime_preflight.py",
+    "tests/test_dev2_baseline_runtime.py",
+    "tests/test_dev2_lifecycle.py",
+    "tests/test_devb_cli_entrypoints.py",
+    "tests/test_devb_production_readiness.py",
+    "tests/test_devb_run_matrix.py",
+    "tests/test_passenger_evidence_hook.py",
+    "tests/test_passenger_probe.py",
+    "tests/test_private_control.py",
+    "tests/test_run_passenger_evidence_probe.py",
+    "tools/arm_passenger_evidence.py",
+    "tools/run_passenger_evidence_probe.py",
+    "tools/validate_candidate_runtime_preflight.py",
+}
+TERMINAL_DEV_B_RETAINED = {
+    "docs/DEV_B_DEV_A_RUNTIME_SYNC.md",
+    "docs/HOSTIQ_ONE_TIME_SUPPORT_PACKAGE.md",
+    "ops/server_manifest.py",
+    "tests/test_devb_compile.py",
+    "tests/test_devb_round2_release.py",
+    "tests/test_server_manifest.py",
+}
 
 
 class ProvenanceError(RuntimeError):
@@ -87,47 +125,21 @@ def _safe_sorted_paths(value: object, label: str) -> list[str]:
     return value
 
 
-def _load() -> dict[str, Any]:
+def _load_json(path: Path, label: str) -> dict[str, Any]:
     try:
-        payload = json.loads(MANIFEST.read_text(encoding="utf-8"))
+        payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
-        raise ProvenanceError("integration provenance manifest is unreadable") from exc
+        raise ProvenanceError(f"{label} is unreadable") from exc
     if not isinstance(payload, dict) or payload.get("schema_version") != 2:
-        raise ProvenanceError("integration provenance manifest schema mismatch")
+        raise ProvenanceError(f"{label} schema mismatch")
     return payload
 
 
-def _load_release_override() -> dict[str, Any]:
-    try:
-        payload = json.loads(RELEASE_OVERRIDE.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise ProvenanceError("release-to-live provenance overlay is unreadable") from exc
-    if not isinstance(payload, dict) or payload.get("schema_version") != 2:
-        raise ProvenanceError("release-to-live provenance overlay schema mismatch")
-    if payload.get("round") != "RELEASE_TO_LIVE_ROUND_2":
-        raise ProvenanceError("release-to-live provenance round mismatch")
-    if payload.get("purpose") != "canonical_release_packaging_runtime_evidence_and_final_qa_integration":
-        raise ProvenanceError("release-to-live purpose mismatch")
-    checkpoint = payload.get("source_checkpoint")
-    if not _valid_sha(checkpoint):
-        raise ProvenanceError("release-to-live source checkpoint invalid")
-    paths = _safe_sorted_paths(payload.get("paths"), "release-to-live")
-    commits = payload.get("trace_commits")
-    if not isinstance(commits, list) or not commits:
-        raise ProvenanceError("release-to-live trace commits missing")
-    for commit in commits:
-        if not _valid_sha(commit):
-            raise ProvenanceError("release-to-live trace commit invalid")
-    if payload.get("runtime_packages") != {
-        "Telethon": "1.44.0",
-        "pyaes": "1.6.1",
-        "rsa": "4.9.1",
-        "pyasn1": "0.6.4",
-    }:
-        raise ProvenanceError("release-to-live runtime package identity mismatch")
-    if payload.get("test_only_dependencies") != "NONE_REQUIRED":
-        raise ProvenanceError("release-to-live test dependency state invalid")
+def _load() -> dict[str, Any]:
+    return _load_json(MANIFEST, "integration provenance manifest")
 
+
+def _validate_dev_b_history(payload: dict[str, Any], release_paths: set[str]) -> tuple[dict[str, Any], dict[str, Any]]:
     dev_b = payload.get("dev_b")
     if not isinstance(dev_b, dict) or dev_b.get("pr") != 11:
         raise ProvenanceError("DEV_B release provenance missing")
@@ -137,10 +149,8 @@ def _load_release_override() -> dict[str, Any]:
     imported = set(_safe_sorted_paths(dev_b.get("imported_paths"), "DEV_B imported"))
     adapted = set(_safe_sorted_paths(dev_b.get("adapted_paths"), "DEV_B adapted"))
     supersedes = set(_safe_sorted_paths(dev_b.get("supersedes_predecessor_paths"), "DEV_B supersession"))
-    if not adapted <= imported or not supersedes <= imported:
-        raise ProvenanceError("DEV_B adaptation/supersession escapes imported path set")
-    if not imported <= set(paths):
-        raise ProvenanceError("DEV_B imported path missing from release-to-live allowlist")
+    if not adapted <= imported or not supersedes <= imported or not imported <= release_paths:
+        raise ProvenanceError("DEV_B release path accounting invalid")
 
     sync = payload.get("dev_b_round2_sync")
     if not isinstance(sync, dict) or sync.get("pr") != 11:
@@ -151,15 +161,41 @@ def _load_release_override() -> dict[str, Any]:
         raise ProvenanceError("DEV_B Round-2 semantic merge identity mismatch")
     if sync.get("first_parent") != "f8b2a3ff0d689966e2f88f3c9efc63cbe5cef8a0":
         raise ProvenanceError("DEV_B Round-2 first-parent checkpoint mismatch")
-    exact_sync = set(_safe_sorted_paths(sync.get("exact_blob_paths"), "DEV_B Round-2 exact"))
+    exact = set(_safe_sorted_paths(sync.get("exact_blob_paths"), "DEV_B Round-2 exact"))
     retained = set(_safe_sorted_paths(sync.get("retained_dev_a_adaptations"), "DEV_B Round-2 retained"))
-    if exact_sync & retained:
-        raise ProvenanceError("DEV_B Round-2 exact/retained path overlap")
-    if not exact_sync <= set(paths) or not retained <= set(paths):
-        raise ProvenanceError("DEV_B Round-2 path missing from release allowlist")
+    if exact & retained or not (exact | retained) <= release_paths:
+        raise ProvenanceError("DEV_B Round-2 path accounting invalid")
     if sync.get("strict_history_suppression_imported") is not False:
         raise ProvenanceError("DEV_B strict-history suppression layer must not be imported")
+    return dev_b, sync
 
+
+def _validate_terminal_dev_b(payload: dict[str, Any], release_paths: set[str]) -> dict[str, Any]:
+    terminal = payload.get("dev_b_terminal_sync")
+    if not isinstance(terminal, dict) or terminal.get("pr") != 11:
+        raise ProvenanceError("DEV_B terminal sync provenance missing")
+    if terminal.get("sha") != TERMINAL_DEV_B_SHA:
+        raise ProvenanceError("DEV_B terminal source checkpoint mismatch")
+    if terminal.get("merge_commit") != TERMINAL_DEV_B_MERGE:
+        raise ProvenanceError("DEV_B terminal semantic merge identity mismatch")
+    if terminal.get("first_parent") != TERMINAL_DEV_B_FIRST_PARENT:
+        raise ProvenanceError("DEV_B terminal first-parent checkpoint mismatch")
+    exact = set(_safe_sorted_paths(terminal.get("exact_blob_paths"), "DEV_B terminal exact"))
+    retained = set(_safe_sorted_paths(terminal.get("retained_dev_a_adaptations"), "DEV_B terminal retained"))
+    if exact != TERMINAL_DEV_B_EXACT:
+        raise ProvenanceError("DEV_B terminal exact path set mismatch")
+    if retained != TERMINAL_DEV_B_RETAINED:
+        raise ProvenanceError("DEV_B terminal retained path set mismatch")
+    if exact & retained or not (exact | retained) <= release_paths:
+        raise ProvenanceError("DEV_B terminal path accounting invalid")
+    if terminal.get("strict_history_suppression_imported") is not False:
+        raise ProvenanceError("DEV_B terminal strict-history suppression layer must not be imported")
+    if terminal.get("production_mutated") is not False:
+        raise ProvenanceError("DEV_B terminal sync may not claim production mutation")
+    return terminal
+
+
+def _validate_dev_c(payload: dict[str, Any], release_paths: set[str]) -> dict[str, Any]:
     dev_c = payload.get("dev_c_qa_sync")
     if not isinstance(dev_c, dict) or dev_c.get("pr") != 16:
         raise ProvenanceError("DEV_C QA sync provenance missing")
@@ -169,19 +205,48 @@ def _load_release_override() -> dict[str, Any]:
         raise ProvenanceError("DEV_C QA semantic merge identity mismatch")
     if dev_c.get("first_parent") != "94c6ab7e3afabd769a63b44b222bfc0bbf067f67":
         raise ProvenanceError("DEV_C QA first-parent checkpoint mismatch")
-    dev_c_exact = set(_safe_sorted_paths(dev_c.get("exact_blob_paths"), "DEV_C QA exact"))
-    dev_c_adapted = set(_safe_sorted_paths(dev_c.get("adapted_paths"), "DEV_C QA adapted"))
-    if dev_c_exact != {
-        "docs/DEV_C_RELEASE_TO_LIVE_QA.md",
-        "ops/devc_release_qa.py",
-    }:
+    exact = set(_safe_sorted_paths(dev_c.get("exact_blob_paths"), "DEV_C QA exact"))
+    adapted = set(_safe_sorted_paths(dev_c.get("adapted_paths"), "DEV_C QA adapted"))
+    if exact != {"docs/DEV_C_RELEASE_TO_LIVE_QA.md", "ops/devc_release_qa.py"}:
         raise ProvenanceError("DEV_C QA exact path set mismatch")
-    if dev_c_adapted != {"tests/test_devc_release_e2e.py", "tests/test_devc_release_qa.py"}:
+    if adapted != {"tests/test_devc_release_e2e.py", "tests/test_devc_release_qa.py"}:
         raise ProvenanceError("DEV_C QA adapted path set mismatch")
-    if dev_c_exact & dev_c_adapted or not (dev_c_exact | dev_c_adapted) <= set(paths):
+    if exact & adapted or not (exact | adapted) <= release_paths:
         raise ProvenanceError("DEV_C QA path accounting invalid")
     if dev_c.get("production_logic_modified") is not False:
         raise ProvenanceError("DEV_C QA overlay may not claim production mutation")
+    return dev_c
+
+
+def _load_release_override() -> dict[str, Any]:
+    payload = _load_json(RELEASE_OVERRIDE, "release-to-live provenance overlay")
+    if payload.get("round") != "RELEASE_TO_LIVE_ROUND_2":
+        raise ProvenanceError("release-to-live provenance round mismatch")
+    if payload.get("purpose") != "canonical_release_packaging_runtime_evidence_and_final_qa_integration":
+        raise ProvenanceError("release-to-live purpose mismatch")
+    if not _valid_sha(payload.get("source_checkpoint")):
+        raise ProvenanceError("release-to-live source checkpoint invalid")
+
+    paths = set(_safe_sorted_paths(payload.get("paths"), "release-to-live"))
+    commits = payload.get("trace_commits")
+    if not isinstance(commits, list) or not commits or len(commits) != len(set(commits)):
+        raise ProvenanceError("release-to-live trace commits invalid")
+    if any(not _valid_sha(commit) for commit in commits):
+        raise ProvenanceError("release-to-live trace commit invalid")
+
+    if payload.get("runtime_packages") != {
+        "Telethon": "1.44.0",
+        "pyaes": "1.6.1",
+        "rsa": "4.9.1",
+        "pyasn1": "0.6.4",
+    }:
+        raise ProvenanceError("release-to-live runtime package identity mismatch")
+    if payload.get("test_only_dependencies") != "NONE_REQUIRED":
+        raise ProvenanceError("release-to-live test dependency state invalid")
+
+    _validate_dev_b_history(payload, paths)
+    _validate_terminal_dev_b(payload, paths)
+    _validate_dev_c(payload, paths)
 
     if payload.get("private_values_recorded") is not False:
         raise ProvenanceError("release-to-live overlay records private values")
@@ -237,26 +302,33 @@ def _validate_override_subset(data: dict[str, Any], path_key: str) -> set[str]:
     paths = set(data[path_key])
     overrides = set(data.get("dev_a_overrides", []))
     if not overrides <= paths:
-        raise ProvenanceError("declared DEV_A override is outside predecessor path set")
+        raise ProvenanceError("declared DEV01 override is outside predecessor path set")
     return overrides
 
 
 def verify_repository() -> dict[str, Any]:
     manifest = _load()
-    release_override = _load_release_override()
+    release = _load_release_override()
     head = _git("rev-parse", "HEAD")
     base = str(manifest["base"]["sha"])
     predecessors = manifest["predecessors"]
-    dev_b = release_override["dev_b"]
+
+    dev_b = release["dev_b"]
     dev_b_imported = set(dev_b["imported_paths"])
     dev_b_adapted = set(dev_b["adapted_paths"])
     dev_b_supersedes = set(dev_b["supersedes_predecessor_paths"])
-    dev_b_sync = release_override["dev_b_round2_sync"]
-    dev_b_sync_exact = set(dev_b_sync["exact_blob_paths"])
-    dev_b_sync_retained = set(dev_b_sync["retained_dev_a_adaptations"])
-    dev_c_sync = release_override["dev_c_qa_sync"]
-    dev_c_exact = set(dev_c_sync["exact_blob_paths"])
-    dev_c_adapted = set(dev_c_sync["adapted_paths"])
+
+    round2 = release["dev_b_round2_sync"]
+    round2_exact = set(round2["exact_blob_paths"])
+    round2_retained = set(round2["retained_dev_a_adaptations"])
+
+    terminal = release["dev_b_terminal_sync"]
+    terminal_exact = set(terminal["exact_blob_paths"])
+    terminal_retained = set(terminal["retained_dev_a_adaptations"])
+
+    dev_c = release["dev_c_qa_sync"]
+    dev_c_exact = set(dev_c["exact_blob_paths"])
+    dev_c_adapted = set(dev_c["adapted_paths"])
 
     overlap_counts = _verify_overlap_matrix(manifest)
 
@@ -266,19 +338,19 @@ def verify_repository() -> dict[str, Any]:
         predecessors["DEV2"]["merge_commit"]: (predecessors["DEV4"]["merge_commit"], predecessors["DEV2"]["sha"]),
         predecessors["DEV5"]["merge_commit"]: (predecessors["DEV2"]["merge_commit"], predecessors["DEV5"]["sha"]),
         dev_b["merge_commit"]: (dev_b["first_parent"], dev_b["sha"]),
-        dev_b_sync["merge_commit"]: (dev_b_sync["first_parent"], dev_b_sync["sha"]),
-        dev_c_sync["merge_commit"]: (dev_c_sync["first_parent"], dev_c_sync["sha"]),
+        round2["merge_commit"]: (round2["first_parent"], round2["sha"]),
+        dev_c["merge_commit"]: (dev_c["first_parent"], dev_c["sha"]),
+        terminal["merge_commit"]: (terminal["first_parent"], terminal["sha"]),
     }
     for commit, expected in expected_parent_sets.items():
-        actual = _parents(str(commit))
-        if actual != tuple(map(str, expected)):
+        if _parents(str(commit)) != tuple(map(str, expected)):
             raise ProvenanceError("semantic merge parent set/order mismatch")
         _assert_ancestor(str(commit), head)
 
     for commit in manifest["assembly_commits"].values():
         _assert_ancestor(str(commit), head)
-    _assert_ancestor(str(release_override["source_checkpoint"]), head)
-    for commit in release_override["trace_commits"]:
+    _assert_ancestor(str(release["source_checkpoint"]), head)
+    for commit in release["trace_commits"]:
         _assert_ancestor(str(commit), head)
 
     predecessor_supersession_owner = set(predecessors["DEV2"]["paths"])
@@ -290,7 +362,9 @@ def verify_repository() -> dict[str, Any]:
         source = str(data["sha"])
         overrides = _validate_override_subset(data, "paths")
         for path in data["paths"]:
-            if path in overrides or (lane == "DEV2" and path in dev_b_supersedes):
+            if path in overrides:
+                continue
+            if lane == "DEV2" and (path in dev_b_supersedes or path in terminal_exact):
                 continue
             if _blob("HEAD", path) != _blob(source, path):
                 raise ProvenanceError(f"unexpected post-import mutation: {lane}:{path}")
@@ -298,36 +372,42 @@ def verify_repository() -> dict[str, Any]:
     dev5 = predecessors["DEV5"]
     dev5_overrides = _validate_override_subset(dev5, "ported_paths")
     for path in dev5["ported_paths"]:
-        if path in dev5_overrides:
-            continue
-        if _blob("HEAD", path) != _blob(str(dev5["sha"]), path):
+        if path not in dev5_overrides and _blob("HEAD", path) != _blob(str(dev5["sha"]), path):
             raise ProvenanceError(f"DEV5 portable oracle drift: {path}")
     for path in dev5["rejected_overlaps_preserve_base"]:
         if _blob("HEAD", path) != _blob(base, path):
             raise ProvenanceError(f"rejected DEV5 overlap overwrote DEV1 authority: {path}")
 
+    later_owned = round2_exact | terminal_exact | terminal_retained
     for path in dev_b_imported:
-        if path in dev_b_adapted or path in dev_b_sync_exact:
+        if path in dev_b_adapted or path in later_owned:
             continue
         if _blob("HEAD", path) != _blob(str(dev_b["sha"]), path):
             raise ProvenanceError(f"unexpected DEV_B imported-path drift: {path}")
 
-    for path in dev_b_sync_exact:
-        if _blob("HEAD", path) != _blob(str(dev_b_sync["sha"]), path):
+    for path in round2_exact - terminal_exact:
+        if _blob("HEAD", path) != _blob(str(round2["sha"]), path):
             raise ProvenanceError(f"unexpected DEV_B Round-2 exact-path drift: {path}")
 
-    if dev_b_sync_retained != {
+    if round2_retained != {
         "ops/server_manifest.py",
         "tests/test_devb_round2_release.py",
         "tests/test_server_manifest.py",
     }:
         raise ProvenanceError("DEV_B Round-2 retained adaptation set mismatch")
 
+    for path in terminal_exact:
+        if _blob("HEAD", path) != _blob(str(terminal["sha"]), path):
+            raise ProvenanceError(f"unexpected DEV_B terminal exact-path drift: {path}")
+    for path in terminal_retained:
+        if _blob("HEAD", path) == _blob(str(terminal["sha"]), path):
+            raise ProvenanceError(f"DEV_B terminal retained adaptation unexpectedly reverted: {path}")
+
     for path in dev_c_exact:
-        if _blob("HEAD", path) != _blob(str(dev_c_sync["sha"]), path):
+        if _blob("HEAD", path) != _blob(str(dev_c["sha"]), path):
             raise ProvenanceError(f"unexpected DEV_C QA exact-path drift: {path}")
     for path in dev_c_adapted:
-        if _blob("HEAD", path) == _blob(str(dev_c_sync["sha"]), path):
+        if _blob("HEAD", path) == _blob(str(dev_c["sha"]), path):
             raise ProvenanceError(f"DEV_C adapted QA path unexpectedly reverted to stale source blob: {path}")
 
     for forbidden in ("tools/strict_history_secret_scan.py", "tests/test_strict_history_secret_scan.py"):
@@ -338,7 +418,7 @@ def verify_repository() -> dict[str, Any]:
     for lane in ("DEV3", "DEV4", "DEV2"):
         allowed_paths.update(predecessors[lane]["paths"])
     allowed_paths.update(dev5["ported_paths"])
-    release_paths = set(release_override["paths"])
+    release_paths = set(release["paths"])
     allowed_paths.update(release_paths)
 
     changed = {
@@ -347,15 +427,13 @@ def verify_repository() -> dict[str, Any]:
         if line.strip()
     }
     _reject_unexpected_paths(changed, allowed_paths)
-    missing_in_manifest = sorted(path for path in manifest["dev_a_paths"] if path not in changed)
-    if missing_in_manifest:
-        raise ProvenanceError("declared DEV_A path is absent from candidate diff")
-    missing_release_paths = sorted(path for path in release_paths if path not in changed)
-    if missing_release_paths:
+
+    if any(path not in changed for path in manifest["dev_a_paths"]):
+        raise ProvenanceError("declared DEV01 path is absent from candidate diff")
+    if any(path not in changed for path in release_paths):
         raise ProvenanceError("declared release-to-live path is absent from candidate diff")
 
-    safety = manifest["safety_boundary"]
-    if safety != {
+    if manifest["safety_boundary"] != {
         "merge": False,
         "deploy": False,
         "passenger_restart": False,
@@ -369,16 +447,18 @@ def verify_repository() -> dict[str, Any]:
         "head": head,
         "base": base,
         "changed_path_count": len(changed),
-        "verified_predecessor_count": 7,
-        "semantic_merge_count": 7,
+        "verified_predecessor_count": 8,
+        "semantic_merge_count": 8,
         "dev3_override_count": len(_validate_override_subset(predecessors["DEV3"], "paths")),
         "dev4_override_count": len(_validate_override_subset(predecessors["DEV4"], "paths")),
         "adapted_dev5_path_count": len(dev5_overrides),
         "dev_b_imported_path_count": len(dev_b_imported),
         "dev_b_adapted_path_count": len(dev_b_adapted),
         "dev_b_superseded_path_count": len(dev_b_supersedes),
-        "dev_b_round2_sync_path_count": len(dev_b_sync_exact),
-        "dev_b_round2_adapted_path_count": len(dev_b_sync_retained),
+        "dev_b_round2_sync_path_count": len(round2_exact),
+        "dev_b_round2_adapted_path_count": len(round2_retained),
+        "dev_b_terminal_exact_path_count": len(terminal_exact),
+        "dev_b_terminal_retained_path_count": len(terminal_retained),
         "dev_c_exact_path_count": len(dev_c_exact),
         "dev_c_adapted_path_count": len(dev_c_adapted),
         "pr2_pr3_overlap_count": overlap_counts["PR2_PR3"],

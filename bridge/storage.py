@@ -21,6 +21,7 @@ from .validation import validate_file_ref
 _JOB_ID_RE = re.compile(r"^[A-Za-z0-9_-]{16,128}$")
 _ITEM_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 _CODE_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
+_ORIGIN_KEY_RE = re.compile(r"^dl_[0-9a-f]{64}$")
 
 
 @dataclass(frozen=True)
@@ -32,6 +33,7 @@ class FileRecord:
     size: int
     sha256: str
     created_at: int
+    origin_key: str | None = None
 
     def public_metadata(self) -> dict[str, Any]:
         return {
@@ -56,6 +58,10 @@ class FileRecordStore:
             except OSError:
                 pass
         with self._connect() as connection:
+            # Serialize schema inspection + migration across Passenger workers.
+            # Without an immediate write transaction two workers can both see
+            # a legacy schema and race the same ALTER TABLE ADD COLUMN.
+            connection.execute("BEGIN IMMEDIATE")
             connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS files (
@@ -65,9 +71,16 @@ class FileRecordStore:
                     mime_type TEXT NOT NULL,
                     size INTEGER NOT NULL,
                     sha256 TEXT NOT NULL,
-                    created_at INTEGER NOT NULL
+                    created_at INTEGER NOT NULL,
+                    origin_key TEXT
                 )
                 """
+            )
+            columns = {str(row[1]) for row in connection.execute("PRAGMA table_info(files)")}
+            if "origin_key" not in columns:
+                connection.execute("ALTER TABLE files ADD COLUMN origin_key TEXT")
+            connection.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS files_origin_key_unique ON files(origin_key) WHERE origin_key IS NOT NULL"
             )
             connection.commit()
 
@@ -80,6 +93,14 @@ class FileRecordStore:
             yield connection
         finally:
             connection.close()
+
+    @staticmethod
+    def _validate_origin_key(origin_key: str | None) -> str | None:
+        if origin_key is None:
+            return None
+        if not isinstance(origin_key, str) or not _ORIGIN_KEY_RE.fullmatch(origin_key):
+            raise BridgeError("Invalid private file origin key", status=500, code="invalid_origin_key")
+        return origin_key
 
     def _relative_path(self, path: Path) -> str:
         try:
@@ -106,19 +127,30 @@ class FileRecordStore:
                 digest.update(chunk)
         return digest.hexdigest()
 
-    def add(self, path: Path, *, name: str, mime_type: str = "application/octet-stream") -> FileRecord:
+    def add(
+        self,
+        path: Path,
+        *,
+        name: str,
+        mime_type: str = "application/octet-stream",
+        origin_key: str | None = None,
+    ) -> FileRecord:
+        origin = self._validate_origin_key(origin_key)
         relative = self._relative_path(path)
         size = path.stat().st_size
         sha256 = self._hash(path)
         now = int(time.time())
         file_ref = secrets.token_urlsafe(24)
-        with self._connect() as connection:
-            connection.execute(
-                "INSERT INTO files(file_ref,rel_path,name,mime_type,size,sha256,created_at) VALUES (?,?,?,?,?,?,?)",
-                (file_ref, relative, name[:180], mime_type[:160], size, sha256, now),
-            )
-            connection.commit()
-        return FileRecord(file_ref, str(path.resolve()), name[:180], mime_type[:160], size, sha256, now)
+        try:
+            with self._connect() as connection:
+                connection.execute(
+                    "INSERT INTO files(file_ref,rel_path,name,mime_type,size,sha256,created_at,origin_key) VALUES (?,?,?,?,?,?,?,?)",
+                    (file_ref, relative, name[:180], mime_type[:160], size, sha256, now, origin),
+                )
+                connection.commit()
+        except sqlite3.IntegrityError as exc:
+            raise BridgeError("Private file registry collision", status=409, code="file_registry_collision") from exc
+        return FileRecord(file_ref, str(path.resolve()), name[:180], mime_type[:160], size, sha256, now, origin)
 
     def get(self, file_ref: str) -> FileRecord | None:
         try:
@@ -127,7 +159,7 @@ class FileRecordStore:
             return None
         with self._connect() as connection:
             row = connection.execute(
-                "SELECT rel_path,name,mime_type,size,sha256,created_at FROM files WHERE file_ref=?",
+                "SELECT rel_path,name,mime_type,size,sha256,created_at,origin_key FROM files WHERE file_ref=?",
                 (safe_ref,),
             ).fetchone()
         if not row:
@@ -149,7 +181,24 @@ class FileRecordStore:
             return None
         if not secrets.compare_digest(self._hash(candidate), str(row[4])):
             return None
-        return FileRecord(safe_ref, str(candidate), row[1], row[2], int(row[3]), row[4], int(row[5]))
+        origin = row[6]
+        if origin is not None and (not isinstance(origin, str) or not _ORIGIN_KEY_RE.fullmatch(origin)):
+            return None
+        return FileRecord(safe_ref, str(candidate), row[1], row[2], int(row[3]), row[4], int(row[5]), origin)
+
+    def get_by_origin(self, origin_key: str) -> FileRecord | None:
+        """Resolve a private download-origin marker without exposing it publicly."""
+        try:
+            origin = self._validate_origin_key(origin_key)
+        except BridgeError:
+            return None
+        if origin is None:
+            return None
+        with self._connect() as connection:
+            row = connection.execute("SELECT file_ref FROM files WHERE origin_key=?", (origin,)).fetchone()
+        if not row:
+            return None
+        return self.get(str(row[0]))
 
     def delete(self, file_ref: str) -> bool:
         """Remove a registered private file and its registry row safely."""
