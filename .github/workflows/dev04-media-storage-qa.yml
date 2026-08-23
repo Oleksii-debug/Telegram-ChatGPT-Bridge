@@ -26,16 +26,22 @@ jobs:
           bridge/storage.py
           bridge/downloads.py
           bridge/archive.py
+          bridge/file_access.py
+          bridge/app.py
           tests/test_dev04_media_storage.py
+          tests/test_dev04_private_serving.py
           tests/test_storage_downloads.py
           tests/test_archive_security.py
-      - name: Run DEV04 media storage regressions
+          tests/test_read_app.py
+      - name: Run DEV04 media storage and private serving regressions
         run: |
           umask 077
           python -m unittest \
             tests.test_dev04_media_storage \
+            tests.test_dev04_private_serving \
             tests.test_storage_downloads \
-            tests.test_archive_security -v
+            tests.test_archive_security \
+            tests.test_read_app -v
       - name: Recheck send-files private file compatibility
         run: |
           umask 077
