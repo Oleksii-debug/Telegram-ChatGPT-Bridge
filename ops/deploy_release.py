@@ -20,6 +20,7 @@ from datetime import datetime
 from pathlib import Path, PurePosixPath
 
 from ops.deployment_lock_policy import LockPolicyError, validate_preexisting_lock
+from ops.dev08_deploy_recovery import classify_deployment_recovery
 from ops.release_guard import (
     SafetyError, apply_backup_retention, apply_retention, atomic_switch_link,
     attach_persistent_state, build_manifest, cleanup_stale_staging,
@@ -940,6 +941,105 @@ def _reconcile_incomplete_transaction(*, control_root: Path, releases_root: Path
             final_target = final.resolve(strict=True)
         except OSError:
             pass
+
+    if state == "BACKED_UP" and final_target is not None and active == final_target:
+        candidate_verified = False
+        if marker:
+            try:
+                _verify_journal_candidate(final, journal, persistent_state_root, runtime_entries)
+                candidate_verified = True
+            except SafetyError:
+                candidate_verified = False
+        decision = classify_deployment_recovery(
+            journal_state=state,
+            active_role="candidate",
+            approval_marker_valid=marker,
+            runtime_manifest_matches=True,
+            candidate_verified=candidate_verified,
+            previous_release_available=old.is_dir() and not old.is_symlink(),
+        )
+        if decision.action == "RECOVER_AS_SWITCHED":
+            journal = _transition_transaction(
+                control_root,
+                journal,
+                "SWITCHED",
+                recovered_at=utc_now_iso(),
+                recovery_reason_code=decision.reason_code,
+            )
+            state = "SWITCHED"
+        elif decision.action == "ROLLBACK_REQUIRED":
+            try:
+                journal = _transition_transaction(
+                    control_root,
+                    journal,
+                    "SWITCHED",
+                    recovered_at=utc_now_iso(),
+                    recovery_reason_code=decision.reason_code,
+                )
+            except Exception as transition_exc:
+                try:
+                    restore_link(active_link, previous)
+                    _recover_previous_release(
+                        previous_sha,
+                        restart_hook,
+                        identity_hook,
+                        unauth_hook,
+                        auth_hook,
+                        resume_hook,
+                        "post-switch journal-failure rollback",
+                    )
+                except Exception as rollback_exc:
+                    _best_effort_transaction(
+                        control_root,
+                        journal,
+                        "CRITICAL_ROLLBACK_FAILED",
+                        rollback_failure_type=type(rollback_exc).__name__,
+                    )
+                    raise SafetyError("interrupted post-switch journal-failure rollback failed") from rollback_exc
+                _best_effort_transaction(
+                    control_root,
+                    journal,
+                    "CRITICAL_TRANSACTION_AMBIGUOUS",
+                    reason_code="observed_switch_journal_transition_failed",
+                )
+                raise SafetyError("observed post-switch state could not be journaled") from transition_exc
+            try:
+                restore_link(active_link, previous)
+                _recover_previous_release(
+                    previous_sha,
+                    restart_hook,
+                    identity_hook,
+                    unauth_hook,
+                    auth_hook,
+                    resume_hook,
+                    "post-switch candidate revalidation rollback",
+                )
+                quarantine = _quarantine_release(final, releases_root, journal)
+                return _best_effort_transaction(
+                    control_root,
+                    journal,
+                    "ROLLED_BACK",
+                    completed_at=utc_now_iso(),
+                    quarantine_name=quarantine.name if quarantine else None,
+                    recovery_mode="candidate_reverification_failed",
+                )
+            except Exception as rollback_exc:
+                _best_effort_transaction(
+                    control_root,
+                    journal,
+                    "CRITICAL_ROLLBACK_FAILED",
+                    rollback_failure_type=type(rollback_exc).__name__,
+                )
+                raise SafetyError("interrupted post-switch candidate rollback failed") from rollback_exc
+        else:
+            _best_effort_transaction(
+                control_root,
+                journal,
+                "CRITICAL_TRANSACTION_AMBIGUOUS",
+                reason_code=decision.reason_code,
+            )
+            raise SafetyError("incomplete transaction recovery classification is ambiguous")
+
     if state in {"SWITCHED", "VERIFIED"}:
         _validate_consumed_approval_marker(control_root=control_root,
             consumption_root=approval_consumption_root, journal=journal, require_exists=True)

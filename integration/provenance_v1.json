@@ -146,7 +146,7 @@
     "docs/DEV03_SWARM_READ_HARDENING.md", "docs/DEV04_MEDIA_STORAGE.md", "docs/DEV08_DEPLOYMENT_RECOVERY_R3.md",
     "docs/DEV_A_INTEGRATED_RELEASE_CANDIDATE.md", "docs/DEV_A_PROVENANCE_LEDGER.md",
     "integration/provenance_v1.json", "ops/candidate_contracts.py", "ops/dev08_deploy_recovery.py", "ops/integration_interfaces.py",
-    "tests/test_dev01_dev03_peer_provenance.py", "tests/test_dev01_dev04_peer_provenance.py", "tests/test_dev01_dev08_peer_provenance.py",
+    "tests/test_dev01_dev03_peer_provenance.py", "tests/test_dev01_dev04_peer_provenance.py", "tests/test_dev01_dev08_authoritative_recovery.py", "tests/test_dev01_dev08_peer_provenance.py",
     "tests/test_dev03_history_offset.py", "tests/test_dev03_swarm_read.py", "tests/test_dev04_media_storage.py",
     "tests/test_dev04_migration_concurrency.py", "tests/test_dev04_private_serving.py", "tests/test_dev07_audit_security.py",
     "tests/test_dev_a_candidate_contracts.py", "tests/test_dev_a_integration.py", "tests/test_dev_a_provenance.py",
@@ -227,7 +227,13 @@
       ],
       "source_validation_run_id": 32646112339,
       "source_validation_job_id": 97210515630,
-      "production_runtime_modified": false,
+      "auditor_finding": "A01-11",
+      "authoritative_runtime_parent_sha": "2480d74b623283eeebfdb74c711cbc229d89cd14",
+      "authoritative_runtime_paths": [
+        "ops/deploy_release.py",
+        "tests/test_dev01_dev08_authoritative_recovery.py"
+      ],
+      "production_runtime_modified": true,
       "production_mutated": false,
       "deployment_authorized": false
     }
