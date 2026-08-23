@@ -144,11 +144,17 @@ class OneShotPassengerProbeTests(unittest.TestCase):
                     evidence_root=evidence,
                     attempts=3,
                 )
-            self.assertEqual("PASSENGER_EVIDENCE_ONE_SHOT_NOT_CONFIRMED", status)
+            self.assertEqual("PASSENGER_EVIDENCE_ONE_SHOT_AMBIGUOUS_RETAINED", status)
             self.assertEqual(3, dispatch.call_count)
             marker_text = (control / passenger_evidence_hook.ARM_MARKER_NAME).read_text()
             self.assertNotIn(self.RAW, marker_text)
             self.assertFalse((control / passenger_evidence_hook.CONSUMED_RECEIPT_NAME).exists())
+            self.assertEqual(
+                "PASSENGER_EVIDENCE_EXISTING_ARMED_AMBIGUOUS",
+                run_passenger_evidence_probe.inspect_existing_evidence_state(
+                    control_root=control, evidence_root=evidence,
+                ),
+            )
 
     def test_invalid_attempt_count_fails_before_arming(self):
         with tempfile.TemporaryDirectory() as td:
@@ -161,6 +167,96 @@ class OneShotPassengerProbeTests(unittest.TestCase):
                     attempts=0,
                 )
             self.assertFalse((control / passenger_evidence_hook.ARM_MARKER_NAME).exists())
+
+    def test_invalid_endpoint_fails_before_arming_or_dispatch(self):
+        with tempfile.TemporaryDirectory() as td:
+            _, evidence, control, preflight = self.roots(td)
+            with mock.patch.object(run_passenger_evidence_probe, "dispatch_challenged_health_probe") as dispatch:
+                with self.assertRaises(SafetyError):
+                    run_passenger_evidence_probe.run_one_shot_probe(
+                        preflight_path=preflight,
+                        control_root=control,
+                        evidence_root=evidence,
+                        endpoint="https://example.invalid/health",
+                    )
+            dispatch.assert_not_called()
+            self.assertFalse((control / passenger_evidence_hook.ARM_MARKER_NAME).exists())
+
+    def test_invalid_timeout_fails_before_arming_or_dispatch(self):
+        with tempfile.TemporaryDirectory() as td:
+            _, evidence, control, preflight = self.roots(td)
+            with mock.patch.object(run_passenger_evidence_probe, "dispatch_challenged_health_probe") as dispatch:
+                with self.assertRaises(SafetyError):
+                    run_passenger_evidence_probe.run_one_shot_probe(
+                        preflight_path=preflight,
+                        control_root=control,
+                        evidence_root=evidence,
+                        timeout=0.0,
+                    )
+            dispatch.assert_not_called()
+            self.assertFalse((control / passenger_evidence_hook.ARM_MARKER_NAME).exists())
+
+    def test_network_failure_with_terminal_bundle_is_non_authorizing_terminal_state(self):
+        with tempfile.TemporaryDirectory() as td:
+            _, evidence, control, preflight = self.roots(td)
+            def dispatch(endpoint, raw, timeout=5.0):
+                self.materialize_terminal(control, evidence)
+                return passenger_probe.ProbeResult("FAIL", None, "PROBE_NETWORK_FAILURE")
+            with mock.patch.object(run_passenger_evidence_probe.secrets, "token_hex", return_value=self.RAW), \
+                 mock.patch.object(run_passenger_evidence_probe, "dispatch_challenged_health_probe", side_effect=dispatch):
+                status = run_passenger_evidence_probe.run_one_shot_probe(
+                    preflight_path=preflight,
+                    control_root=control,
+                    evidence_root=evidence,
+                    attempts=1,
+                )
+            self.assertEqual("PASSENGER_EVIDENCE_TERMINAL_CONFIRMED_HTTP_NOT_CONFIRMED", status)
+            self.assertEqual(
+                "PASSENGER_EVIDENCE_EXISTING_TERMINAL_VALID_NONAUTHORIZING",
+                run_passenger_evidence_probe.inspect_existing_evidence_state(
+                    control_root=control, evidence_root=evidence,
+                ),
+            )
+
+    def test_partial_terminal_state_after_dispatch_blocks(self):
+        with tempfile.TemporaryDirectory() as td:
+            _, evidence, control, preflight = self.roots(td)
+            def dispatch(endpoint, raw, timeout=5.0):
+                write_private_json_no_clobber(
+                    evidence,
+                    evidence / passenger_evidence_hook.REPORT_NAME,
+                    self.strong_runtime(),
+                )
+                return passenger_probe.ProbeResult("FAIL", None, "PROBE_NETWORK_FAILURE")
+            with mock.patch.object(run_passenger_evidence_probe.secrets, "token_hex", return_value=self.RAW), \
+                 mock.patch.object(run_passenger_evidence_probe, "dispatch_challenged_health_probe", side_effect=dispatch):
+                with self.assertRaises(SafetyError):
+                    run_passenger_evidence_probe.run_one_shot_probe(
+                        preflight_path=preflight,
+                        control_root=control,
+                        evidence_root=evidence,
+                        attempts=1,
+                    )
+
+    def test_terminal_marker_inode_replacement_blocks_confirmation(self):
+        with tempfile.TemporaryDirectory() as td:
+            _, evidence, control, preflight = self.roots(td)
+            def dispatch(endpoint, raw, timeout=5.0):
+                self.materialize_terminal(control, evidence)
+                marker_path = control / passenger_evidence_hook.ARM_MARKER_NAME
+                marker_text = marker_path.read_text(encoding="utf-8")
+                marker_path.unlink()
+                marker_path.write_text(marker_text, encoding="utf-8")
+                os.chmod(marker_path, 0o600)
+                return passenger_probe.ProbeResult("PASS", 200, "PROBE_HEALTH_REQUEST_CONFIRMED")
+            with mock.patch.object(run_passenger_evidence_probe.secrets, "token_hex", return_value=self.RAW), \
+                 mock.patch.object(run_passenger_evidence_probe, "dispatch_challenged_health_probe", side_effect=dispatch):
+                with self.assertRaises(SafetyError):
+                    run_passenger_evidence_probe.run_one_shot_probe(
+                        preflight_path=preflight,
+                        control_root=control,
+                        evidence_root=evidence,
+                    )
 
     def test_terminal_artifact_tamper_blocks_confirmation(self):
         with tempfile.TemporaryDirectory() as td:
@@ -181,6 +277,17 @@ class OneShotPassengerProbeTests(unittest.TestCase):
                         control_root=control,
                         evidence_root=evidence,
                     )
+
+    def test_inspection_without_marker_or_terminal_is_non_mutating(self):
+        with tempfile.TemporaryDirectory() as td:
+            _, evidence, control, _ = self.roots(td)
+            self.assertEqual(
+                "PASSENGER_EVIDENCE_EXISTING_NOT_ARMED",
+                run_passenger_evidence_probe.inspect_existing_evidence_state(
+                    control_root=control, evidence_root=evidence,
+                ),
+            )
+            self.assertEqual([], list(control.iterdir()))
 
 
 if __name__ == "__main__":
