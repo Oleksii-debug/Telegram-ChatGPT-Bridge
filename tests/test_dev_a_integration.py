@@ -16,6 +16,7 @@ from bridge.security import RateLimitDecision
 from ops.openapi_registry import OPERATIONS, OperationClass, build_action_openapi
 from ops.telegram_write_adapter import DeterministicFakeTelegramClient, TelegramRuntimeConfig, TelegramWriteAdapter
 from ops.write_endpoint_policy import FixedWindowEndpointLimiter
+from ops.write_safety import PersistentWriteStore, WriteAction
 
 
 TOKEN = "dev-a-test-bearer-token-000000000001"
@@ -206,6 +207,38 @@ class UnifiedReleaseCandidateTests(unittest.TestCase):
         self.assertTrue(second["json"]["data"]["idempotent_replay"])
         self.assertEqual(len(self.client.external_writes), 1)
         self.assertEqual(first["json"]["data"]["result"]["operation"], "SEND")
+
+    def test_raced_transition_after_other_writer_committed_is_replay_not_second_effect(self):
+        store = PersistentWriteStore(Path(self.tmp.name) / "raced-write.db", preview_ttl_seconds=30)
+        preview = store.create_preview(WriteAction.SEND, {"target": "100", "text": "race"}, now=100)
+        mode, stale_preview_row, _ = store._begin_commit(
+            preview.token,
+            expected_action=WriteAction.SEND,
+            idempotency_key="idem-raced-0001",
+            now=101,
+        )
+        self.assertEqual(mode, "NEW")
+        fingerprint = stale_preview_row["request_fingerprint"]
+        self.assertIsNone(store._transition_to_calling("idem-raced-0001", fingerprint, now=101))
+        durable = {"operation": "SEND", "message_ids": [101], "count": 1}
+        store._commit_result("idem-raced-0001", fingerprint, durable, now=101)
+
+        original_begin = store._begin_commit
+        external_calls = []
+        try:
+            store._begin_commit = lambda *args, **kwargs: ("RESUME_RESERVED", stale_preview_row, None)
+            result = store.commit(
+                preview.token,
+                expected_action=WriteAction.SEND,
+                idempotency_key="idem-raced-0001",
+                external_write=lambda payload: (external_calls.append(payload) or {"operation": "SEND", "message_ids": [202]}),
+                now=101,
+            )
+        finally:
+            store._begin_commit = original_begin
+        self.assertTrue(result.idempotent_replay)
+        self.assertEqual(result.result, durable)
+        self.assertEqual(external_calls, [])
 
     def test_writer_unconfigured_rejects_before_preview_is_consumed(self):
         app = UnifiedBridgeApplication(
