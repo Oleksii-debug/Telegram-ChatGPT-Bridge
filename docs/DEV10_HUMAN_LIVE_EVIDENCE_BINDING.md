@@ -2,6 +2,8 @@
 
 Status: source-only protocol. No deployment, Telegram authorization, ChatGPT Action live call, human NVDA PASS or Telegram write is authorized by this document.
 
+This document is the authoritative DEV10 contract for **final human accessibility evidence**. It supersedes the older `candidate_sha` wording in the `Human evidence schema` section of `DEV10_ACCESSIBILITY_LIVE_E2E_PROTOCOL.md`. The older `validate_human_accessibility_evidence()` helper remains pre-live/source evidence only; it must not be used to claim final deployed human PASS. Final acceptance must use `validate_deployed_human_receipt()` from `ops/dev10_human_live_gate.py`.
+
 ## Why this layer exists
 
 A green source candidate, a successful GitHub PR merge-ref run, and a successful non-live PREPARE are important release evidence, but none proves what is actually deployed and running on HOSTiQ. Human accessibility evidence has the same identity problem: a keyboard/NVDA PASS is meaningful only for the exact deployed release and the exact private setup surface that the human tested.
