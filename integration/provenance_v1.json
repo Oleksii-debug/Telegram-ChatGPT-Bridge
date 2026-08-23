@@ -76,7 +76,7 @@
         "ops/write_safety.py", "tests/test_dev4_endpoint_policy.py", "tests/test_dev4_file_send_policy.py",
         "tests/test_dev4_session_lock.py", "tests/test_dev4_write_core.py", "tools/build_action_openapi.py"
       ],
-      "dev_a_overrides": []
+      "dev_a_overrides": ["ops/write_safety.py"]
     },
     "DEV2": {
       "pr": 5,
