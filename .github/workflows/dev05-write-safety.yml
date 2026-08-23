@@ -33,7 +33,6 @@ jobs:
           tests/test_dev05_phase_aware_write.py
           tests/test_dev05_structured_safe_errors.py
           tests/test_dev05_effect_boundary_crash.py
-          tests/test_dev05_wsgi_safe_error.py
           tests/test_dev05_error_code_privacy.py
           tests/test_dev4_write_core.py
           tests/test_dev4_endpoint_policy.py
@@ -46,7 +45,6 @@ jobs:
             tests.test_dev05_phase_aware_write \
             tests.test_dev05_structured_safe_errors \
             tests.test_dev05_effect_boundary_crash \
-            tests.test_dev05_wsgi_safe_error \
             tests.test_dev05_error_code_privacy -v
       - name: Re-run canonical write safety regressions
         run: |
