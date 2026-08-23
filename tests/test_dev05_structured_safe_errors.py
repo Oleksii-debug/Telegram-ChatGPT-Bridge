@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import asyncio
+import json
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 
+from bridge.phase_aware_write_app import PhaseAwareUnifiedBridgeApplication
 from ops.phase_aware_write_adapter import PhaseAwareTelegramWriteAdapter
 from ops.structured_safe_write import (
     SafeWriteMetadataFailure,
@@ -19,6 +23,7 @@ from ops.write_safety import (
     ReconciliationRequired,
     SafeNoSideEffectFailure,
     TransactionState,
+    WriteSafetyError,
 )
 
 
@@ -152,6 +157,130 @@ class StructuredSafeFailureTests(unittest.TestCase):
             TransactionState.AMBIGUOUS.value,
             self.store.transaction_state("post-effect-001"),
         )
+
+    def test_cancelled_external_callback_is_durably_ambiguous(self):
+        preview = self.preview()
+        calls = []
+
+        def external(_payload):
+            calls.append("entered")
+            raise asyncio.CancelledError()
+
+        with self.assertRaises(asyncio.CancelledError):
+            self.store.commit(
+                preview.token,
+                expected_action="SEND",
+                idempotency_key="cancelled-effect-001",
+                external_write=external,
+                now=101,
+            )
+
+        self.assertEqual(["entered"], calls)
+        self.assertEqual(
+            TransactionState.AMBIGUOUS.value,
+            self.store.transaction_state("cancelled-effect-001"),
+        )
+        with self.assertRaises(ReconciliationRequired):
+            self.store.commit(
+                preview.token,
+                expected_action="SEND",
+                idempotency_key="cancelled-effect-001",
+                external_write=external,
+                now=102,
+            )
+        self.assertEqual(["entered"], calls)
+
+    def test_concurrent_retry_during_cancelled_effect_never_duplicates(self):
+        preview = self.preview()
+        entered = threading.Event()
+        release = threading.Event()
+        calls = []
+        worker_errors: list[BaseException] = []
+
+        def external(_payload):
+            calls.append("entered")
+            entered.set()
+            if not release.wait(timeout=2):
+                raise RuntimeError("synthetic test coordination timeout")
+            raise asyncio.CancelledError()
+
+        def first_commit():
+            try:
+                self.store.commit(
+                    preview.token,
+                    expected_action="SEND",
+                    idempotency_key="cancelled-race-001",
+                    external_write=external,
+                    now=101,
+                )
+            except BaseException as exc:  # test harness captures cancellation.
+                worker_errors.append(exc)
+
+        worker = threading.Thread(target=first_commit, daemon=True)
+        worker.start()
+        self.assertTrue(entered.wait(timeout=2))
+
+        with self.assertRaises(WriteSafetyError) as ctx:
+            self.store.commit(
+                preview.token,
+                expected_action="SEND",
+                idempotency_key="cancelled-race-001",
+                external_write=external,
+                now=101,
+            )
+        self.assertEqual("write_in_progress", ctx.exception.code)
+        self.assertEqual(["entered"], calls)
+
+        release.set()
+        worker.join(timeout=2)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(1, len(worker_errors))
+        self.assertIsInstance(worker_errors[0], asyncio.CancelledError)
+        self.assertEqual(
+            TransactionState.AMBIGUOUS.value,
+            self.store.transaction_state("cancelled-race-001"),
+        )
+
+        with self.assertRaises(ReconciliationRequired):
+            self.store.commit(
+                preview.token,
+                expected_action="SEND",
+                idempotency_key="cancelled-race-001",
+                external_write=external,
+                now=102,
+            )
+        self.assertEqual(["entered"], calls)
+
+    def test_http_write_error_preserves_safe_retry_after(self):
+        app = PhaseAwareUnifiedBridgeApplication()
+        captured: dict[str, object] = {}
+
+        def start_response(status, headers):
+            captured["status"] = status
+            captured["headers"] = list(headers)
+
+        body = app._write_error(
+            start_response,
+            WriteSafetyMetadataError(
+                "telegram_flood_wait",
+                status=429,
+                retry_after_seconds=30,
+            ),
+            "synthetic-request-id",
+        )
+        payload = json.loads(b"".join(body).decode("utf-8"))
+        headers = dict(captured["headers"])
+
+        self.assertEqual("429 Too Many Requests", captured["status"])
+        self.assertEqual("30", headers.get("Retry-After"))
+        self.assertEqual("no-store", headers.get("Cache-Control"))
+        self.assertFalse(payload["ok"])
+        self.assertEqual("telegram_flood_wait", payload["error"]["code"])
+        self.assertEqual(30, payload["error"]["retry_after_seconds"])
+        rendered = json.dumps(payload, ensure_ascii=False)
+        self.assertNotIn("/home/", rendered)
+        self.assertNotIn("synthetic-session-reference", rendered)
+        self.assertNotIn("private-preflight-detail", rendered)
 
     def test_safe_metadata_is_bounded(self):
         failure = SafeWriteMetadataFailure(
