@@ -30,6 +30,7 @@ jobs:
           bridge/app.py
           tests/test_dev04_media_storage.py
           tests/test_dev04_private_serving.py
+          tests/test_dev04_migration_concurrency.py
           tests/test_storage_downloads.py
           tests/test_archive_security.py
           tests/test_read_app.py
@@ -39,6 +40,7 @@ jobs:
           python -m unittest \
             tests.test_dev04_media_storage \
             tests.test_dev04_private_serving \
+            tests.test_dev04_migration_concurrency \
             tests.test_storage_downloads \
             tests.test_archive_security \
             tests.test_read_app -v
