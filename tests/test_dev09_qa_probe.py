@@ -143,8 +143,8 @@ class Dev09CurrentCanonicalTests(unittest.TestCase):
 
 
 @unittest.skipUnless(os.name == "posix", "download durability fault oracle is POSIX/HOSTiQ oriented")
-class Dev09DownloadDurabilityFindingTests(unittest.TestCase):
-    def test_current_canonical_reproduces_registry_before_checkpoint_crash_window(self):
+class Dev09DownloadDurabilityClosureTests(unittest.TestCase):
+    def test_checkpoint_save_crash_recovers_registered_result_without_redownload(self):
         with tempfile.TemporaryDirectory(prefix="dev09-download-crash-") as td:
             root = Path(td)
             files = FileRecordStore(root / "state" / "files.sqlite3", root / "files")
@@ -176,7 +176,7 @@ class Dev09DownloadDurabilityFindingTests(unittest.TestCase):
             durable_checkpoint = CheckpointStore(checkpoints.db_path).load(job_id)
             self.assertEqual(durable_checkpoint["results"], {})
             with sqlite3.connect(str(files.db_path)) as connection:
-                first_rows = connection.execute("SELECT file_ref FROM files").fetchall()
+                first_rows = [str(row[0]) for row in connection.execute("SELECT file_ref FROM files").fetchall()]
             self.assertEqual(len(first_rows), 1)
 
             restarted = DownloadManager(
@@ -187,13 +187,13 @@ class Dev09DownloadDurabilityFindingTests(unittest.TestCase):
             )
             result = restarted.resume(job_id)
             self.assertEqual(result["status"], "complete")
-            self.assertEqual(backend.calls, 2)
+            self.assertEqual(backend.calls, 1)
             self.assertEqual(len(result["files"]), 1)
+            self.assertEqual(str(result["files"][0]["file_ref"]), first_rows[0])
 
             with sqlite3.connect(str(files.db_path)) as connection:
-                final_rows = {str(row[0]) for row in connection.execute("SELECT file_ref FROM files").fetchall()}
-            self.assertEqual(len(final_rows), 2)
-            self.assertIn(str(result["files"][0]["file_ref"]), final_rows)
+                final_rows = [str(row[0]) for row in connection.execute("SELECT file_ref FROM files").fetchall()]
+            self.assertEqual(final_rows, first_rows)
 
 
 class Dev09AcceptanceTruthTests(unittest.TestCase):
