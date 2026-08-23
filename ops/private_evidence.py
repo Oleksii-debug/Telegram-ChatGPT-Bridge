@@ -1,9 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Strict validation for future private HOSTiQ evidence artifacts.
-
-Raw private evidence is validated locally/private-side.  Public output is only a
-bounded hash/count/status summary and never copies arbitrary text fields.
-"""
+"""Strict validation for future private HOSTiQ evidence artifacts."""
 from __future__ import annotations
 
 import hashlib
@@ -117,7 +113,6 @@ def canonical_json_sha256(payload: dict) -> str:
 
 
 def validate_runtime_report(payload: dict) -> dict:
-    # Strict top-level schema; no arbitrary expansion.
     required = {
         "schema_version", "collector_context", "python_version", "python_major_minor",
         "python_implementation", "runtime_compliance", "python_executable_sha256",
@@ -125,10 +120,10 @@ def validate_runtime_report(payload: dict) -> dict:
         "sys_prefix_sha256", "sys_base_prefix_sha256", "virtual_environment_active",
         "wsgi_relative_path", "wsgi_sha256", "application_import_target",
         "application_import_ok", "process_cwd_inside_app_root", "passenger_context_present",
-        "package_evidence", "environment_values_recorded", "request_data_recorded",
-        "secret_values_recorded", "payload_sha256",
+        "serving_request_verified", "package_evidence", "environment_values_recorded",
+        "request_data_recorded", "secret_values_recorded", "payload_sha256",
     }
-    if set(payload) != required or payload.get("schema_version") != 2:
+    if set(payload) != required or payload.get("schema_version") != 3:
         raise SafetyError("runtime report schema mismatch")
     _walk_shape(payload, enforce_keys=False)
     if payload["collector_context"] not in {"PRIVATE_CLI_CANDIDATE", "APPLICATION_PROCESS"}:
@@ -160,9 +155,11 @@ def validate_runtime_report(payload: dict) -> dict:
         raise SafetyError("runtime Python version fields disagree")
     if payload["python_implementation"] not in {"CPython", "PyPy"}:
         raise SafetyError("runtime Python implementation invalid")
-    for key in ("application_import_ok", "process_cwd_inside_app_root", "passenger_context_present",
-                "virtual_environment_active", "environment_values_recorded", "request_data_recorded",
-                "secret_values_recorded"):
+    for key in (
+        "application_import_ok", "process_cwd_inside_app_root", "passenger_context_present",
+        "serving_request_verified", "virtual_environment_active", "environment_values_recorded",
+        "request_data_recorded", "secret_values_recorded",
+    ):
         if not isinstance(payload[key], bool):
             raise SafetyError("runtime report boolean field invalid")
     packages = payload["package_evidence"]
@@ -184,8 +181,16 @@ def validate_runtime_report(payload: dict) -> dict:
     if set(seen_packages) != {"telethon", "pypdf"}:
         raise SafetyError("runtime reviewed package set incomplete")
     if payload["runtime_compliance"] == "PYTHON_3_11_APPLICATION_CONTEXT_CONFIRMED":
-        if payload["collector_context"] != "APPLICATION_PROCESS" or payload["python_major_minor"] != "3.11" or not payload["passenger_context_present"] or not payload["application_import_ok"]:
+        if (
+            payload["collector_context"] != "APPLICATION_PROCESS"
+            or payload["python_major_minor"] != "3.11"
+            or not payload["passenger_context_present"]
+            or not payload["application_import_ok"]
+            or payload["serving_request_verified"] is not True
+        ):
             raise SafetyError("strong Passenger runtime status is not semantically supported")
+    if payload["collector_context"] == "PRIVATE_CLI_CANDIDATE" and payload["serving_request_verified"]:
+        raise SafetyError("CLI runtime evidence cannot claim a serving request")
     if payload["runtime_compliance"] == "NONCOMPLIANT_NOT_PYTHON_3_11" and payload["python_major_minor"] == "3.11":
         raise SafetyError("runtime noncompliance status contradicts Python version")
     if not all(payload[k] is False for k in ("environment_values_recorded", "request_data_recorded", "secret_values_recorded")):
@@ -211,12 +216,13 @@ def ingest_private_evidence_file(path: Path, kind: str) -> dict:
     if kind == "runtime":
         validated = validate_runtime_report(payload)
         return {
-            "schema_version": 1,
+            "schema_version": 2,
             "kind": "runtime",
             "artifact_sha256": hashlib.sha256(data).hexdigest(),
             "runtime_compliance": validated["runtime_compliance"],
             "application_import_ok": validated["application_import_ok"],
             "passenger_context_present": validated["passenger_context_present"],
+            "serving_request_verified": validated["serving_request_verified"],
             "private_values_copied": False,
         }
     if kind == "server_manifest":

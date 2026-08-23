@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
@@ -116,7 +117,28 @@ def exact_bound_v2_support_return():
 
 class ReleasePackageIndependentTests(unittest.TestCase):
     def test_current_release_package_contract_ready_for_prepare(self):
-        result = assess_release_root(ROOT)
+        # In the normal PR checkout, assess the repository tree directly so any
+        # accidentally tracked .venv/private runtime material is still caught.
+        # During real PREPARE the exact Git export intentionally has no .git and
+        # already contains a generated hash-locked .venv. That generated runtime
+        # dependency tree is payload-manifest bound and is not source input to
+        # this READY_FOR_PREPARE check, so reconstruct only the Git-exported
+        # source view for this source-level assertion.
+        if (ROOT / ".git").exists() or not (ROOT / ".venv").is_dir():
+            result = assess_release_root(ROOT)
+        else:
+            with tempfile.TemporaryDirectory() as td:
+                source_root = Path(td) / "source"
+                source_root.mkdir()
+                for child in ROOT.iterdir():
+                    if child.name == ".venv":
+                        continue
+                    target = source_root / child.name
+                    if child.is_dir():
+                        shutil.copytree(child, target, symlinks=True)
+                    elif child.is_file():
+                        shutil.copy2(child, target, follow_symlinks=False)
+                result = assess_release_root(source_root)
         self.assertEqual("READY_FOR_PREPARE", result.status, result)
         self.assertEqual((), result.defect_codes)
         self.assertEqual((1, 4), (result.direct_requirement_count, result.locked_requirement_count))

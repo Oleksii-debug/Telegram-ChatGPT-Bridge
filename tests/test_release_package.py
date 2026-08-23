@@ -97,8 +97,14 @@ class ReleasePackageContractTests(unittest.TestCase):
                     ))
 
     def test_release_identity_is_hash_bound_and_never_authorizes_deployment(self):
+        # Release identity is intentionally the reviewed Git-controlled startup /
+        # dependency envelope. During real PREPARE, ROOT also contains a generated
+        # hash-locked .venv; those dependency bytes are bound separately by the
+        # prepared payload manifest and must not redefine source release identity.
+        temp, root = self._minimal_root()
+        self.addCleanup(temp.cleanup)
         identity = build_release_identity(
-            ROOT,
+            root,
             sha="a" * 40,
             repository="Oleksii-debug/Telegram-ChatGPT-Bridge",
         )
