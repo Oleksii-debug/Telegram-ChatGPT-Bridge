@@ -26,6 +26,11 @@ still responsible for constructing and closing the verified snapshots; this
 adapter only preserves that already-verified lifetime/identity through the
 mutating RPC call.
 
+For multi-item FORWARD and SEND_FILES, a returned receipt count must equal the
+requested effect cardinality. A partial/malformed post-RPC result is not success:
+it stays post-effect uncertainty and therefore becomes AMBIGUOUS at the durable
+store rather than enabling a blind resend.
+
 No Telegram connection is created at import time and no credentials are stored
 or logged by this module.
 """
@@ -322,6 +327,8 @@ class PhaseAwareTelegramWriteAdapter(TelegramWriteAdapter):
             cross_effect()
             sent = await client.forward_messages(dst, ids, from_peer=src)
             out = sent if isinstance(sent, list) else [sent]
+            if len(out) != len(ids) or any(row is None for row in out):
+                raise TelegramContractError("telegram_invalid_receipt", status=502)
             return WriteReceipt(
                 "FORWARD",
                 tuple(_message_id(row) for row in out),
@@ -399,6 +406,8 @@ class PhaseAwareTelegramWriteAdapter(TelegramWriteAdapter):
                 voice_note=bool(voice_note),
             )
             out = sent if isinstance(sent, list) else [sent]
+            if len(out) != len(upload_items) or any(row is None for row in out):
+                raise TelegramContractError("telegram_invalid_receipt", status=502)
             return WriteReceipt(
                 "SEND_FILES",
                 tuple(_message_id(row) for row in out),
