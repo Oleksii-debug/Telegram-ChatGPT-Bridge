@@ -5,9 +5,24 @@ This subclass keeps canonical request routing untouched and changes only the
 SEND_FILES external-effect seam plus the serialization of DEV05 proven-safe
 write failures. Private file-reference resolution and hash/size revalidation
 happen before any Telegram mutating RPC; failures in that preflight are therefore
-explicitly represented as proven no-side-effect failures. Once
-``adapter.send_files`` is invoked, the phase-aware adapter owns classification
-and any uncertain outcome remains AMBIGUOUS in the persistent write store.
+explicitly represented as proven no-side-effect failures. Once the Telegram
+adapter is invoked, the phase-aware adapter owns classification and any uncertain
+outcome remains AMBIGUOUS in the persistent write store.
+
+The optional ``upload_batch_factory`` is the cross-lane composition point for
+DEV04's descriptor-verified immutable upload snapshots. The factory receives the
+private file store and the exact commit-bound opaque identities. It must return a
+batch with ``files`` and ``close()``. When configured, DEV05 never reconstructs a
+filesystem path: the returned file-like objects stay alive through the mutating
+``send_file`` call and are closed in ``finally``. Factory/identity failures are
+pre-effect; adapter or receipt failures after the mutating boundary are never
+reclassified as safe.
+
+Without an injected snapshot factory the legacy pathname path remains available
+only for compatibility with the current canonical runtime. That fallback is NOT
+a claim that the DEV04/DEV05 SEND_FILES TOCTOU is closed; canonical closure
+requires DEV01 to integrate the media-owned snapshot factory together with this
+write-side lifetime/effect-boundary seam.
 
 For a proven-safe structured failure, bounded status / Retry-After metadata is
 preserved all the way to the HTTP response. Raw Telegram exception text, targets,
@@ -19,6 +34,7 @@ activation by itself. DEV01 remains the canonical integration owner.
 """
 from __future__ import annotations
 
+from collections.abc import Mapping as MappingABC, Sequence
 from typing import Any, Callable, Mapping
 
 from bridge.errors import BridgeError
@@ -31,8 +47,88 @@ from ops.structured_safe_write import (
 from ops.write_safety import SafeNoSideEffectFailure
 
 
+UploadBatchFactory = Callable[[Any, tuple[Mapping[str, Any], ...]], Any]
+
+
 class PhaseAwareUnifiedBridgeApplication(UnifiedBridgeApplication):
     """Unified application with proven pre-effect and public-error boundaries."""
+
+    def __init__(
+        self,
+        *,
+        upload_batch_factory: UploadBatchFactory | None = None,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(**kwargs)
+        self._upload_batch_factory = upload_batch_factory
+
+    @staticmethod
+    def _close_pre_effect_batch(batch: Any) -> None:
+        """Best-effort cleanup when Telegram has provably not been invoked."""
+
+        close = getattr(batch, "close", None)
+        if callable(close):
+            try:
+                close()
+            except Exception:
+                # Cleanup failure is not a Telegram effect. Keep the public
+                # failure stable/private and let process teardown reclaim FDs.
+                pass
+
+    def _open_snapshot_batch(
+        self,
+        payload: Mapping[str, Any],
+    ) -> tuple[Any, tuple[Any, ...]]:
+        """Build/validate a media-owned upload batch entirely before Telegram."""
+
+        factory = getattr(self, "_upload_batch_factory", None)
+        if factory is None:
+            raise RuntimeError("snapshot factory is not configured")
+
+        raw_files = payload.get("files")
+        if not isinstance(raw_files, list) or not raw_files:
+            raise SafeWriteMetadataFailure("invalid_file_reference", status=400)
+
+        identities: list[Mapping[str, Any]] = []
+        for raw in raw_files:
+            if not isinstance(raw, MappingABC):
+                raise SafeWriteMetadataFailure("invalid_file_reference", status=400)
+            item = dict(raw)
+            if set(item) != {"file_id", "sha256", "size"}:
+                raise SafeWriteMetadataFailure("invalid_file_reference", status=400)
+            identities.append(item)
+
+        try:
+            batch = factory(self.read_app.files, tuple(identities))
+        except SafeNoSideEffectFailure:
+            raise
+        except Exception:
+            raise SafeWriteMetadataFailure(
+                "private_file_preflight_failed", status=503
+            ) from None
+
+        if batch is None:
+            raise SafeWriteMetadataFailure(
+                "registered_private_file_identity_mismatch", status=409
+            )
+
+        try:
+            files = getattr(batch, "files")
+            if (
+                isinstance(files, (str, bytes))
+                or not isinstance(files, Sequence)
+                or len(files) != len(identities)
+                or not files
+            ):
+                raise ValueError("invalid snapshot batch surface")
+            snapshot_files = tuple(files)
+        except Exception:
+            self._close_pre_effect_batch(batch)
+            raise SafeWriteMetadataFailure(
+                "private_file_preflight_failed", status=503
+            ) from None
+
+        return batch, snapshot_files
 
     def _execute_external_write(
         self, action: str, payload: dict[str, Any]
@@ -50,6 +146,31 @@ class PhaseAwareUnifiedBridgeApplication(UnifiedBridgeApplication):
                 "private_file_store_unavailable", status=503
             )
 
+        factory = getattr(self, "_upload_batch_factory", None)
+        if factory is not None:
+            batch, snapshot_files = self._open_snapshot_batch(payload)
+            try:
+                receipt = adapter.send_files(
+                    payload["target"],
+                    snapshot_files,
+                    caption=payload.get("caption", ""),
+                    reply_to_message_id=payload.get("reply_to_message_id"),
+                    voice_note=bool(payload.get("voice_note", False)),
+                )
+                # Receipt validation is post-effect. Any exception here remains
+                # ordinary so the durable store records AMBIGUOUS.
+                return self._receipt_metadata(receipt, action)
+            finally:
+                # If close itself fails after a possible Telegram effect, allow
+                # that failure to propagate. The store will conservatively mark
+                # the outcome AMBIGUOUS rather than return a false success.
+                close = getattr(batch, "close", None)
+                if callable(close):
+                    close()
+
+        # Legacy compatibility path. This preserves current canonical behavior
+        # until DEV01 imports/configures DEV04's immutable upload snapshot seam.
+        # It must not be represented as closing the pathname TOCTOU by itself.
         paths: list[str] = []
         try:
             for item in payload["files"]:
@@ -131,4 +252,4 @@ class PhaseAwareUnifiedBridgeApplication(UnifiedBridgeApplication):
         )
 
 
-__all__ = ["PhaseAwareUnifiedBridgeApplication"]
+__all__ = ["PhaseAwareUnifiedBridgeApplication", "UploadBatchFactory"]
