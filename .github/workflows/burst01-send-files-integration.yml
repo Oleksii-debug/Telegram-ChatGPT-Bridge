@@ -11,6 +11,7 @@ on:
       - 'ops/structured_safe_write.py'
       - 'tests/test_burst01_send_files_integration.py'
       - 'tests/test_burst01_send_files_cleanup.py'
+      - 'tests/test_burst01_send_files_midcopy.py'
       - 'tests/test_dev04_upload_handles.py'
       - 'tests/test_dev05_phase_aware_write.py'
       - 'tests/test_dev05_structured_safe_errors.py'
@@ -50,6 +51,7 @@ jobs:
           ops/structured_safe_write.py
           tests/test_burst01_send_files_integration.py
           tests/test_burst01_send_files_cleanup.py
+          tests/test_burst01_send_files_midcopy.py
           tests/test_dev04_upload_handles.py
           tests/test_dev05_phase_aware_write.py
           tests/test_dev05_structured_safe_errors.py
@@ -63,6 +65,7 @@ jobs:
           python -m unittest \
             tests.test_burst01_send_files_integration \
             tests.test_burst01_send_files_cleanup \
+            tests.test_burst01_send_files_midcopy \
             tests.test_dev04_upload_handles \
             tests.test_dev05_phase_aware_write \
             tests.test_dev05_structured_safe_errors \
