@@ -9,6 +9,11 @@ from ops import server_manifest
 from ops.release_guard import SafetyError
 
 ROOT = Path(__file__).resolve().parents[1]
+REPOSITORY_GIT_AVAILABLE = (ROOT / ".git").exists()
+requires_repository_git = unittest.skipUnless(
+    REPOSITORY_GIT_AVAILABLE,
+    "repository tracked-path inventory requires Git metadata; outer canonical CI verifies it before PREPARE",
+)
 
 
 class ServerManifestTests(unittest.TestCase):
@@ -51,6 +56,7 @@ class ServerManifestTests(unittest.TestCase):
             self.assertEqual(64, len(rows["bridge/app.py"]["sha256"]))
             self.assertNotIn("content", rows["bridge/app.py"])
 
+    @requires_repository_git
     def test_every_current_git_tracked_path_has_reviewed_category(self):
         output = subprocess.run(
             ["git", "ls-files", "-z"],
@@ -93,7 +99,7 @@ class ServerManifestTests(unittest.TestCase):
     def test_unreviewed_reference_candidate_namespace_fails_closed(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td); self.candidate(root)
-            self.write(root, "reference_candidate/unreviewed/item.json", b"{}")
+            self.write(root, "reference_candidate/unreviewed/item.json", b"{}\n")
             with self.assertRaises(SafetyError):
                 server_manifest.collect_server_manifest(root)
 
