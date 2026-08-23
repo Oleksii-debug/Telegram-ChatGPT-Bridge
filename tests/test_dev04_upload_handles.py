@@ -68,6 +68,8 @@ class VerifiedUploadHandleTests(unittest.TestCase):
             self.assertFalse(upload.writable())
             with self.assertRaises((io.UnsupportedOperation, AttributeError)):
                 upload.write(b"x")
+            with self.assertRaises(io.UnsupportedOperation):
+                upload.fileno()
             self.assertEqual(upload.file_ref, record.file_ref)
             self.assertEqual(upload.sha256, record.sha256)
             self.assertEqual(upload.size, 3)
@@ -77,10 +79,31 @@ class VerifiedUploadHandleTests(unittest.TestCase):
             self.assertFalse(hasattr(upload, "path"))
             self.assertFalse(hasattr(upload, "record"))
             self.assertNotIn(str(self.store.root), upload.name)
-            self.assertEqual(stat.S_IMODE(os.fstat(upload.fileno()).st_mode), 0o600)
+            # Private test-only introspection proves the backing snapshot itself
+            # remains owner-only without exposing its writable descriptor to
+            # external consumers through VerifiedUploadFile.fileno().
+            self.assertEqual(stat.S_IMODE(os.fstat(upload._handle.fileno()).st_mode), 0o600)
         finally:
             batch.close()
         self.assertTrue(upload.closed)
+
+    def test_public_io_surface_cannot_mutate_verified_snapshot(self) -> None:
+        record, _ = self.add(b"immutable", physical_name="immutable.bin")
+        batch = open_verified_upload_batch(self.store, [self.identity(record)])
+        self.assertIsNotNone(batch)
+        assert batch is not None
+        try:
+            upload = batch[0]
+            with self.assertRaises(io.UnsupportedOperation):
+                upload.fileno()
+            with self.assertRaises((io.UnsupportedOperation, AttributeError)):
+                upload.write(b"changed")
+            with self.assertRaises((io.UnsupportedOperation, AttributeError)):
+                upload.truncate(0)
+            upload.seek(0)
+            self.assertEqual(upload.read(), b"immutable")
+        finally:
+            batch.close()
 
     def test_snapshot_survives_path_replacement_after_batch_creation(self) -> None:
         record, path = self.add(b"ORIGINAL", physical_name="payload.bin")
