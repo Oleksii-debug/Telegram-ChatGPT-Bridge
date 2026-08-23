@@ -58,6 +58,10 @@ class FileRecordStore:
             except OSError:
                 pass
         with self._connect() as connection:
+            # Serialize schema inspection + migration across Passenger workers.
+            # Without an immediate write transaction two workers can both see
+            # a legacy schema and race the same ALTER TABLE ADD COLUMN.
+            connection.execute("BEGIN IMMEDIATE")
             connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS files (
