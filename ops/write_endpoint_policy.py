@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Mapping
 
 from ops.openapi_registry import OperationClass, OperationSpec, registry_by_operation_id
+from ops.telegram_write_adapter import TelegramContractError
 from ops.write_safety import CommitResult, PersistentWriteStore, PreviewEnvelope, WriteSafetyError
 
 
@@ -141,18 +142,60 @@ class WriteCoordinator:
         )
 
 
+# This is deliberately an exact public-contract allowlist rather than a syntax
+# filter. A third-party/faulty exception can attach arbitrary ``code``/``status``
+# attributes; those attributes must never become an accidental public/audit
+# channel. Only codes emitted by TelegramContractError in the reviewed adapter
+# are allowed to cross the public boundary, with their exact expected status.
+_SAFE_TELEGRAM_PUBLIC_ERRORS: dict[str, int] = {
+    "invalid_target": 400,
+    "telegram_flood_wait": 429,
+    "telegram_2fa_required": 503,
+    "telegram_session_unauthorized": 503,
+    "telegram_target_invalid": 404,
+    "telegram_message_invalid": 404,
+    "telegram_file_rejected": 400,
+    "telegram_rpc_error": 502,
+    "telegram_operation_failed": 502,
+    "telegram_invalid_receipt": 502,
+    "invalid_reply_target": 400,
+    "reply_target_not_found": 404,
+    "reply_target_chat_mismatch": 409,
+    "reply_target_mismatch": 409,
+    "telegram_not_configured": 503,
+    "telegram_timeout": 504,
+    "telegram_session_busy": 409,
+    "telegram_session_lock_unsafe": 503,
+    "text_required": 400,
+    "text_too_long": 413,
+    "invalid_message_ids": 400,
+    "forward_source_missing": 404,
+    "forward_source_mismatch": 409,
+    "files_required": 400,
+    "invalid_file_count": 400,
+    "invalid_file_reference": 400,
+    "caption_too_long": 413,
+    "voice_note_requires_single_file": 400,
+}
+
+
+def _structured_telegram_error(exc: TelegramContractError) -> dict[str, Any]:
+    expected_status = _SAFE_TELEGRAM_PUBLIC_ERRORS.get(exc.code)
+    if expected_status is None or exc.status != expected_status:
+        return {"error": "internal_bridge_error", "status": 500}
+    out: dict[str, Any] = {"error": exc.code, "status": expected_status}
+    if exc.code == "telegram_flood_wait" and isinstance(exc.retry_after, int) and not isinstance(exc.retry_after, bool):
+        if 1 <= exc.retry_after <= 600:
+            out["retry_after_seconds"] = exc.retry_after
+    return out
+
+
 def structured_write_error(exc: BaseException) -> dict[str, Any]:
-    """Return stable error metadata only; never copy exception text/server paths."""
+    """Return stable allowlisted error metadata; never copy arbitrary exception attributes/text."""
     if isinstance(exc, EndpointPolicyError):
         return exc.as_dict()
     if isinstance(exc, WriteSafetyError):
         return {"error": exc.code, "status": exc.status}
-    code = getattr(exc, "code", None)
-    status = getattr(exc, "status", None)
-    retry = getattr(exc, "retry_after", None)
-    if isinstance(code, str) and code and isinstance(status, int):
-        out: dict[str, Any] = {"error": code, "status": status}
-        if isinstance(retry, int) and retry > 0:
-            out["retry_after_seconds"] = min(retry, 600)
-        return out
+    if isinstance(exc, TelegramContractError):
+        return _structured_telegram_error(exc)
     return {"error": "internal_bridge_error", "status": 500}
