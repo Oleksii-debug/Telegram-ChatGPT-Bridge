@@ -2,8 +2,9 @@
 """DEV10 binding between source-green evidence and human/live accessibility evidence.
 
 This module is credential-free and side-effect-free. It prevents a source/PR
-result, a GitHub pull-request merge ref, or stale human NVDA evidence from being
-mistaken for evidence about the release actually deployed and running.
+result, a GitHub pull-request merge ref, stale live prerequisite evidence, or a
+stale human NVDA result from being mistaken for evidence about the release
+actually deployed and running.
 
 It never authorizes deployment, Telegram login, a ChatGPT Action live call, or
 Telegram writes. Human NVDA PASS remains an explicit human result bound to an
@@ -24,6 +25,19 @@ SOURCE_IDENTITY_KINDS = frozenset({"EXACT_BRANCH_HEAD_SHA", "EXACT_RELEASE_SHA"}
 FORBIDDEN_IDENTITY_KINDS = frozenset({"PR_MERGE_REF", "WORKTREE_HEAD", "SHORT_SHA", "PR_NUMBER"})
 HUMAN_CRITERIA = frozenset({"C1", "I1", "I4", "I6"})
 HUMAN_STATUSES = frozenset({"PASS", "FAIL", "BLOCKED"})
+_LIVE_BINDING_KEYS = frozenset({
+    "deployed_sha",
+    "release_gate_sha",
+    "live_manifest_sha",
+    "passenger_application_sha",
+    "running_sha",
+    "setup_surface_sha256",
+    "independent_auditor_release_gate",
+    "live_manifest_reconciled",
+    "passenger_application_process_verified",
+    "running_sha_verified",
+    "private_setup_surface_ready",
+})
 _RECEIPT_KEYS = frozenset({
     "criterion",
     "deployed_sha",
@@ -73,6 +87,69 @@ def validate_source_identity_kind(kind: Any) -> str:
 
 
 @dataclass(frozen=True)
+class LivePrerequisiteBinding:
+    """Privacy-safe live prerequisite facts bound to exact release identities.
+
+    Each SHA field is independently recorded by the corresponding live evidence
+    stage. Booleans alone are never accepted as sufficient proof because a stale
+    True value from a prior deployment must not be reusable for a new release.
+    """
+
+    deployed_sha: str
+    release_gate_sha: str
+    live_manifest_sha: str
+    passenger_application_sha: str
+    running_sha: str
+    setup_surface_sha256: str
+    independent_auditor_release_gate: bool
+    live_manifest_reconciled: bool
+    passenger_application_process_verified: bool
+    running_sha_verified: bool
+    private_setup_surface_ready: bool
+
+    def release_identities_match(self) -> bool:
+        return all(
+            value == self.deployed_sha
+            for value in (
+                self.release_gate_sha,
+                self.live_manifest_sha,
+                self.passenger_application_sha,
+                self.running_sha,
+            )
+        )
+
+
+def validate_live_prerequisite_binding(payload: Mapping[str, Any]) -> LivePrerequisiteBinding:
+    """Validate exact, bounded live evidence without accepting private values.
+
+    The schema contains only SHA identities, a setup-surface hash and booleans.
+    It intentionally has no fields for host paths, URLs, tokens, Telegram data,
+    screenshots, transcripts, credentials or session material.
+    """
+    if not isinstance(payload, Mapping) or set(payload) != _LIVE_BINDING_KEYS:
+        raise HumanLiveGateError("live prerequisite binding schema mismatch")
+
+    values = {
+        "deployed_sha": _sha40(payload.get("deployed_sha"), "deployed_sha"),
+        "release_gate_sha": _sha40(payload.get("release_gate_sha"), "release_gate_sha"),
+        "live_manifest_sha": _sha40(payload.get("live_manifest_sha"), "live_manifest_sha"),
+        "passenger_application_sha": _sha40(payload.get("passenger_application_sha"), "passenger_application_sha"),
+        "running_sha": _sha40(payload.get("running_sha"), "running_sha"),
+        "setup_surface_sha256": _sha256(payload.get("setup_surface_sha256"), "setup_surface_sha256"),
+    }
+    flags = {}
+    for key in (
+        "independent_auditor_release_gate",
+        "live_manifest_reconciled",
+        "passenger_application_process_verified",
+        "running_sha_verified",
+        "private_setup_surface_ready",
+    ):
+        flags[key] = _bool(payload.get(key), key)
+    return LivePrerequisiteBinding(**values, **flags)
+
+
+@dataclass(frozen=True)
 class HumanLiveReadiness:
     state: str
     exact_deployment_bound: bool
@@ -97,65 +174,69 @@ class HumanLiveReadiness:
 def evaluate_human_live_readiness(
     *,
     source_sha: str,
-    deployed_sha: str,
     source_identity_kind: str,
-    setup_surface_sha256: str,
     source_ci_green: bool,
     nonlive_prepare_verified: bool,
-    independent_auditor_release_gate: bool,
-    live_manifest_reconciled: bool,
-    passenger_application_process_verified: bool,
-    running_sha_verified: bool,
-    private_setup_surface_ready: bool,
+    live_binding: Mapping[str, Any],
     telegram_auth_state: str,
 ) -> HumanLiveReadiness:
     """Evaluate whether a human NVDA run may be requested, never whether it passed.
 
-    Source-green evidence is necessary but insufficient. Human testing becomes
-    ready only after exact release identity, audited live reconciliation,
-    Passenger application-process proof, running-SHA proof and a private setup
-    surface are all present for the same release.
+    Source-green evidence is necessary but insufficient. Every live prerequisite
+    is independently SHA-bound to the deployed release, so stale booleans from a
+    prior deployment cannot be mixed with a newer source/deployed SHA.
     """
     source_sha = _sha40(source_sha, "source_sha")
-    deployed_sha = _sha40(deployed_sha, "deployed_sha")
     validate_source_identity_kind(source_identity_kind)
-    _sha256(setup_surface_sha256, "setup_surface_sha256")
-    flags = {
-        "source_ci_green": source_ci_green,
-        "nonlive_prepare_verified": nonlive_prepare_verified,
-        "independent_auditor_release_gate": independent_auditor_release_gate,
-        "live_manifest_reconciled": live_manifest_reconciled,
-        "passenger_application_process_verified": passenger_application_process_verified,
-        "running_sha_verified": running_sha_verified,
-        "private_setup_surface_ready": private_setup_surface_ready,
-    }
-    for label, value in flags.items():
-        _bool(value, label)
+    _bool(source_ci_green, "source_ci_green")
+    _bool(nonlive_prepare_verified, "nonlive_prepare_verified")
+    binding = validate_live_prerequisite_binding(live_binding)
     if telegram_auth_state not in {AUTH_NOT_YET_REQUIRED, AUTH_REQUIRED}:
         raise HumanLiveGateError("invalid Telegram authorization state")
 
-    exact = source_sha == deployed_sha
-    prelive_ready = source_ci_green and nonlive_prepare_verified and independent_auditor_release_gate
+    source_matches_deployed = source_sha == binding.deployed_sha
+    release_gate_matches = binding.release_gate_sha == binding.deployed_sha
+    live_manifest_matches = binding.live_manifest_sha == binding.deployed_sha
+    passenger_matches = binding.passenger_application_sha == binding.deployed_sha
+    running_matches = binding.running_sha == binding.deployed_sha
+    exact = (
+        source_matches_deployed
+        and release_gate_matches
+        and live_manifest_matches
+        and passenger_matches
+        and running_matches
+    )
+    prelive_ready = source_ci_green and nonlive_prepare_verified and binding.independent_auditor_release_gate
     live_ready = (
         prelive_ready
         and exact
-        and live_manifest_reconciled
-        and passenger_application_process_verified
-        and running_sha_verified
-        and private_setup_surface_ready
+        and binding.live_manifest_reconciled
+        and binding.passenger_application_process_verified
+        and binding.running_sha_verified
+        and binding.private_setup_surface_ready
     )
 
-    if not prelive_ready:
+    if not source_ci_green or not nonlive_prepare_verified:
         state = "BLOCKED_PRELIVE_GATE"
-    elif not exact:
+    elif not source_matches_deployed:
         state = "BLOCKED_DEPLOYED_SHA_MISMATCH"
-    elif not live_manifest_reconciled:
+    elif not binding.independent_auditor_release_gate:
+        state = "BLOCKED_PRELIVE_GATE"
+    elif not release_gate_matches:
+        state = "BLOCKED_RELEASE_GATE_SHA_MISMATCH"
+    elif not live_manifest_matches:
+        state = "BLOCKED_LIVE_MANIFEST_SHA_MISMATCH"
+    elif not binding.live_manifest_reconciled:
         state = "BLOCKED_LIVE_RECONCILIATION"
-    elif not passenger_application_process_verified:
+    elif not passenger_matches:
+        state = "BLOCKED_PASSENGER_SHA_MISMATCH"
+    elif not binding.passenger_application_process_verified:
         state = "BLOCKED_PASSENGER_APPLICATION_PROCESS"
-    elif not running_sha_verified:
+    elif not running_matches:
+        state = "BLOCKED_RUNNING_SHA_MISMATCH"
+    elif not binding.running_sha_verified:
         state = "BLOCKED_RUNNING_SHA"
-    elif not private_setup_surface_ready:
+    elif not binding.private_setup_surface_ready:
         state = "BLOCKED_PRIVATE_SETUP_SURFACE"
     else:
         state = "READY_FOR_HUMAN_NVDA"
@@ -290,10 +371,12 @@ def current_source_green_projection(*, source_sha: str, recovery_guard_success: 
 __all__ = [
     "HumanLiveGateError",
     "HumanLiveReadiness",
+    "LivePrerequisiteBinding",
     "assess_human_receipt_currentness",
     "current_source_green_projection",
     "deployment_change_invalidates_human_evidence",
     "evaluate_human_live_readiness",
     "validate_deployed_human_receipt",
+    "validate_live_prerequisite_binding",
     "validate_source_identity_kind",
 ]
