@@ -1,0 +1,104 @@
+name: DEV06 Action H1 H2 Evidence
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dev06-action-evidence-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  dev06-action-evidence:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout full history
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Set up Python 3.11
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.11'
+      - name: Verify exact DEV06 evidence overlay on actual merge ref
+        env:
+          EVENT_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          test -n "$EVENT_HEAD_SHA"
+          test "$(git rev-list --parents -n 1 HEAD | wc -w)" -eq 3
+          BASE_SHA="$(git rev-parse HEAD^1)"
+          HEAD_SHA="$(git rev-parse HEAD^2)"
+          test "$HEAD_SHA" = "$EVENT_HEAD_SHA"
+          cat > /tmp/dev06.expected <<'EOF'
+          .github/workflows/dev06-h1-evidence.yml
+          ops/dev06_action_e2e_evidence.py
+          ops/dev06_deployed_action_evidence.py
+          tests/test_dev06_action_e2e_evidence.py
+          tests/test_dev06_deployed_action_evidence.py
+          tools/verify_dev06_action_e2e.py
+          tools/verify_dev06_deployed_action.py
+          EOF
+          git diff --name-only "$BASE_SHA...$HEAD_SHA" | sort > /tmp/dev06.actual
+          sort -o /tmp/dev06.expected /tmp/dev06.expected
+          diff -u /tmp/dev06.expected /tmp/dev06.actual
+          echo "DEV06_STACKED_BASE_SHA=$BASE_SHA"
+          echo DEV06_EVIDENCE_OVERLAY_PATH_ISOLATION_PASS
+      - name: Compile canonical DEV06 and H1 H2 evidence code
+        run: >-
+          python -m py_compile
+          ops/dev06_api_contracts.py
+          ops/dev06_runtime_conformance.py
+          ops/dev06_deployed_action_evidence.py
+          ops/dev06_action_e2e_evidence.py
+          tools/build_dev06_action_openapi.py
+          tools/verify_dev06_deployed_action.py
+          tools/verify_dev06_action_e2e.py
+          tests/test_dev06_api_contracts.py
+          tests/test_dev06_runtime_conformance.py
+          tests/test_dev06_deployed_action_evidence.py
+          tests/test_dev06_action_e2e_evidence.py
+      - name: Validate canonical compatible Action schema
+        run: python tools/build_dev06_action_openapi.py --validate-only
+      - name: Run canonical DEV06 plus H1 H2 evidence tests
+        run: |
+          umask 022
+          python -m unittest \
+            tests.test_dev06_api_contracts \
+            tests.test_dev06_runtime_conformance \
+            tests.test_dev06_deployed_action_evidence \
+            tests.test_dev06_action_e2e_evidence -v
+      - name: Exercise H1 comparator in source-mock mode only
+        env:
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          test -n "$HEAD_SHA"
+          python tools/build_dev06_action_openapi.py > /tmp/dev06-observed-openapi.json
+          python tools/verify_dev06_deployed_action.py \
+            --candidate-sha "$HEAD_SHA" \
+            --observed-schema /tmp/dev06-observed-openapi.json \
+            --source-classification SOURCE_MOCK
+          rm -f /tmp/dev06-observed-openapi.json
+      - name: Recheck integrated Action and write policy regressions
+        run: |
+          umask 022
+          python tools/build_action_openapi.py --validate-only
+          python -m unittest \
+            tests.test_dev_a_candidate_contracts \
+            tests.test_dev_a_integration \
+            tests.test_dev4_endpoint_policy -v
+      - name: Current-tree secret scan
+        if: always()
+        run: python tools/secret_scan.py --mode current
+      - name: Full-history secret scan
+        if: always()
+        run: python tools/secret_scan.py --mode history
+      - name: Verify non-deploy boundary
+        if: always()
+        run: |
+          test -f RECOVERY_BASELINE.md
+          grep -q 'DO NOT MERGE / DO NOT DEPLOY' RECOVERY_BASELINE.md
+          test ! -e .cpanel.yml
+          test ! -e ops/ENABLE_HOSTIQ_AUTO_DEPLOY
