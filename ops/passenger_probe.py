@@ -2,10 +2,10 @@
 """Bounded HTTPS probe for challenged Passenger serving-request evidence.
 
 The raw one-time challenge exists only in the caller's memory and in the single
-HTTPS request header.  This module never serializes it, logs it, or returns it.
-A PASS means the exact production health endpoint answered with the bounded
-Telegram Bridge health identity; final Passenger proof still requires the
-private runtime/binding/consumed-receipt artifacts validated by DEV_B.
+HTTPS request header. This module never serializes it, logs it, or returns it.
+A PASS requires the exact current Telegram Bridge seven-component health
+contract; final Passenger proof additionally requires the private runtime,
+binding and consumed-receipt artifacts validated by DEV_B.
 """
 from __future__ import annotations
 
@@ -24,6 +24,16 @@ CHALLENGE_HEADER = "X-Telegram-Bridge-Evidence-Challenge"
 CHALLENGE_RE = re.compile(r"^[0-9a-f]{64}$")
 MAX_BODY = 32 * 1024
 MAX_TIMEOUT = 20.0
+EXPECTED_HEALTH_COMPONENTS = frozenset({
+    "auth",
+    "backend",
+    "storage",
+    "read_rate_limit",
+    "write_store",
+    "write_rate_limit",
+    "telegram_writer",
+})
+EXPECTED_COMPONENT_STATES = frozenset({"configured", "unconfigured"})
 
 
 @dataclass(frozen=True)
@@ -58,16 +68,17 @@ def _bounded_health_identity(body: bytes, content_type: str) -> bool:
         data = json.loads(body.decode("utf-8", "strict"))
     except (UnicodeError, json.JSONDecodeError):
         return False
-    if not isinstance(data, dict) or data.get("ok") is not True or data.get("service") != "telegram-bridge":
+    if not isinstance(data, dict) or set(data) != {"ok", "service", "ready", "components"}:
         return False
-    if not isinstance(data.get("ready"), bool):
+    if data.get("ok") is not True or data.get("service") != "telegram-bridge" or not isinstance(data.get("ready"), bool):
         return False
     components = data.get("components")
-    if not isinstance(components, dict) or not components or len(components) > 16:
+    if not isinstance(components, dict) or set(components) != EXPECTED_HEALTH_COMPONENTS:
         return False
-    if any(not isinstance(key, str) or value not in {"configured", "unconfigured"} for key, value in components.items()):
+    if any(value not in EXPECTED_COMPONENT_STATES for value in components.values()):
         return False
-    return True
+    computed_ready = all(value == "configured" for value in components.values())
+    return data["ready"] is computed_ready
 
 
 def dispatch_challenged_health_probe(
@@ -97,14 +108,12 @@ def dispatch_challenged_health_probe(
             body = response.read(MAX_BODY + 1)
             content_type = response.headers.get("Content-Type", "")
     except urllib.error.HTTPError as exc:
-        # Never copy response bodies or arbitrary text into evidence/status.
         return ProbeResult("FAIL", int(exc.code), "PROBE_HTTP_REJECTED")
     except (OSError, ValueError):
         return ProbeResult("FAIL", None, "PROBE_NETWORK_FAILURE")
     finally:
-        # Drop the local reference as soon as urllib has constructed/dispatched
-        # the request.  Python cannot guarantee memory zeroization, so no stronger
-        # claim is made.
+        # Python cannot promise physical memory zeroization; only reference
+        # lifetime and serialization/logging boundaries are claimed here.
         raw_challenge = ""
 
     if len(body) > MAX_BODY:
