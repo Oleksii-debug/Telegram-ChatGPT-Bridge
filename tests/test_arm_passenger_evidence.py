@@ -1,11 +1,17 @@
 # -*- coding: utf-8 -*-
+import hashlib
 import json
 import os
 import tempfile
 import unittest
 from pathlib import Path
 
-from ops.passenger_evidence_hook import ARM_MARKER_NAME, validate_arm_marker
+from ops.passenger_evidence_hook import (
+    ARM_MARKER_NAME,
+    CONSUMED_RECEIPT_NAME,
+    PROBE_CHALLENGE_NAME,
+    validate_arm_marker,
+)
 from ops.release_guard import SafetyError
 from tools.arm_passenger_evidence import arm_from_preflight
 
@@ -51,25 +57,41 @@ class ArmPassengerEvidenceTests(unittest.TestCase):
         path.write_text(json.dumps(payload or self.preflight_payload()), encoding="utf-8")
         os.chmod(path, mode)
 
-    def test_exact_preflight_creates_owner_private_bound_marker(self):
+    def test_exact_preflight_creates_owner_private_challenge_bound_marker(self):
         with tempfile.TemporaryDirectory() as td:
             _, control, preflight = self.roots(td); self.write_preflight(preflight)
             marker = arm_from_preflight(preflight_path=preflight, control_root=control)
             self.assertEqual(control / ARM_MARKER_NAME, marker)
-            st = marker.lstat()
-            self.assertEqual(0, st.st_mode & 0o077)
+            challenge_path = control / PROBE_CHALLENGE_NAME
+            self.assertTrue(challenge_path.is_file())
+            for path in (marker, challenge_path):
+                st = path.lstat()
+                self.assertEqual(0, st.st_mode & 0o077)
+                self.assertEqual(1, st.st_nlink)
+            challenge = challenge_path.read_text(encoding="ascii").strip()
+            self.assertRegex(challenge, r"^[0-9a-f]{64}$")
             payload = validate_arm_marker(json.loads(marker.read_text(encoding="utf-8")))
             self.assertEqual(self.SHA, payload["candidate_sha"])
             self.assertEqual(self.WSGI, payload["expected_wsgi_sha256"])
+            self.assertEqual(
+                hashlib.sha256(challenge.encode("ascii")).hexdigest(),
+                payload["request_challenge_sha256"],
+            )
+            self.assertNotIn(challenge, marker.read_text(encoding="utf-8"))
 
-    def test_existing_marker_is_never_overwritten(self):
-        with tempfile.TemporaryDirectory() as td:
-            _, control, preflight = self.roots(td); self.write_preflight(preflight)
-            marker = control / ARM_MARKER_NAME
-            marker.write_text("do-not-overwrite", encoding="utf-8"); os.chmod(marker, 0o600)
-            with self.assertRaises(SafetyError):
-                arm_from_preflight(preflight_path=preflight, control_root=control)
-            self.assertEqual("do-not-overwrite", marker.read_text(encoding="utf-8"))
+    def test_existing_cycle_artifact_is_never_overwritten(self):
+        for occupied in (ARM_MARKER_NAME, PROBE_CHALLENGE_NAME, CONSUMED_RECEIPT_NAME):
+            with self.subTest(occupied=occupied), tempfile.TemporaryDirectory() as td:
+                _, control, preflight = self.roots(td); self.write_preflight(preflight)
+                path = control / occupied
+                path.write_text("do-not-overwrite", encoding="utf-8"); os.chmod(path, 0o600)
+                with self.assertRaises(SafetyError):
+                    arm_from_preflight(preflight_path=preflight, control_root=control)
+                self.assertEqual("do-not-overwrite", path.read_text(encoding="utf-8"))
+                # A blocked re-arm must not leave a partial new bundle behind.
+                for other in (ARM_MARKER_NAME, PROBE_CHALLENGE_NAME):
+                    if other != occupied:
+                        self.assertFalse((control / other).exists())
 
     def test_broad_preflight_or_control_permissions_fail_closed(self):
         with tempfile.TemporaryDirectory() as td:
@@ -96,6 +118,7 @@ class ArmPassengerEvidenceTests(unittest.TestCase):
                 with self.assertRaises(SafetyError):
                     arm_from_preflight(preflight_path=preflight, control_root=control)
                 self.assertFalse((control / ARM_MARKER_NAME).exists())
+                self.assertFalse((control / PROBE_CHALLENGE_NAME).exists())
 
 
 if __name__ == "__main__":
