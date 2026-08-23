@@ -16,10 +16,12 @@ class DevBCompileCoverageTests(unittest.TestCase):
             "ops/passenger_evidence_hook.py",
             "ops/passenger_probe.py",
             "ops/devb_run_matrix.py",
+            "ops/dev02_canonical_sync.py",
             "tools/validate_candidate_runtime_preflight.py",
             "tools/arm_passenger_evidence.py",
             "tools/run_passenger_evidence_probe.py",
             "tools/validate_hostiq_support_return.py",
+            "tools/verify_dev02_canonical_sync.py",
             "tools/collect_server_manifest.py",
             "tools/strict_history_secret_scan.py",
             "tests/test_candidate_runtime_preflight.py",
@@ -34,6 +36,7 @@ class DevBCompileCoverageTests(unittest.TestCase):
             "tests/test_server_manifest.py",
             "tests/test_passenger_evidence_hook.py",
             "tests/test_devb_round2_release.py",
+            "tests/test_dev02_canonical_sync.py",
         ):
             with self.subTest(path=relative):
                 source = root / relative
