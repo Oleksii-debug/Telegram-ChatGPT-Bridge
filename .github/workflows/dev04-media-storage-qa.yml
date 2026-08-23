@@ -23,6 +23,7 @@ jobs:
         run: >-
           python -m py_compile
           bridge/filenames.py
+          bridge/storage.py
           bridge/downloads.py
           bridge/archive.py
           tests/test_dev04_media_storage.py
