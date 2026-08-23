@@ -23,6 +23,7 @@ jobs:
         run: >-
           python -m py_compile
           ops/secure_write_store.py
+          ops/structured_safe_write.py
           ops/phase_aware_write_adapter.py
           bridge/phase_aware_write_app.py
           ops/write_safety.py
@@ -30,6 +31,7 @@ jobs:
           ops/telegram_write_adapter.py
           tests/test_dev05_write_state_security.py
           tests/test_dev05_phase_aware_write.py
+          tests/test_dev05_structured_safe_errors.py
           tests/test_dev4_write_core.py
           tests/test_dev4_endpoint_policy.py
           tests/test_dev_a_integration.py
@@ -38,7 +40,8 @@ jobs:
           umask 022
           python -m unittest \
             tests.test_dev05_write_state_security \
-            tests.test_dev05_phase_aware_write -v
+            tests.test_dev05_phase_aware_write \
+            tests.test_dev05_structured_safe_errors -v
       - name: Re-run canonical write safety regressions
         run: |
           umask 022
