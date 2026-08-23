@@ -54,44 +54,47 @@ class UploadFileIdentity:
 class VerifiedUploadFile:
     """Read-only file-like upload source bound to a verified private inode.
 
-    ``name`` is intentionally a safe display filename rather than a filesystem
-    path. The underlying handle remains open and inode-bound until ``close``.
-    Callers must pass this object itself to an upload library; converting it back
-    to ``record.path`` would reopen the TOCTOU gap this class is designed to close.
+    Only safe upload metadata is copied onto this object. In particular, there
+    is no filesystem-path property: ``name`` is a sanitized display filename and
+    the underlying ``BinaryIO.name`` remains an integer descriptor. Callers must
+    pass this object itself to an upload library; converting back to a path would
+    reopen the TOCTOU gap this class is designed to close.
     """
 
     def __init__(self, verified: VerifiedPrivateFile) -> None:
-        self._verified = verified
-        self.name = safe_filename(verified.record.name)
-
-    @property
-    def record(self) -> FileRecord:
-        return self._verified.record
+        record = verified.record
+        self._handle = verified.handle
+        self.file_ref = record.file_ref
+        self.sha256 = record.sha256
+        self.size = record.size
+        self.mime_type = record.mime_type
+        self.name = safe_filename(record.name)
 
     @property
     def closed(self) -> bool:
-        return self._verified.handle.closed
+        return self._handle.closed
 
     def read(self, size: int = -1) -> bytes:
-        return self._verified.handle.read(size)
+        return self._handle.read(size)
 
     def seek(self, offset: int, whence: int = os.SEEK_SET) -> int:
-        return self._verified.handle.seek(offset, whence)
+        return self._handle.seek(offset, whence)
 
     def tell(self) -> int:
-        return self._verified.handle.tell()
+        return self._handle.tell()
 
     def fileno(self) -> int:
-        return self._verified.handle.fileno()
+        return self._handle.fileno()
 
     def readable(self) -> bool:
-        return self._verified.handle.readable()
+        return self._handle.readable()
 
     def seekable(self) -> bool:
-        return self._verified.handle.seekable()
+        return self._handle.seekable()
 
     def close(self) -> None:
-        self._verified.close()
+        if not self._handle.closed:
+            self._handle.close()
 
     def __enter__(self) -> "VerifiedUploadFile":
         return self
@@ -295,6 +298,8 @@ def open_verified_upload_batch(
         raise ValueError("max_files must be positive")
     if not identities or len(identities) > max_files:
         raise ValueError("invalid upload file count")
+    if any(not isinstance(item, UploadFileIdentity) for item in identities):
+        raise ValueError("invalid upload identity")
 
     refs = [item.file_ref for item in identities]
     if len(set(refs)) != len(refs):
@@ -308,9 +313,9 @@ def open_verified_upload_batch(
                 return None
             upload = VerifiedUploadFile(verified)
             if (
-                verified.record.file_ref != identity.file_ref
-                or verified.record.size != identity.size
-                or not secrets.compare_digest(verified.record.sha256, identity.sha256)
+                upload.file_ref != identity.file_ref
+                or upload.size != identity.size
+                or not secrets.compare_digest(upload.sha256, identity.sha256)
             ):
                 upload.close()
                 return None
