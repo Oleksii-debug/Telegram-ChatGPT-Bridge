@@ -17,7 +17,15 @@ from tools.verify_integration_provenance import (
 )
 
 
+REPOSITORY_GIT_AVAILABLE = (ROOT / ".git").exists()
+requires_repository_git = unittest.skipUnless(
+    REPOSITORY_GIT_AVAILABLE,
+    "repository-level provenance requires Git metadata; outer canonical CI verifies it before PREPARE",
+)
+
+
 class DevAProvenanceTests(unittest.TestCase):
+    @requires_repository_git
     def test_exact_candidate_provenance_is_machine_verifiable(self):
         result = verify_repository()
         self.assertEqual(result["schema_version"], 2)
@@ -39,6 +47,7 @@ class DevAProvenanceTests(unittest.TestCase):
         self.assertFalse(result["private_values_recorded"])
         self.assertGreaterEqual(result["changed_path_count"], 80)
 
+    @requires_repository_git
     def test_cross_pr_overlap_matrix_is_recomputed_not_trusted_as_prose(self):
         payload = json.loads(MANIFEST.read_text(encoding="utf-8"))
         observed = _verify_overlap_matrix(payload)
@@ -46,6 +55,7 @@ class DevAProvenanceTests(unittest.TestCase):
         self.assertEqual(observed["PR2_PR5"], 3)
         self.assertEqual(sum(observed.values()), 10)
 
+    @requires_repository_git
     def test_rejected_dev5_overlaps_are_identical_to_dev1_authority(self):
         payload = json.loads(MANIFEST.read_text(encoding="utf-8"))
         base = payload["base"]["sha"]
@@ -60,6 +70,7 @@ class DevAProvenanceTests(unittest.TestCase):
         dev5 = payload["predecessors"]["DEV5"]
         self.assertTrue(set(dev5["ported_paths"]).isdisjoint(dev5["rejected_overlaps_preserve_base"]))
 
+    @requires_repository_git
     def test_dev4_write_safety_override_is_narrow_and_explicit(self):
         payload = json.loads(MANIFEST.read_text(encoding="utf-8"))
         self.assertEqual(set(payload["predecessors"]["DEV4"]["dev_a_overrides"]), {"ops/write_safety.py"})
@@ -68,6 +79,7 @@ class DevAProvenanceTests(unittest.TestCase):
             _blob(payload["predecessors"]["DEV4"]["sha"], "ops/write_safety.py"),
         )
 
+    @requires_repository_git
     def test_dev_b_nonadapted_pre_round2_imports_remain_byte_identical(self):
         release = json.loads(RELEASE_OVERRIDE.read_text(encoding="utf-8"))
         dev_b = release["dev_b"]
@@ -79,6 +91,7 @@ class DevAProvenanceTests(unittest.TestCase):
             with self.subTest(path=path):
                 self.assertEqual(_blob("HEAD", path), _blob(dev_b["sha"], path))
 
+    @requires_repository_git
     def test_dev_b_round2_sync_is_exact_and_suppression_layer_is_absent(self):
         release = json.loads(RELEASE_OVERRIDE.read_text(encoding="utf-8"))
         sync = release["dev_b_round2_sync"]
@@ -100,6 +113,7 @@ class DevAProvenanceTests(unittest.TestCase):
         self.assertFalse(_path_exists("HEAD", "tools/strict_history_secret_scan.py"))
         self.assertFalse(_path_exists("HEAD", "tests/test_strict_history_secret_scan.py"))
 
+    @requires_repository_git
     def test_dev_c_qa_sync_is_exact_except_declared_adaptations(self):
         release = json.loads(RELEASE_OVERRIDE.read_text(encoding="utf-8"))
         sync = release["dev_c_qa_sync"]
@@ -152,6 +166,7 @@ class DevAProvenanceTests(unittest.TestCase):
         ):
             self.assertNotIn(forbidden, lowered)
 
+    @requires_repository_git
     def test_invalid_git_path_fails_closed(self):
         with self.assertRaises(ProvenanceError):
             _blob("HEAD", "definitely/not/a/candidate/path")
