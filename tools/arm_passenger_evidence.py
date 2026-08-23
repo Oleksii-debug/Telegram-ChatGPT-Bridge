@@ -6,7 +6,14 @@ import argparse
 import json
 import os
 import stat
+import sys
 from pathlib import Path
+
+# HOSTiQ/support may launch this documented tool outside the repository cwd.
+# Resolve imports from the script's repository, never from ambient cwd/PYTHONPATH.
+_REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
+if str(_REPOSITORY_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPOSITORY_ROOT))
 
 from ops.passenger_evidence_hook import ARM_MARKER_NAME, build_arm_marker
 from ops.private_control import read_private_text
