@@ -68,6 +68,30 @@ jobs:
             echo "DEV09_EXPORTED_ARTIFACT_TESTS_BLOCKED rc=$RC"
             grep -E '^(ERROR|FAIL):|^FAILED|^ERROR:|^FAIL:' /tmp/dev09-artifact-tests.log || true
           fi
+      - name: Diagnose PREPARE-style isolated venv test closure
+        env:
+          EXPECTED_PARENT: f966cc5bffc19d597bf298799e39a9bbbe692b19
+        run: |
+          set -u
+          TMP_ROOT="$(mktemp -d)"
+          trap 'rm -rf "$TMP_ROOT"' EXIT
+          mkdir -p "$TMP_ROOT/release"
+          git archive "$EXPECTED_PARENT" | tar -x -C "$TMP_ROOT/release"
+          python -m venv "$TMP_ROOT/release/.venv"
+          "$TMP_ROOT/release/.venv/bin/python" -m pip install --require-hashes -r "$TMP_ROOT/release/requirements.lock" >/dev/null
+          set +e
+          (
+            cd "$TMP_ROOT/release"
+            .venv/bin/python -m unittest discover -s tests -v
+          ) 2>&1 | tee /tmp/dev09-prepared-venv-tests.log
+          RC=${PIPESTATUS[0]}
+          set -e
+          if [ "$RC" -eq 0 ]; then
+            echo DEV09_PREPARE_VENV_TESTS_PASS
+          else
+            echo "DEV09_PREPARE_VENV_TESTS_BLOCKED rc=$RC"
+            grep -E '^(ERROR|FAIL):|^FAILED|^ERROR:|^FAIL:' /tmp/dev09-prepared-venv-tests.log || true
+          fi
       - name: Validate current Action schema independently
         run: python tools/build_action_openapi.py --validate-only
       - name: Current-tree secret scan
