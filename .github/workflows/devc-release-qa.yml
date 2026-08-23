@@ -1,0 +1,85 @@
+name: DEV_C Release QA
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  devc-release-qa:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout full history
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Set up Python 3.11
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.11'
+      - name: Compile DEV_C QA overlay
+        run: >-
+          python -m py_compile
+          ops/devc_portable_qa.py
+          tools/verify_dev_c_release_qa.py
+          tests/test_devc_portable_qa.py
+          tests/test_devc_provenance.py
+          tests/test_devc_round2_concurrency.py
+          tests/test_devc_runtime_security.py
+      - name: Verify DEV_C exact-parent provenance
+        run: python tools/verify_dev_c_release_qa.py
+      - name: Recheck package and candidate truth contracts
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          from ops.release_package import validate_public_release_tree
+          from ops.candidate_contracts import (
+              candidate_acceptance_coverage,
+              integrated_api_inventory,
+              validate_candidate_acceptance_coverage,
+              validate_integrated_api_inventory,
+          )
+          package = validate_public_release_tree(
+              Path('.'),
+              paths=['passenger_wsgi.py', 'requirements.txt', 'requirements.lock', 'bridge/app.py'],
+          )
+          assert package['dependencies']['package_count'] == 4
+          counts = validate_candidate_acceptance_coverage(candidate_acceptance_coverage())
+          assert counts == {'LIVE_EXTERNAL_REQUIRED': 17, 'REAL_SOURCE_REQUIRED': 13, 'SYNTHETIC_EXECUTABLE': 37}
+          inventory = integrated_api_inventory()
+          validate_integrated_api_inventory(inventory)
+          assert len(inventory) == 19
+          print('DEV_C_RELEASE_TRUTH_CONTRACTS_PASS')
+          PY
+          python tools/build_action_openapi.py --validate-only
+      - name: Run current canonical release QA contracts
+        run: |
+          umask 022
+          python -m unittest tests.test_devc_release_qa -v
+          python -m unittest \
+            tests.test_devc_release_e2e.RouteAndSchemaTests \
+            tests.test_devc_release_e2e.ContinuousFlowTests \
+            tests.test_devc_release_e2e.ContentionTests -v
+      - name: Run unique DEV_C portable, contention and runtime security gates
+        run: |
+          umask 022
+          python -m unittest \
+            tests.test_devc_portable_qa \
+            tests.test_devc_provenance \
+            tests.test_devc_round2_concurrency \
+            tests.test_devc_runtime_security -v
+      - name: Current-tree secret scan
+        if: always()
+        run: python tools/secret_scan.py --mode current
+      - name: Full-history secret scan
+        if: always()
+        run: python tools/secret_scan.py --mode history
+      - name: Verify non-deploy safety markers
+        if: always()
+        run: |
+          test -f RECOVERY_BASELINE.md
+          grep -q 'DO NOT MERGE / DO NOT DEPLOY' RECOVERY_BASELINE.md
+          test ! -e .cpanel.yml
+          test ! -e ops/ENABLE_HOSTIQ_AUTO_DEPLOY

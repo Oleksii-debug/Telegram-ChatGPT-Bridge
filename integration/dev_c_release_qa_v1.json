@@ -1,0 +1,20 @@
+{
+  "schema_version": 3,
+  "round": "RELEASE_TO_LIVE_ROUND_2",
+  "role": "DEV_C",
+  "parent_branch": "work3/integration-release-candidate",
+  "parent_sha": "dde01436e9dff883997c560397788d5ac36d018d",
+  "paths": [
+    ".github/workflows/devc-release-qa.yml",
+    "integration/dev_c_release_qa_v1.json",
+    "ops/devc_portable_qa.py",
+    "tests/test_devc_portable_qa.py",
+    "tests/test_devc_provenance.py",
+    "tests/test_devc_round2_concurrency.py",
+    "tests/test_devc_runtime_security.py",
+    "tools/verify_dev_c_release_qa.py"
+  ],
+  "production_logic_changed": false,
+  "private_values_recorded": false,
+  "deployment_authorized": false
+}
