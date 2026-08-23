@@ -6,6 +6,10 @@ HTTPS request header. This module never serializes it, logs it, or returns it.
 A PASS requires the exact current Telegram Bridge seven-component health
 contract; final Passenger proof additionally requires the private runtime,
 binding and consumed-receipt artifacts validated by DEV_B.
+
+Redirects are deliberately disabled. The challenge is proof material bound to
+the exact production origin and must never be replayed or forwarded to a
+redirect target, even when that target looks otherwise harmless.
 """
 from __future__ import annotations
 
@@ -24,6 +28,7 @@ CHALLENGE_HEADER = "X-Telegram-Bridge-Evidence-Challenge"
 CHALLENGE_RE = re.compile(r"^[0-9a-f]{64}$")
 MAX_BODY = 32 * 1024
 MAX_TIMEOUT = 20.0
+_REDIRECT_CODES = frozenset({301, 302, 303, 307, 308})
 EXPECTED_HEALTH_COMPONENTS = frozenset({
     "auth",
     "backend",
@@ -41,6 +46,19 @@ class ProbeResult:
     status: str
     http_status: int | None
     reason_code: str
+
+
+class _RejectRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Never create a follow-up request from a challenged evidence request."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: D401 - stdlib signature
+        return None
+
+
+def _open_no_redirect(request: urllib.request.Request, *, timeout: float):
+    """Open exactly one HTTPS request with redirect processing disabled."""
+    opener = urllib.request.build_opener(_RejectRedirectHandler())
+    return opener.open(request, timeout=timeout)
 
 
 def validate_probe_endpoint(url: str) -> str:
@@ -103,12 +121,17 @@ def dispatch_challenged_health_probe(
         method="GET",
     )
     try:
-        with urllib.request.urlopen(request, timeout=float(timeout)) as response:
+        with _open_no_redirect(request, timeout=float(timeout)) as response:
             status = int(response.status)
             body = response.read(MAX_BODY + 1)
             content_type = response.headers.get("Content-Type", "")
     except urllib.error.HTTPError as exc:
-        return ProbeResult("FAIL", int(exc.code), "PROBE_HTTP_REJECTED")
+        try:
+            code = int(exc.code)
+        except (TypeError, ValueError):
+            code = None
+        reason = "PROBE_REDIRECT_REJECTED" if code in _REDIRECT_CODES else "PROBE_HTTP_REJECTED"
+        return ProbeResult("FAIL", code, reason)
     except (OSError, ValueError):
         return ProbeResult("FAIL", None, "PROBE_NETWORK_FAILURE")
     finally:
