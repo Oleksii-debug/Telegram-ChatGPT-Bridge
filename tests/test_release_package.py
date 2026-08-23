@@ -163,10 +163,10 @@ class ReleasePackageContractTests(unittest.TestCase):
             with mock.patch.object(release_prepare, "_git_paths", return_value=exact_paths), \
                  mock.patch.object(
                      release_prepare,
-                     "prepare_versioned_release",
+                     "_prepare_with_bounded_subprocess_stages",
                      return_value=(prepared, meta, "c" * 64),
                  ), \
-                 mock.patch.object(release_prepare, "verify_prepared_release", return_value=meta), \
+                 mock.patch.object(release_prepare.deploy_release, "verify_prepared_release", return_value=meta), \
                  mock.patch.object(release_prepare, "_verify_installed_runtime"):
                 result = release_prepare.verify_exact_candidate(repo, sha, "origin/candidate")
             self.assertEqual("NONLIVE_PREPARE_VERIFIED", result["state"])
