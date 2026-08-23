@@ -77,6 +77,9 @@ jobs:
       - name: Validate public-repository workflow security policy
         if: always()
         run: python tools/workflow_security.py
+      - name: DEV07 scanner and workflow adversarial security regressions
+        if: always()
+        run: python -m unittest tests.test_secret_scan tests.test_dev07_security -v
       - name: Validate canonical release startup and dependency envelope
         run: |
           python - <<'PY'
