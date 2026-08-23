@@ -1,0 +1,115 @@
+name: DEV03 Read Hardening
+
+on:
+  pull_request:
+    branches: [work3/integration-release-candidate]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  dev03-read:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout exact DEV03 head with full history
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Set up Python 3.11
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.11'
+      - name: Validate exact canonical parent and DEV03 path boundary
+        env:
+          EXPECTED_PARENT: 999709f0ab2daee08fdb5c793419d1c45967238d
+        run: |
+          set -eu
+          test "$(git merge-base "$EXPECTED_PARENT" HEAD)" = "$EXPECTED_PARENT"
+          FIRST_DEV03_COMMIT="$(git rev-list --reverse "$EXPECTED_PARENT"..HEAD | head -n 1)"
+          test -n "$FIRST_DEV03_COMMIT"
+          test "$(git rev-parse "$FIRST_DEV03_COMMIT^")" = "$EXPECTED_PARENT"
+          git diff --name-only "$EXPECTED_PARENT"...HEAD | sort > /tmp/dev03-paths.txt
+          printf '%s\n' \
+            '.github/workflows/dev03-read.yml' \
+            'bridge/backend.py' \
+            'bridge/models.py' \
+            'bridge/validation.py' \
+            'docs/DEV03_SWARM_READ_HARDENING.md' \
+            'tests/test_dev03_history_offset.py' \
+            'tests/test_dev03_swarm_read.py' | sort > /tmp/dev03-expected.txt
+          diff -u /tmp/dev03-expected.txt /tmp/dev03-paths.txt
+          echo DEV03_EXACT_PARENT_PATH_BOUNDARY_PASS
+      - name: Compile DEV03 and canonical read surface
+        run: >-
+          python -m py_compile
+          bridge/backend.py
+          bridge/models.py
+          bridge/validation.py
+          bridge/app.py
+          bridge/integrated_app.py
+          tests/test_backend_read.py
+          tests/test_dev03_swarm_read.py
+          tests/test_dev03_history_offset.py
+      - name: Run DEV03 adversarial read suites
+        run: |
+          python -m unittest discover -s tests -p 'test_dev03_swarm_read.py' -v
+          python -m unittest discover -s tests -p 'test_dev03_history_offset.py' -v
+      - name: Run inherited read and request-security regressions
+        run: |
+          python -m unittest discover -s tests -p 'test_backend_read.py' -v
+          python -m unittest discover -s tests -p 'test_read_app.py' -v
+          python -m unittest discover -s tests -p 'test_validation_security.py' -v
+          python -m unittest discover -s tests -p 'test_dev3_round2.py' -v
+      - name: Run complete source regression suite except DEV01 exact-candidate provenance gate
+        run: |
+          python - <<'PY'
+          import unittest
+          EXCLUDED_SUFFIX = "test_dev_a_provenance.DevAProvenanceTests.test_exact_candidate_provenance_is_machine_verifiable"
+          def flatten(suite):
+              for item in suite:
+                  if isinstance(item, unittest.TestSuite):
+                      yield from flatten(item)
+                  else:
+                      yield item
+          discovered = unittest.defaultTestLoader.discover("tests")
+          selected = []
+          excluded = []
+          for test in flatten(discovered):
+              if test.id().endswith(EXCLUDED_SUFFIX):
+                  excluded.append(test.id())
+              else:
+                  selected.append(test)
+          if excluded != [EXCLUDED_SUFFIX]:
+              print(f"DEV03_EXPECTED_PROVENANCE_EXCLUSION_MISMATCH count={len(excluded)}")
+              raise SystemExit(2)
+          result = unittest.TextTestRunner(verbosity=2).run(unittest.TestSuite(selected))
+          if not result.wasSuccessful():
+              raise SystemExit(1)
+          print(f"DEV03_SOURCE_REGRESSION_PASS tests={result.testsRun} excluded_dev01_provenance=1")
+          PY
+      - name: Confirm canonical provenance remains a separate fail-closed integration gate
+        run: |
+          set +e
+          python tools/verify_integration_provenance.py >/tmp/dev03-provenance.log 2>&1
+          rc=$?
+          set -e
+          test "$rc" -ne 0
+          grep -q 'unexpected post-import mutation: DEV3:bridge/backend.py' /tmp/dev03-provenance.log
+          echo DEV03_CANONICAL_PROVENANCE_BLOCK_PRESERVED
+      - name: Validate canonical Action schema remains compatible
+        run: python tools/build_action_openapi.py --validate-only
+      - name: Current-tree secret scan
+        if: always()
+        run: python tools/secret_scan.py --mode current
+      - name: Full-history secret scan
+        if: always()
+        run: python tools/secret_scan.py --mode history
+      - name: Preserve no-deploy boundary
+        if: always()
+        run: |
+          test ! -e .cpanel.yml
+          test ! -e ops/ENABLE_HOSTIQ_AUTO_DEPLOY
+          grep -q 'DO NOT MERGE / DO NOT DEPLOY' RECOVERY_BASELINE.md

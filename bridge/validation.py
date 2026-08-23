@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
@@ -124,7 +125,15 @@ def date_range(start: Any, end: Any) -> DateRange:
 
 
 def normalize_search_text(value: str) -> str:
-    return value.casefold()
+    """Return deterministic Unicode compatibility/caseless search text.
+
+    Telegram names and message text can arrive in canonically or compatibility
+    equivalent forms.  Applying NFKC before and after casefold keeps Ukrainian,
+    Cyrillic and other Unicode matching stable without mutating returned text.
+    """
+
+    normalized = unicodedata.normalize("NFKC", value)
+    return unicodedata.normalize("NFKC", normalized.casefold())
 
 
 def validate_file_ref(value: Any) -> str:
