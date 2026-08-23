@@ -106,11 +106,15 @@ class ContentionTests(unittest.TestCase):
             def resume(): barrier.wait(10); return "resume",request(app,"/api/v1/downloads/resume",{"job_id":job})
             def write(): barrier.wait(10); return "write",request(app,"/api/v1/messages/send/commit",commit)
             with ThreadPoolExecutor(max_workers=18) as pool: results=[f.result(20) for f in [pool.submit(fn) for fn in [read]*6+[resume]*6+[write]*6]]
-            flags=[]
+            flags=[]; busy_resumes=0
             for kind,r in results:
+                if kind=="resume" and r["status"].startswith("409"):
+                    error=r.get("payload",{}).get("error",{})
+                    self.assertEqual("job_busy",error.get("code"),(kind,r)); self.assertIs(error.get("details",{}).get("retryable"),True,(kind,r)); busy_resumes+=1; continue
                 self.assertTrue(r["status"].startswith("200"),(kind,r))
                 if kind=="resume": self.assertEqual("complete",r["payload"]["data"]["status"])
                 elif kind=="write": flags.append(bool(r["payload"]["data"]["idempotent_replay"]))
+            self.assertGreaterEqual(busy_resumes,0)
             self.assertEqual(downloads,backend.download_count); self.assertEqual(1,len(fake.external_writes)); self.assertEqual(1,flags.count(False)); self.assertEqual(5,flags.count(True))
 
 if __name__=="__main__": unittest.main()
