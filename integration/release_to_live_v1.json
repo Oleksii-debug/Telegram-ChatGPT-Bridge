@@ -6,8 +6,10 @@
   "paths": [
     "docs/DEV_B_DEV_A_RUNTIME_SYNC.md",
     "docs/DEV_B_HOSTIQ_PRODUCTION_READINESS.md",
+    "docs/DEV_C_RELEASE_TO_LIVE_QA.md",
     "docs/HOSTIQ_ONE_TIME_SUPPORT_PACKAGE.md",
     "integration/release_to_live_v1.json",
+    "ops/devc_release_qa.py",
     "ops/hostiq_lifecycle.py",
     "ops/passenger_evidence_hook.py",
     "ops/private_control.py",
@@ -20,6 +22,8 @@
     "tests/test_dev2_lifecycle.py",
     "tests/test_devb_compile.py",
     "tests/test_devb_production_readiness.py",
+    "tests/test_devc_release_e2e.py",
+    "tests/test_devc_release_qa.py",
     "tests/test_passenger_evidence_hook.py",
     "tests/test_private_control.py",
     "tests/test_release_package.py",
@@ -38,7 +42,11 @@
     "64b288d125711c588438bab3ad372d68d764a2b7",
     "c25a597f125da47592382da369ec45e7af89c76c",
     "bdef00f43b955169a58aa8df65a4d55b1f2365eb",
-    "8de1d7bb03b17fbcd4cdb861cd81af616086521b"
+    "8de1d7bb03b17fbcd4cdb861cd81af616086521b",
+    "0f5dee1861fe583c6e4e511cdf55e1aaad99f771",
+    "35a4217986d7c4f554080b076abfe8e31bcf405a",
+    "5778ab176306f5692f73b9d18b1f3ad8e63902d1",
+    "162ee0b45c448882e78e53bd538db589079c188f"
   ],
   "runtime_packages": {
     "Telethon": "1.44.0",
