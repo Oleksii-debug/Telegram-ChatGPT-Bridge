@@ -7,6 +7,7 @@
     "bridge/runtime.py",
     "bridge/runtime_wsgi.py",
     "docs/DEV02_CANONICAL_RUNTIME_SYNC.md",
+    "docs/DEV06_API_CONTRACTS.md",
     "docs/DEV_B_DEV_A_RUNTIME_SYNC.md",
     "docs/DEV_B_HOSTIQ_PRODUCTION_READINESS.md",
     "docs/DEV_C_RELEASE_TO_LIVE_QA.md",
@@ -14,6 +15,8 @@
     "integration/release_to_live_v1.json",
     "ops/candidate_runtime_preflight.py",
     "ops/dev02_canonical_sync.py",
+    "ops/dev06_api_contracts.py",
+    "ops/dev06_runtime_conformance.py",
     "ops/devb_run_matrix.py",
     "ops/devc_release_qa.py",
     "ops/hostiq_lifecycle.py",
@@ -31,7 +34,10 @@
     "tests/test_arm_passenger_evidence.py",
     "tests/test_candidate_runtime_preflight.py",
     "tests/test_dev01_dev02_peer_provenance.py",
+    "tests/test_dev01_dev06_peer_provenance.py",
     "tests/test_dev02_canonical_sync.py",
+    "tests/test_dev06_api_contracts.py",
+    "tests/test_dev06_runtime_conformance.py",
     "tests/test_dev2_baseline_runtime.py",
     "tests/test_dev2_lifecycle.py",
     "tests/test_devb_cli_entrypoints.py",
@@ -49,6 +55,7 @@
     "tests/test_runtime_bootstrap.py",
     "tests/test_server_manifest.py",
     "tools/arm_passenger_evidence.py",
+    "tools/build_dev06_action_openapi.py",
     "tools/collect_server_manifest.py",
     "tools/run_passenger_evidence_probe.py",
     "tools/validate_candidate_runtime_preflight.py",
@@ -80,7 +87,8 @@
     "df318aa089f754b7a14f624b7c27cca59758cbe8",
     "964261b55f5f8ca5b615f783f172e35a4da0abc1",
     "c609adfc9a1116aae635a0b14d632a5e59b6c2af",
-    "a4fea8431b999e1bab7d95168ce0fc4d2a20305d"
+    "a4fea8431b999e1bab7d95168ce0fc4d2a20305d",
+    "ed4820d2297a65870abb6c2cc2f3a5e63a569302"
   ],
   "runtime_packages": {
     "Telethon": "1.44.0",
@@ -203,6 +211,26 @@
     ],
     "production_mutated": false,
     "promotion_authorized": false
+  },
+  "dev06_contract_sync": {
+    "pr": 45,
+    "sha": "bebf365af414e10f0f0a58f44a37c86134e44c5d",
+    "merge_commit": "ed4820d2297a65870abb6c2cc2f3a5e63a569302",
+    "first_parent": "00684e834a523f55ea3b61c1a12cb9dc54cfd947",
+    "exact_blob_paths": [
+      "docs/DEV06_API_CONTRACTS.md",
+      "ops/dev06_api_contracts.py",
+      "ops/dev06_runtime_conformance.py",
+      "tests/test_dev06_api_contracts.py",
+      "tests/test_dev06_runtime_conformance.py",
+      "tools/build_dev06_action_openapi.py"
+    ],
+    "excluded_specialist_paths": [
+      ".github/workflows/dev06-api-contracts.yml"
+    ],
+    "production_runtime_modified": false,
+    "production_mutated": false,
+    "deployment_authorized": false
   },
   "dev_c_qa_sync": {
     "pr": 16,

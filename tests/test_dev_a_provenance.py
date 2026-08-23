@@ -47,7 +47,7 @@ class DevAProvenanceTests(unittest.TestCase):
         self.assertEqual(result["dev_b_terminal_retained_path_count"], 6)
         self.assertEqual(result["dev_c_exact_path_count"], 2)
         self.assertEqual(result["dev_c_adapted_path_count"], 2)
-        self.assertEqual(result["release_to_live_path_count"], 51)
+        self.assertEqual(result["release_to_live_path_count"], 58)
         self.assertEqual(result["pr2_pr3_overlap_count"], 7)
         self.assertEqual(result["pr2_pr5_overlap_count"], 3)
         self.assertEqual(result["rejected_dev5_overlap_count"], 7)
