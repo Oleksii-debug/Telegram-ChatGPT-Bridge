@@ -29,6 +29,7 @@ jobs:
           python -m py_compile
           passenger_wsgi.py
           bridge/app.py
+          bridge/audit.py
           bridge/integrated_app.py
           tools/secret_scan.py
           tools/workflow_security.py
@@ -60,6 +61,7 @@ jobs:
           ops/dev5_round2_oracles.py
           tests/test_secret_scan.py
           tests/test_dev07_security.py
+          tests/test_dev07_audit_security.py
           tests/test_recovery_ops.py
           tests/test_release_package.py
           tests/test_audit_round5.py
@@ -80,9 +82,9 @@ jobs:
       - name: Validate public-repository workflow security policy
         if: always()
         run: python tools/workflow_security.py
-      - name: DEV07 scanner and workflow adversarial security regressions
+      - name: DEV07 scanner, workflow and audit adversarial security regressions
         if: always()
-        run: python -m unittest tests.test_secret_scan tests.test_dev07_security -v
+        run: python -m unittest tests.test_secret_scan tests.test_dev07_security tests.test_dev07_audit_security -v
       - name: Validate canonical release startup and dependency envelope
         run: |
           python - <<'PY'
