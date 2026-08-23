@@ -190,10 +190,10 @@ class RuntimeEvidenceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td, mock.patch.object(runtime_evidence.importlib,"import_module",return_value=self.fake_module()), mock.patch.object(runtime_evidence.sys,"version_info",FakeVersionInfo(3,11)), mock.patch.object(runtime_evidence.platform,"python_version",return_value="3.11.99"):
             root,wsgi=self.setup_root(td); r=runtime_evidence.collect_runtime_evidence(app_root=root,wsgi_file=wsgi,application_process=False)
             self.assertEqual("PYTHON_3_11_CANDIDATE_CONTEXT",r["runtime_compliance"]); self.assertTrue(runtime_evidence.system_shell_cannot_prove_passenger(r))
-    def test_application_context_requires_passenger_signal_and_import(self):
+    def test_application_context_and_fake_passenger_env_are_still_candidate_only(self):
         with tempfile.TemporaryDirectory() as td, mock.patch.object(runtime_evidence.importlib,"import_module",return_value=self.fake_module()), mock.patch.object(runtime_evidence.sys,"version_info",FakeVersionInfo(3,11)), mock.patch.object(runtime_evidence.platform,"python_version",return_value="3.11.99"), mock.patch.dict(os.environ,{"PASSENGER_APP_ENV":"production"},clear=False):
             root,wsgi=self.setup_root(td); r=runtime_evidence.collect_runtime_evidence(app_root=root,wsgi_file=wsgi,application_process=True)
-            self.assertEqual("PYTHON_3_11_APPLICATION_CONTEXT_CONFIRMED",r["runtime_compliance"]); self.assertFalse(runtime_evidence.system_shell_cannot_prove_passenger(r))
+            self.assertEqual("PYTHON_3_11_CANDIDATE_CONTEXT",r["runtime_compliance"]); self.assertFalse(r["serving_request_verified"]); self.assertTrue(runtime_evidence.system_shell_cannot_prove_passenger(r))
     def test_application_boolean_without_passenger_signal_is_not_enough(self):
         with tempfile.TemporaryDirectory() as td, mock.patch.object(runtime_evidence.importlib,"import_module",return_value=self.fake_module()), mock.patch.object(runtime_evidence.sys,"version_info",FakeVersionInfo(3,11)), mock.patch.object(runtime_evidence.platform,"python_version",return_value="3.11.99"), mock.patch.dict(os.environ,{},clear=True):
             root,wsgi=self.setup_root(td); r=runtime_evidence.collect_runtime_evidence(app_root=root,wsgi_file=wsgi,application_process=True)
