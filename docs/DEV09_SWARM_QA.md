@@ -2,15 +2,15 @@
 
 Role: DEV09 independent engineering QA. This layer is QA-only and does not authorize merge, deploy, Passenger restart, Telegram authorization, or live Telegram write.
 
-Exact canonical parent: `a4fea8431b999e1bab7d95168ce0fc4d2a20305d` on `work3/integration-release-candidate`.
+Exact canonical parent: `00684e834a523f55ea3b61c1a12cb9dc54cfd947` on `work3/integration-release-candidate`.
 
 ## Current source/non-live state
 
-The prior DEV09 findings were closed on `999709f0ab2daee08fdb5c793419d1c45967238d`, where canonical Recovery Guard #369 passed full regression and real exact-head non-live PREPARE.
+DEV09 previously found and tracked three transient integration defects across moving canonical heads: terminal DEV02 provenance drift, three stale cross-lane runtime-evidence tests, and later unaccounted DEV02 verifier/test paths. All three were closed in the canonical lane without weakening production behavior.
 
-The canonical head subsequently integrated a new DEV02 canonical-sync verifier/tests/docs package without production runtime changes. On exact `a4fea843...`, release/package, OpenAPI, 67-criterion/19-route and secret-scan gates pass, but deterministic integration provenance fails closed because the newly integrated QA paths are not yet in the canonical provenance allowlist/accounting. Regression and PREPARE are therefore not reached by canonical Recovery Guard #374.
+Exact canonical `00684e834a523f55ea3b61c1a12cb9dc54cfd947` has Recovery Guard #377 SUCCESS. Release/package validation, OpenAPI, 67-criterion/19-route truth, deterministic provenance, single deploy entrypoint, full regression, real exact-head non-live PREPARE, current/history secret scans, recovery marker and no-autodeploy guards all pass.
 
-DEV09 separately checks the full exact-parent clean `git archive` unittest suite without `.git`. If that suite is clear, the current blocker is integration-accounting/provenance only, not an independently observed functional regression.
+DEV09 independently requires the exact-parent provenance probe and the full clean `git archive` unittest suite without `.git` to remain clear. Any future canonical movement invalidates this checkpoint through the exact-parent anti-staleness gate.
 
 ## Independent QA checks
 
