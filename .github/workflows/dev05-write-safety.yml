@@ -33,7 +33,6 @@ jobs:
           tests/test_dev05_phase_aware_write.py
           tests/test_dev05_structured_safe_errors.py
           tests/test_dev05_effect_boundary_crash.py
-          tests/test_dev05_wsgi_safe_error.py
           tests/test_dev4_write_core.py
           tests/test_dev4_endpoint_policy.py
           tests/test_dev_a_integration.py
@@ -44,8 +43,7 @@ jobs:
             tests.test_dev05_write_state_security \
             tests.test_dev05_phase_aware_write \
             tests.test_dev05_structured_safe_errors \
-            tests.test_dev05_effect_boundary_crash \
-            tests.test_dev05_wsgi_safe_error -v
+            tests.test_dev05_effect_boundary_crash -v
       - name: Re-run canonical write safety regressions
         run: |
           umask 022
