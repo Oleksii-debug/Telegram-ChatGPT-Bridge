@@ -8,11 +8,11 @@ The candidate is assembled from the audited/green predecessor heads recorded in 
 
 1. DEV1 integration/deployment/security base.
 2. DEV3 read/media application and deterministic tests.
-3. DEV4 persistent preview/commit, write adapter and OpenAPI/ChatGPT Action contracts.
+3. DEV4 persistent preview/commit, write adapter and OpenAPI/ChatGPT Action contracts, with one narrow DEV_A concurrency-classification override in `ops/write_safety.py`.
 4. Selective DEV2 HOSTiQ baseline/runtime/private-evidence contracts.
 5. Portable DEV5 adversarial/fuzz oracles only; DEV5 acceptance/evidence production files are intentionally not used to overwrite DEV1 controls.
 6. Selective DEV_B release/runtime/package mechanisms, with later Round-2 synchronization and explicit DEV_A adaptations.
-7. Selective DEV_C packaged-candidate QA oracles, with exact-path provenance and one declared DEV_A test adaptation.
+7. Selective DEV_C packaged-candidate QA oracles, with exact-path provenance and explicit DEV_A test adaptations.
 
 ## Unified application boundary
 
@@ -50,7 +50,9 @@ Commit requires all of:
 - configured write rate limiter;
 - configured injected Telegram writer.
 
-If no Telegram writer is configured, commit returns a controlled 503 before the persistent store reserves or consumes the preview. Once the external-effect boundary is crossed, the DEV4 persistent transaction model preserves replay/ambiguity behavior rather than blindly resending.
+If no Telegram writer is configured, commit returns a controlled 503 before the persistent store reserves or consumes the preview. Once the external-effect boundary is crossed, the persistent transaction model preserves replay/ambiguity behavior rather than blindly resending.
+
+The narrow DEV_A override in `ops/write_safety.py` preserves that model while correcting concurrent classification. Two same-key commits may both have observed the durable `RESERVED` state before either transitions it. If one wins `RESERVED -> CALLING`, the loser can then observe `CALLING` in `_transition_to_calling()`. That observation proves only that another concurrent writer currently owns the external-effect boundary; it is not, by itself, an unknown external outcome. The loser therefore receives fail-closed `409 write_in_progress`. A durable `AMBIGUOUS` state still yields `write_outcome_unknown_reconciliation_required`, and no path performs a blind resend. After the winning writer commits its durable result, a later same-key call returns the normal idempotent replay.
 
 Send-file commit resolves only registered private Bridge file references. Registry lookup revalidates topology, size and SHA-256 before paths are handed to the Telegram adapter. Raw server paths are never accepted from the API/OpenAPI contract.
 
@@ -87,7 +89,7 @@ Release-to-Live Round 2 closes the Auditor P1 package blocker at source level. T
 
 The runtime closure is deliberately small and exact: Telethon 1.44.0 plus its locked transitive runtime closure (`pyaes`, `rsa`, `pyasn1`). No test-only dependency set is required by the production release package. Private runtime/session/config artifacts are prohibited from the public candidate payload.
 
-DEV_B mechanisms were not imported from an arbitrary latest moving head. The canonical provenance records the accepted semantic import, the later fixed Round-2 synchronization checkpoint `6f943ee15f053acc5b4f15167c16d431023a35d1`, paths that remain byte-exact to that checkpoint, and the narrow DEV_A adaptations needed for the canonical combined candidate. A newer live DEV_B head that is red in CI is not silently promoted.
+DEV_B mechanisms were not imported from an arbitrary latest moving head. The canonical provenance records the accepted semantic import, the later fixed Round-2 synchronization checkpoint `6f943ee15f053acc5b4f15167c16d431023a35d1`, paths that remain byte-exact to that checkpoint, and the narrow DEV_A adaptations needed for the canonical combined candidate. A newer moving DEV_B head is not silently promoted; it must be independently green and reviewed before any additional canonical import.
 
 ## Production runtime bootstrap
 
@@ -99,15 +101,19 @@ This hardening was added after DEV_C independently found a concrete rollback cas
 
 ## DEV_C packaged-candidate QA provenance
 
-The candidate includes only the selected QA material from DEV_C source checkpoint `5758bfdcd9ecee4011fc3caaa3c68eb46ee2af19`, imported through semantic merge `df318aa089f754b7a14f624b7c27cca59758cbe8` whose parents are the recorded DEV_A checkpoint and that exact DEV_C source SHA.
+The candidate includes only selected QA material from DEV_C source checkpoint `5758bfdcd9ecee4011fc3caaa3c68eb46ee2af19`, imported through semantic merge `df318aa089f754b7a14f624b7c27cca59758cbe8` whose parents are the recorded DEV_A checkpoint and that exact DEV_C source SHA.
 
-Byte-exact DEV_C paths are:
+Byte-exact DEV_C paths are now only:
 
 - `docs/DEV_C_RELEASE_TO_LIVE_QA.md`;
-- `ops/devc_release_qa.py`;
-- `tests/test_devc_release_e2e.py`.
+- `ops/devc_release_qa.py`.
 
-`tests/test_devc_release_qa.py` is an explicit DEV_A adaptation and is machine-classified separately rather than misrepresented as an exact source blob. No DEV_C production application logic is imported through this QA overlay.
+The two DEV_C tests are explicitly adapted and machine-classified as adaptations rather than exact copies:
+
+- `tests/test_devc_release_qa.py` contains the prior canonical integration adaptation;
+- `tests/test_devc_release_e2e.py` now accepts only the safe transient `409 write_in_progress` result for same-key concurrent commits, still requires exactly one external fake write, and then requires a successful idempotent replay after the concurrent writer has durably committed.
+
+A later DEV_C Round-2 overlay independently reproduced the backward-clock finding and, after the canonical fix, that regression passed. Its separate bulk-download `500 internal_error` was traced to the QA fixture reading `source_ref` even though the canonical `ReadBackend.download_media` protocol supplies `file_ref`; DEV_A reported that exact fixture mismatch to DEV_C rather than changing production code to match a faulty mock. No DEV_C production application logic is imported through this QA overlay.
 
 ## Candidate API inventory and 67-criterion truth accounting
 
@@ -150,16 +156,17 @@ Independent audit should verify at least:
 6. preview zero-side-effect behavior;
 7. explicit-current-command commit requirement;
 8. single-use/idempotent replay behavior;
-9. wrong-action/expired/used/invalid preview handling;
-10. reply/forward target binding;
-11. private file-ref/hash/size enforcement for send-files;
-12. no private body/token/target in metadata-only audit events;
-13. fail-closed defaults when limiter/store/writer are absent;
-14. cross-lane interface vocabulary compatibility;
-15. adapted DEV5 fuzz vectors against actual integrated modules;
-16. package/startup/dependency-lock validation and exact-head non-live PREPARE;
-17. process-shared SQLite rate-limit rollback high-water behavior across store instances;
-18. selective DEV_C exact/adapted path accounting without production-logic import;
-19. candidate 19-route inventory and exact 67-criterion truth accounting;
-20. complete CI, current-tree secret scan and full-history secret scan;
-21. preservation of the production no-merge/no-deploy/no-live-write gate.
+9. same-key concurrent `CALLING` classification as `write_in_progress` without blind resend, while durable `AMBIGUOUS` remains reconciliation-only;
+10. wrong-action/expired/used/invalid preview handling;
+11. reply/forward target binding;
+12. private file-ref/hash/size enforcement for send-files;
+13. no private body/token/target in metadata-only audit events;
+14. fail-closed defaults when limiter/store/writer are absent;
+15. cross-lane interface vocabulary compatibility;
+16. adapted DEV5 fuzz vectors against actual integrated modules;
+17. package/startup/dependency-lock validation and exact-head non-live PREPARE;
+18. process-shared SQLite rate-limit rollback high-water behavior across store instances;
+19. selective DEV_C exact/adapted path accounting without production-logic import;
+20. candidate 19-route inventory and exact 67-criterion truth accounting;
+21. complete CI, current-tree secret scan and full-history secret scan;
+22. preservation of the production no-merge/no-deploy/no-live-write gate.
