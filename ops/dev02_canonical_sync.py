@@ -14,7 +14,7 @@ import subprocess
 from pathlib import Path
 
 FULL_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
-RUNTIME_PROTOCOL_SHA = "8f2044d7bca9487815f754d614ab781555671a4b"
+RUNTIME_PROTOCOL_SHA = "12c9036eef907012590691fc0ecdaccbe17d6550"
 LEDGER_PATH = "integration/release_to_live_v1.json"
 MAX_GIT_TEXT = 256 * 1024
 
@@ -162,12 +162,20 @@ def verify_candidate_runtime_sync(
 
     for path in CRITICAL_RUNTIME_PATHS:
         try:
-            protocol_blob = _blob_sha(root, protocol, path)
-            candidate_blob = _blob_sha(root, candidate, path)
+            if _blob_sha(root, protocol, path) != _blob_sha(root, candidate, path):
+                return {
+                    "schema_version": 1,
+                    "candidate_sha": candidate,
+                    "protocol_sha": protocol,
+                    "protocol_ancestry": "PASS",
+                    "critical_blob_identity": "FAIL",
+                    "critical_path_count": len(CRITICAL_RUNTIME_PATHS),
+                    "ledger_binding": "NOT_CHECKED",
+                    "ledger_path_accounting": "NOT_CHECKED",
+                    "status": "BLOCKED_RUNTIME_DRIFT",
+                    "promotion_authorized": False,
+                }
         except CanonicalSyncError:
-            protocol_blob = None
-            candidate_blob = None
-        if protocol_blob is None or candidate_blob is None or protocol_blob != candidate_blob:
             return {
                 "schema_version": 1,
                 "candidate_sha": candidate,
@@ -182,7 +190,8 @@ def verify_candidate_runtime_sync(
             }
 
     ledger = _show_json(root, candidate, LEDGER_PATH)
-    ledger_binding = "PASS" if _ledger_runtime_sha(ledger) == protocol else "STALE"
+    ledger_sha = _ledger_runtime_sha(ledger)
+    ledger_binding = "PASS" if ledger_sha == protocol else "STALE"
     ledger_paths = "PASS" if _ledger_accounts_paths(ledger) else "STALE"
     status = (
         "READY_FOR_CANONICAL_REVALIDATION"
@@ -203,31 +212,39 @@ def verify_candidate_runtime_sync(
     }
 
 
-def validate_sync_summary(summary: dict) -> dict:
+def validate_sync_summary(payload: object) -> dict:
     expected = {
         "schema_version", "candidate_sha", "protocol_sha", "protocol_ancestry",
         "critical_blob_identity", "critical_path_count", "ledger_binding",
         "ledger_path_accounting", "status", "promotion_authorized",
     }
-    if not isinstance(summary, dict) or set(summary) != expected or summary.get("schema_version") != 1:
-        raise CanonicalSyncError("sync summary schema invalid")
-    if not FULL_SHA_RE.fullmatch(str(summary["candidate_sha"])) or not FULL_SHA_RE.fullmatch(str(summary["protocol_sha"])):
-        raise CanonicalSyncError("sync summary identity invalid")
-    if summary["protocol_ancestry"] not in {"PASS", "FAIL"}:
-        raise CanonicalSyncError("sync ancestry status invalid")
-    if summary["critical_blob_identity"] not in {"PASS", "FAIL", "NOT_CHECKED"}:
-        raise CanonicalSyncError("sync blob status invalid")
-    if summary["ledger_binding"] not in {"PASS", "STALE", "NOT_CHECKED"}:
-        raise CanonicalSyncError("sync ledger status invalid")
-    if summary["ledger_path_accounting"] not in {"PASS", "STALE", "NOT_CHECKED"}:
-        raise CanonicalSyncError("sync path accounting invalid")
-    if summary["status"] not in {
-        "READY_FOR_CANONICAL_REVALIDATION", "BLOCKED_PROTOCOL_ANCESTRY",
-        "BLOCKED_RUNTIME_DRIFT", "BLOCKED_LEDGER_STALE",
-    }:
-        raise CanonicalSyncError("sync status invalid")
-    if summary["critical_path_count"] != len(CRITICAL_RUNTIME_PATHS):
-        raise CanonicalSyncError("sync path count invalid")
-    if summary["promotion_authorized"] is not False:
-        raise CanonicalSyncError("sync summary cannot authorize promotion")
-    return json.loads(json.dumps(summary, sort_keys=True, separators=(",", ":")))
+    if not isinstance(payload, dict) or set(payload) != expected or payload.get("schema_version") != 1:
+        raise CanonicalSyncError("DEV02 canonical sync summary schema invalid")
+    for key in ("candidate_sha", "protocol_sha"):
+        if not isinstance(payload.get(key), str) or not FULL_SHA_RE.fullmatch(payload[key]):
+            raise CanonicalSyncError("DEV02 canonical sync SHA invalid")
+    if payload.get("protocol_ancestry") not in {"PASS", "FAIL"}:
+        raise CanonicalSyncError("DEV02 canonical sync ancestry status invalid")
+    if payload.get("critical_blob_identity") not in {"PASS", "FAIL", "NOT_CHECKED"}:
+        raise CanonicalSyncError("DEV02 canonical sync blob status invalid")
+    if payload.get("critical_path_count") != len(CRITICAL_RUNTIME_PATHS):
+        raise CanonicalSyncError("DEV02 canonical sync path count invalid")
+    for key in ("ledger_binding", "ledger_path_accounting"):
+        if payload.get(key) not in {"PASS", "STALE", "NOT_CHECKED"}:
+            raise CanonicalSyncError("DEV02 canonical sync ledger status invalid")
+    allowed_status = {
+        "READY_FOR_CANONICAL_REVALIDATION",
+        "BLOCKED_LEDGER_STALE",
+        "BLOCKED_RUNTIME_DRIFT",
+        "BLOCKED_PROTOCOL_ANCESTRY",
+    }
+    if payload.get("status") not in allowed_status or payload.get("promotion_authorized") is not False:
+        raise CanonicalSyncError("DEV02 canonical sync safety status invalid")
+    if payload["status"] == "READY_FOR_CANONICAL_REVALIDATION" and not (
+        payload["protocol_ancestry"] == "PASS"
+        and payload["critical_blob_identity"] == "PASS"
+        and payload["ledger_binding"] == "PASS"
+        and payload["ledger_path_accounting"] == "PASS"
+    ):
+        raise CanonicalSyncError("DEV02 canonical sync ready state contradictory")
+    return dict(payload)
