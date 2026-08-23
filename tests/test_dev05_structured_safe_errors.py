@@ -109,7 +109,7 @@ class StructuredSafeFailureTests(unittest.TestCase):
         self.assertEqual([], client.external_writes)
         self.assertNotIn("private-preflight-detail", str(ctx.exception))
 
-    def test_legacy_safe_failure_remains_backward_compatible_502(self):
+    def test_legacy_safe_failure_is_generic_502_not_public_code_passthrough(self):
         preview = self.preview()
 
         def external(_payload):
@@ -123,11 +123,16 @@ class StructuredSafeFailureTests(unittest.TestCase):
                 external_write=external,
                 now=101,
             )
+        self.assertEqual("external_write_rejected", ctx.exception.code)
         self.assertEqual(502, ctx.exception.status)
         self.assertIsNone(ctx.exception.retry_after_seconds)
         self.assertEqual(
-            {"error": "legacy_safe_failure", "status": 502},
+            {"error": "external_write_rejected", "status": 502},
             structured_safe_write_error(ctx.exception),
+        )
+        self.assertEqual(
+            TransactionState.FAILED_SAFE.value,
+            self.store.transaction_state("legacy-safe-001"),
         )
 
     def test_post_effect_floodwait_still_becomes_ambiguous(self):
