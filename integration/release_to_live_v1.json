@@ -135,10 +135,10 @@
     "first_parent": "94c6ab7e3afabd769a63b44b222bfc0bbf067f67",
     "exact_blob_paths": [
       "docs/DEV_C_RELEASE_TO_LIVE_QA.md",
-      "ops/devc_release_qa.py",
-      "tests/test_devc_release_e2e.py"
+      "ops/devc_release_qa.py"
     ],
     "adapted_paths": [
+      "tests/test_devc_release_e2e.py",
       "tests/test_devc_release_qa.py"
     ],
     "production_logic_modified": false
