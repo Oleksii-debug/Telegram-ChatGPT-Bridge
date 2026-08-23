@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 import tempfile
 import unicodedata
 import unittest
@@ -92,6 +93,62 @@ class Dev04DownloadHardeningTests(unittest.TestCase):
             result = self.manager.start_bulk([self.item()])
         self.assertEqual(result["status"], "failed")
         self.assertEqual(list(self.files.root.iterdir()), [])
+
+    def test_registered_result_is_recovered_after_checkpoint_save_gap(self) -> None:
+        item = self.item()
+        job_id = self.checkpoints.create([item])
+        final = self.manager._final_path(item, job_id=job_id)
+        final.write_bytes(b"abc")
+        origin = self.manager._origin_key(job_id, item.item_id)
+        registered = self.files.add(final, name=item.name, mime_type=item.mime_type, origin_key=origin)
+
+        result = self.manager.resume(job_id)
+
+        self.assertEqual(result["status"], "complete")
+        self.assertEqual(result["files"][0]["file_ref"], registered.file_ref)
+        self.assertNotIn("origin_key", result["files"][0])
+        self.assertEqual(self.backend.calls, 0)
+
+    def test_moved_unregistered_result_is_adopted_after_crash_gap(self) -> None:
+        item = self.item()
+        job_id = self.checkpoints.create([item])
+        final = self.manager._final_path(item, job_id=job_id)
+        final.write_bytes(b"abc")
+
+        result = self.manager.resume(job_id)
+
+        self.assertEqual(result["status"], "complete")
+        self.assertEqual(self.backend.calls, 0)
+        stored = self.files.get(result["files"][0]["file_ref"])
+        self.assertIsNotNone(stored)
+        self.assertEqual(stored.origin_key, self.manager._origin_key(job_id, item.item_id))
+        self.assertNotIn("origin_key", stored.public_metadata())
+
+    def test_legacy_file_registry_schema_is_migrated_in_place(self) -> None:
+        root = Path(self.tmp.name) / "legacy"
+        db = root / "state" / "files.sqlite3"
+        db.parent.mkdir(parents=True)
+        with sqlite3.connect(str(db)) as connection:
+            connection.execute(
+                """
+                CREATE TABLE files (
+                    file_ref TEXT PRIMARY KEY,
+                    rel_path TEXT NOT NULL UNIQUE,
+                    name TEXT NOT NULL,
+                    mime_type TEXT NOT NULL,
+                    size INTEGER NOT NULL,
+                    sha256 TEXT NOT NULL,
+                    created_at INTEGER NOT NULL
+                )
+                """
+            )
+            connection.commit()
+        FileRecordStore(db, root / "files")
+        with sqlite3.connect(str(db)) as connection:
+            columns = {str(row[1]) for row in connection.execute("PRAGMA table_info(files)")}
+            indexes = {str(row[1]) for row in connection.execute("PRAGMA index_list(files)")}
+        self.assertIn("origin_key", columns)
+        self.assertIn("files_origin_key_unique", indexes)
 
 
 class Dev04FilenamePolicyTests(unittest.TestCase):
