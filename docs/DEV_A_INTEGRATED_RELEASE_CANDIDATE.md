@@ -11,12 +11,14 @@ The candidate is assembled from the audited/green predecessor heads recorded in 
 3. DEV4 persistent preview/commit, write adapter and OpenAPI/ChatGPT Action contracts.
 4. Selective DEV2 HOSTiQ baseline/runtime/private-evidence contracts.
 5. Portable DEV5 adversarial/fuzz oracles only; DEV5 acceptance/evidence production files are intentionally not used to overwrite DEV1 controls.
+6. Selective DEV_B release/runtime/package mechanisms, with later Round-2 synchronization and explicit DEV_A adaptations.
+7. Selective DEV_C packaged-candidate QA oracles, with exact-path provenance and one declared DEV_A test adaptation.
 
 ## Unified application boundary
 
 `bridge.app.BridgeApplication` remains the tested DEV3 read/media core. `bridge.integrated_app.UnifiedBridgeApplication` composes that core with DEV4 write safety.
 
-The recovered HOSTiQ Passenger startup contract imports `bridge.app.application`. To preserve that import target without changing the known startup text, `bridge.__init__` replaces the module-level `bridge.app.application` attribute at package-import completion with the lazy unified entry point from `bridge.integrated_app`. The integration entry point constructs no Telegram client and performs no Telegram network I/O at import time.
+The canonical production startup now uses the lazy `bridge.runtime_wsgi.application` wrapper. `bridge.app.application`, package-level `bridge.application`, and root `passenger_wsgi.py` resolve to that wrapper without constructing a Telegram client at import time. The wrapper builds the production dependency graph only on first request and returns a sanitized startup error if private configuration is incomplete or invalid.
 
 The canonical Action/private-API operation table is `ops.openapi_registry.OPERATIONS`. At import/CI, `validate_unified_registry()` proves that every Action-visible READ method/path exactly matches the non-dynamic protected DEV3 runtime read registry. Write preview/commit dispatch is taken directly from `OPERATIONS`, so no duplicate write route table exists.
 
@@ -58,7 +60,7 @@ External Telegram receipts are reduced to bounded metadata (`operation`, positiv
 
 `ops.integration_interfaces` is now an explicit adapter vocabulary rather than a stale predecessor grammar. It represents DEV3 dotted runtime operation IDs, DEV4 camelCase Action IDs, `SEND_FILES`, and the DEV3 `PROTECTED_OR_SIGNED` private-file class. The adapter does not weaken writes: every `PROTECTED_WRITE` policy still requires `preview_commit_required=True`, and malformed/unknown operation IDs remain fail-closed.
 
-DEV_C's earlier high finding that write routes were not mounted was measured against the older DEV_A `c7dbcdb...` checkpoint. The current candidate supersedes that checkpoint: all eight DEV4 preview/commit routes are dispatched by the unified WSGI layer and are covered by black-box mocked WSGI tests. DEV_C must still independently revalidate the final exact DEV_A head; source success is not deployed Action evidence.
+All eight DEV4 preview/commit routes are dispatched by the unified WSGI layer and are covered by black-box mocked WSGI tests. DEV_C packaged-candidate QA is selectively represented in the canonical branch, but later moving DEV_C heads remain independent overlays until they explicitly revalidate the current exact DEV_A head.
 
 ## DEV5 fuzz adaptation
 
@@ -72,6 +74,40 @@ The original DEV5 fuzz file assumed helper APIs from DEV5 acceptance/evidence fi
 - imported DEV5 crash-safe idempotency oracle.
 
 Archive member naming was additionally hardened to Unicode NFC + casefold collision keys with deterministic disambiguation and post-build collision/CRC validation. This preserves Unicode while preventing equivalent member-name ambiguity across ZIP consumers.
+
+## Packaged production candidate
+
+Release-to-Live Round 2 closes the Auditor P1 package blocker at source level. The repository now carries the canonical package envelope required by the existing deploy engine:
+
+- root `passenger_wsgi.py` with the reviewed production startup/evidence-hook contract;
+- exact runtime dependency input `requirements.txt`;
+- SHA-256 hash-locked `requirements.lock`;
+- `ops.release_package` and `ops.candidate_runtime_preflight` package validation;
+- `tools.verify_release_prepare` exact-candidate non-live PREPARE verification.
+
+The runtime closure is deliberately small and exact: Telethon 1.44.0 plus its locked transitive runtime closure (`pyaes`, `rsa`, `pyasn1`). No test-only dependency set is required by the production release package. Private runtime/session/config artifacts are prohibited from the public candidate payload.
+
+DEV_B mechanisms were not imported from an arbitrary latest moving head. The canonical provenance records the accepted semantic import, the later fixed Round-2 synchronization checkpoint `6f943ee15f053acc5b4f15167c16d431023a35d1`, paths that remain byte-exact to that checkpoint, and the narrow DEV_A adaptations needed for the canonical combined candidate. A newer live DEV_B head that is red in CI is not silently promoted.
+
+## Production runtime bootstrap
+
+`bridge.runtime.build_production_application_from_env()` constructs the production dependency graph without Telegram network I/O. Private Telegram references are all-or-none and remain memory-only. The read backend and write adapter share the same owner-private Telegram session lock path so real read/write client lifecycles cannot concurrently mutate the same personal session.
+
+Read and write endpoint rate limiting use one owner-private process-shared SQLite quota store. The store validates database/WAL/SHM topology and modes and now persists a clock high-water mark. If wall-clock time moves backward, quota acquisition fails closed with `rate_limit_clock_moved_backward`; the high-water fact survives a new store instance/worker, so a restart cannot reopen quota after a clock rollback. Once time catches up, the already-consumed fixed-window quota remains consumed rather than being reset by the rollback.
+
+This hardening was added after DEV_C independently found a concrete rollback case at 120 -> 119 seconds. The canonical regression covers the same cross-window rollback, a new store instance on the same database, and recovery to forward time without quota reuse.
+
+## DEV_C packaged-candidate QA provenance
+
+The candidate includes only the selected QA material from DEV_C source checkpoint `5758bfdcd9ecee4011fc3caaa3c68eb46ee2af19`, imported through semantic merge `df318aa089f754b7a14f624b7c27cca59758cbe8` whose parents are the recorded DEV_A checkpoint and that exact DEV_C source SHA.
+
+Byte-exact DEV_C paths are:
+
+- `docs/DEV_C_RELEASE_TO_LIVE_QA.md`;
+- `ops/devc_release_qa.py`;
+- `tests/test_devc_release_e2e.py`.
+
+`tests/test_devc_release_qa.py` is an explicit DEV_A adaptation and is machine-classified separately rather than misrepresented as an exact source blob. No DEV_C production application logic is imported through this QA overlay.
 
 ## Candidate API inventory and 67-criterion truth accounting
 
@@ -106,7 +142,7 @@ No production deployment, Passenger restart, live Telegram authorization or live
 
 Independent audit should verify at least:
 
-1. predecessor exact-head provenance and semantic merge parents;
+1. predecessor exact-head provenance and all semantic merge parents, including DEV_B sync and DEV_C QA source checkpoints;
 2. no blind DEV5 overwrite of DEV1 acceptance/privacy/evidence controls;
 3. no blind DEV2 overwrite of the DEV1 deploy engine;
 4. canonical read/OpenAPI parity and write dispatch from `OPERATIONS`;
@@ -121,6 +157,9 @@ Independent audit should verify at least:
 13. fail-closed defaults when limiter/store/writer are absent;
 14. cross-lane interface vocabulary compatibility;
 15. adapted DEV5 fuzz vectors against actual integrated modules;
-16. candidate 19-route inventory and exact 67-criterion truth accounting;
-17. complete CI, current-tree secret scan and full-history secret scan;
-18. preservation of the production no-merge/no-deploy/no-live-write gate.
+16. package/startup/dependency-lock validation and exact-head non-live PREPARE;
+17. process-shared SQLite rate-limit rollback high-water behavior across store instances;
+18. selective DEV_C exact/adapted path accounting without production-logic import;
+19. candidate 19-route inventory and exact 67-criterion truth accounting;
+20. complete CI, current-tree secret scan and full-history secret scan;
+21. preservation of the production no-merge/no-deploy/no-live-write gate.
