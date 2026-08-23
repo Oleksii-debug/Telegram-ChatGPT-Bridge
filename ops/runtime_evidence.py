@@ -1,10 +1,11 @@
 # -*- coding: utf-8 -*-
 """Collect bounded non-secret Python/Passenger runtime evidence.
 
-CLI collection is deliberately a *candidate context*: it can prove the actual
-interpreter used by the collector, but cannot by itself prove Passenger uses the
-same interpreter. Strong serving-process evidence is finalized only by the
-privately armed Passenger request path.
+The collector deliberately cannot emit STRONG Passenger proof.  It records only
+candidate/process facts.  Strong evidence is a later transformation performed by
+the challenged WSGI serving-request path after the request challenge has been
+verified.  Consequently a CLI/manual caller cannot obtain STRONG merely by
+passing a boolean or setting a Passenger-named environment variable.
 """
 from __future__ import annotations
 
@@ -79,11 +80,14 @@ def _package_evidence() -> list[dict]:
 
 
 def collect_runtime_evidence(
-    *, app_root: Path, wsgi_file: Path,
-    application_module: str = "bridge.app", application_name: str = "application",
+    *,
+    app_root: Path,
+    wsgi_file: Path,
+    application_module: str = "bridge.app",
+    application_name: str = "application",
     application_process: bool = False,
-    serving_request_verified: bool = False,
 ) -> dict:
+    """Collect process facts without any ability to self-promote to STRONG."""
     app_root = app_root.resolve(strict=True)
     wsgi_file = wsgi_file.resolve(strict=True)
     try:
@@ -108,15 +112,17 @@ def collect_runtime_evidence(
     prefix = Path(sys.prefix).resolve()
     base_prefix = Path(getattr(sys, "base_prefix", sys.prefix)).resolve()
     py311 = sys.version_info[:2] == (3, 11)
-    # Presence only; values are never read/serialized. This remains advisory and
-    # can never produce STRONG without a separately verified serving request.
-    passenger_context_present = any(k in os.environ for k in ("PASSENGER_APP_ENV", "PASSENGER_SPAWN_WORK_DIR"))
-    if not py311:
-        compliance = "NONCOMPLIANT_NOT_PYTHON_3_11"
-    elif application_process and serving_request_verified and passenger_context_present and import_ok:
-        compliance = "PYTHON_3_11_APPLICATION_CONTEXT_CONFIRMED"
-    else:
-        compliance = "PYTHON_3_11_CANDIDATE_CONTEXT"
+
+    # Presence only; values are never read or serialized.  This remains advisory
+    # and, by design, can never itself produce STRONG evidence.
+    passenger_context_present = any(
+        key in os.environ for key in ("PASSENGER_APP_ENV", "PASSENGER_SPAWN_WORK_DIR")
+    )
+    compliance = (
+        "PYTHON_3_11_CANDIDATE_CONTEXT"
+        if py311
+        else "NONCOMPLIANT_NOT_PYTHON_3_11"
+    )
 
     report = {
         "schema_version": 3,
@@ -138,7 +144,7 @@ def collect_runtime_evidence(
         "application_import_ok": import_ok,
         "process_cwd_inside_app_root": _cwd_inside(app_root),
         "passenger_context_present": passenger_context_present,
-        "serving_request_verified": bool(serving_request_verified),
+        "serving_request_verified": False,
         "package_evidence": _package_evidence(),
         "environment_values_recorded": False,
         "request_data_recorded": False,
@@ -150,6 +156,7 @@ def collect_runtime_evidence(
 
 
 def system_shell_cannot_prove_passenger(report: dict) -> bool:
+    """Return true unless a separately promoted serving report is STRONG."""
     validate_runtime_report(report)
     return (
         report["collector_context"] != "APPLICATION_PROCESS"
@@ -172,16 +179,16 @@ def main(argv=None) -> int:
     args = parser.parse_args(argv)
     try:
         evidence = collect_runtime_evidence(
-            app_root=Path(args.app_root), wsgi_file=Path(args.wsgi_file),
+            app_root=Path(args.app_root),
+            wsgi_file=Path(args.wsgi_file),
             application_process=False,
-            serving_request_verified=False,
         )
         write_private_report(Path(args.output), evidence)
     except (SafetyError, OSError):
         print("RUNTIME_EVIDENCE_BLOCKED")
         return 2
     print(evidence["runtime_compliance"])
-    # CLI evidence cannot by itself be Passenger proof; 0 only means collection succeeded.
+    # Exit 0 means bounded collection succeeded, never Passenger proof.
     return 0
 
 
