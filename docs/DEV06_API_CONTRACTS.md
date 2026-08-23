@@ -36,7 +36,7 @@ Preview operations are non-consequential and perform no Telegram write. Commit o
 
 The generated schema does not infer approval from a prior preview, draft, or earlier conversation turn.
 
-The preview response intentionally exposes the opaque `preview_token` to the Action client because the matching explicit commit must send that exact value back. The token is ephemeral/single-use and must not be logged, but it is **not** declared `writeOnly` or `readOnly`: either directionality marker would misdescribe the actual preview→commit protocol.
+The preview response intentionally exposes the opaque `preview_token` to the Action client because the matching explicit commit must send that exact value back. The token is ephemeral/single-use and must not be logged, but it is **not** declared `writeOnly` or `readOnly`: either directionality marker would misdescribe the actual preview→commit protocol in the effective Action document.
 
 ## Request contracts
 
@@ -61,6 +61,32 @@ The generated contract declares the source-visible controlled status family 400/
 `ops/dev06_runtime_conformance.py` adds a second independent boundary: it validates captured source-only WSGI JSON responses against the generated operation response schema. It also checks JSON content type and requires HTTP `Retry-After` on 429 to match the structured body value. The validator implements only the bounded JSON-Schema subset emitted by DEV06 and fails closed on malformed schema structures; it is not a general JSON Schema replacement.
 
 No runtime-conformance test contacts Telegram or production. The write-path tests use the repository's deterministic fake Telegram client and verify zero effect at preview plus exactly one fake effect across commit+idempotent replay.
+
+## Deployment-bound Action equality evidence for H1
+
+`ops/dev06_deployed_action_evidence.py` and `tools/verify_dev06_deployed_action.py` prepare the later H1 comparison without pretending that source CI is a deployed Action test.
+
+The tool is deliberately **offline**. It never fetches HOSTiQ, ChatGPT or Telegram. A later independently controlled live process must first capture the deployed/sanitized OpenAPI document and supply that local JSON file to the comparator together with the exact candidate SHA.
+
+The comparator:
+
+- regenerates the expected compatible Action document for the approved HTTPS origin;
+- canonicalizes JSON deterministically and computes SHA-256 for expected and observed documents;
+- checks exact path set, server origin, root security, operation count and all 17 operation contracts;
+- runs the normal DEV06 Action compatibility validator against the observed document;
+- detects bearer/security, operationId, request, response, consequential, status/header and private-surface drift through exact document/operation comparison plus the structural validator;
+- applies a 1 MiB **ingestion safety bound only**. This is not represented as a current ChatGPT product/schema-size limit;
+- reads the captured schema from one bounded regular single-link file using no-follow semantics where the platform supports it;
+- emits only candidate SHA, schema/origin hashes, byte/count metrics, stable mismatch codes and booleans. It never emits the observed schema, local file path or secret values.
+
+The `SOURCE_MOCK` / `DEPLOYED_CAPTURE` source classification is only caller-supplied provenance metadata. It cannot self-authorize anything. Even an exact comparison labelled `DEPLOYED_CAPTURE` always emits:
+
+- `product_h1_pass=false`;
+- `deployment_authorized=false`;
+- `production_mutated=false`;
+- `private_values_recorded=false`.
+
+Therefore a future exact deployed match is evidence **input** to Independent Auditor H1 adjudication, not H1 PASS by itself.
 
 ## Drift tests
 
@@ -90,6 +116,8 @@ No runtime-conformance test contacts Telegram or production. The write-path test
 
 `tests/test_dev06_runtime_conformance.py` additionally exercises actual source WSGI responses for protected read success, hidden unauthorized 404, rate-limited 429, 415 content-type failure, SEND preview, explicit commit and exact idempotent replay. Negative cases prove rejection of missing/extra response fields, wrong content type, missing/mismatched Retry-After, unknown operation IDs and undeclared statuses.
 
+`tests/test_dev06_deployed_action_evidence.py` adversarially mutates bearer security, production origin, route set, operation count, consequential semantics, request schema and `Retry-After` response contract; validates deterministic hashing and bounded regular-file ingestion; rejects malformed candidate/source classification and oversized evidence input; and proves no summary mutation can promote H1/deployment authority.
+
 ## Cross-lane integration boundary
 
 DEV06 does not duplicate DEV03/DEV04/DEV05 business logic. Current request schemas are deliberately consumed from the canonical feature-layer registry, while route/auth/classification/response safety remains DEV06-authoritative. When DEV01 semantically integrates newer DEV03 read, DEV04 storage/media, DEV05 write-state or DEV08 reliability changes, DEV06 parity and runtime-response tests must be rerun against that exact canonical combination before Action release.
@@ -98,6 +126,6 @@ Internal storage markers, private control/evidence state and setup/session mater
 
 ## Truth boundary
 
-These tests are source/contract evidence only. They do not satisfy deployed H1/H2 by themselves. Final H1 still requires comparing the generated schema with the exact deployed audited release. H2 requires a real deployed read-only ChatGPT Action call. Real Telegram and K1-K5 remain external/live gates, and K5 remains prohibited until the later independent write gate and a fresh explicit user commit.
+These tests are source/contract evidence only. They do not satisfy deployed H1/H2 by themselves. Final H1 still requires an independently attributable comparison to the exact deployed audited release. H2 requires a real deployed read-only ChatGPT Action call. Real Telegram and K1-K5 remain external/live gates, and K5 remains prohibited until the later independent write gate and a fresh explicit user commit.
 
 `USER_TELEGRAM_AUTH_NOT_YET_REQUIRED` remains unchanged by this work.
