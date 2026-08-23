@@ -65,8 +65,8 @@
         "tests/test_read_app.py", "tests/test_storage_downloads.py", "tests/test_validation_security.py"
       ],
       "dev_a_overrides": [
-        "bridge/__init__.py", "bridge/app.py", "bridge/archive.py", "bridge/backend.py", "bridge/downloads.py",
-        "bridge/models.py", "bridge/storage.py", "bridge/validation.py"
+        "bridge/__init__.py", "bridge/app.py", "bridge/archive.py", "bridge/audit.py", "bridge/backend.py",
+        "bridge/downloads.py", "bridge/models.py", "bridge/storage.py", "bridge/validation.py"
       ]
     },
     "DEV4": {
@@ -138,7 +138,8 @@
     "candidate_truth_ci_gate": "545e963f7ec89ab534fcb8b1dfafdedb9a8d504b",
     "dev04_media_storage_sync": "301817d7e2c1a2fa55435d11ce5c6edc0cef5d71",
     "dev08_deployment_recovery_oracle_sync": "5e35599cca1162bad9501044dfb6a79fa358e182",
-    "dev03_read_hardening_sync": "c0a2b443e811eee8460af6c688f30ad3bbdf5f4d"
+    "dev03_read_hardening_sync": "c0a2b443e811eee8460af6c688f30ad3bbdf5f4d",
+    "dev07_audit_sink_sync": "4884e55ab582c1e906a692499efb6c68575cb8df"
   },
   "dev_a_paths": [
     ".github/workflows/ci.yml", "bridge/__init__.py", "bridge/file_access.py", "bridge/filenames.py", "bridge/integrated_app.py",
@@ -147,8 +148,9 @@
     "integration/provenance_v1.json", "ops/candidate_contracts.py", "ops/dev08_deploy_recovery.py", "ops/integration_interfaces.py",
     "tests/test_dev01_dev03_peer_provenance.py", "tests/test_dev01_dev04_peer_provenance.py", "tests/test_dev01_dev08_peer_provenance.py",
     "tests/test_dev03_history_offset.py", "tests/test_dev03_swarm_read.py", "tests/test_dev04_media_storage.py",
-    "tests/test_dev04_migration_concurrency.py", "tests/test_dev04_private_serving.py", "tests/test_dev_a_candidate_contracts.py",
-    "tests/test_dev_a_integration.py", "tests/test_dev_a_provenance.py", "tools/verify_integration_provenance.py"
+    "tests/test_dev04_migration_concurrency.py", "tests/test_dev04_private_serving.py", "tests/test_dev07_audit_security.py",
+    "tests/test_dev_a_candidate_contracts.py", "tests/test_dev_a_integration.py", "tests/test_dev_a_provenance.py",
+    "tools/verify_integration_provenance.py"
   ],
   "swarm_integrations": {
     "DEV03_READ_HARDENING": {
@@ -192,6 +194,21 @@
       "auditor_finding": "A01-06",
       "source_ci_run_id": 32641698071,
       "source_ci_job_id": 97199658228,
+      "production_mutated": false,
+      "deployment_authorized": false
+    },
+    "DEV07_AUDIT_SINK": {
+      "pr": 42,
+      "source_sha": "feff7ba8bf7bea74ac88b21002c0810ab7a1c8e2",
+      "merge_commit": "4884e55ab582c1e906a692499efb6c68575cb8df",
+      "first_parent": "9e536dca59eda481bf54ee7e0cb1c78efca7f4d9",
+      "exact_blob_paths": [
+        "bridge/audit.py",
+        "tests/test_dev07_audit_security.py"
+      ],
+      "auditor_finding": "A01-10",
+      "source_ci_run_id": 32641980105,
+      "source_ci_job_id": 97200367017,
       "production_mutated": false,
       "deployment_authorized": false
     },
