@@ -1,10 +1,17 @@
 # -*- coding: utf-8 -*-
 """Structured metadata for *proven* no-side-effect Telegram write failures.
 
-This module is a DEV05 integration overlay.  It preserves the canonical durable
+This module is a DEV05 integration overlay. It preserves the canonical durable
 transaction state machine while carrying bounded status / Retry-After metadata
 only when an adapter has already proved that no mutating Telegram RPC was
-started.  Unknown or post-effect failures remain AMBIGUOUS exactly as before.
+started. Unknown or post-effect failures remain AMBIGUOUS exactly as before.
+
+The overlay also closes a Python 3.11 cancellation gap: ``asyncio.CancelledError``
+is a ``BaseException`` rather than an ``Exception``. Once the store has crossed
+its durable CALLING boundary, any escaping ``BaseException`` is conservatively
+recorded as AMBIGUOUS before the original control-flow exception is re-raised.
+That prevents cancelled requests from leaving a durable CALLING row that can be
+mistaken for a permanently active write.
 
 No raw exception text, Telegram content, target, token or server path is stored
 in these error objects.
@@ -131,6 +138,19 @@ class StructuredSafePersistentWriteStore(PersistentWriteStore):
         except Exception:
             self._record_ambiguous(idempotency_key, fingerprint, now=ts)
             raise ReconciliationRequired() from None
+        except BaseException:
+            # Python 3.11 asyncio.CancelledError and process-control exceptions do
+            # not inherit Exception. At this point the durable state is CALLING
+            # and the external callback has been entered, so the only safe claim
+            # is AMBIGUOUS. Preserve cancellation/SystemExit/KeyboardInterrupt
+            # semantics by re-raising the original BaseException after a best-
+            # effort durable classification. If SQLite itself is unavailable,
+            # CALLING remains fail-closed and a later recovery layer can reconcile.
+            try:
+                self._record_ambiguous(idempotency_key, fingerprint, now=ts)
+            except Exception:
+                pass
+            raise
 
         try:
             self._commit_result(idempotency_key, fingerprint, result, now=ts)
