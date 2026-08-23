@@ -1,17 +1,18 @@
 # -*- coding: utf-8 -*-
 """Structured metadata for *proven* no-side-effect Telegram write failures.
 
-This module is a DEV05 integration overlay. It preserves the canonical durable
-transaction state machine while carrying bounded status / Retry-After metadata
+This module is a DEV05 integration overlay. It composes the owner-private SQLite
+boundary from :mod:`ops.secure_write_store` with the canonical durable write
+transaction state machine, while carrying bounded status / Retry-After metadata
 only when an adapter has already proved that no mutating Telegram RPC was
 started. Unknown or post-effect failures remain AMBIGUOUS exactly as before.
 
-The overlay also closes a Python 3.11 cancellation gap: ``asyncio.CancelledError``
-is a ``BaseException`` rather than an ``Exception``. Once the store has crossed
-its durable CALLING boundary, any escaping ``BaseException`` is conservatively
-recorded as AMBIGUOUS before the original control-flow exception is re-raised.
-That prevents cancelled requests from leaving a durable CALLING row that can be
-mistaken for a permanently active write.
+The overlay also closes Python 3.11 cancellation and persistence-failure gaps.
+Once durable state has crossed CALLING, cancellation/process-control exceptions
+are conservatively classified AMBIGUOUS before the original BaseException is
+re-raised. If FAILED_SAFE or AMBIGUOUS persistence itself fails, the request is
+never presented as safely retryable: the caller receives reconciliation-required
+while durable CALLING/AMBIGUOUS continues to block a blind exact retry.
 
 No raw exception text, Telegram content, target, token or server path is stored
 in these error objects.
@@ -22,9 +23,9 @@ import json
 import time
 from typing import Any, Callable, Mapping
 
+from ops.secure_write_store import SecurePersistentWriteStore
 from ops.write_safety import (
     CommitResult,
-    PersistentWriteStore,
     ReconciliationRequired,
     SafeNoSideEffectFailure,
     WriteAction,
@@ -83,8 +84,32 @@ class WriteSafetyMetadataError(WriteSafetyError):
         self.retry_after_seconds = _bounded_retry(retry_after_seconds)
 
 
-class StructuredSafePersistentWriteStore(PersistentWriteStore):
-    """Canonical store semantics plus metadata-preserving FAILED_SAFE results."""
+class StructuredSafePersistentWriteStore(SecurePersistentWriteStore):
+    """Secure persistent store plus metadata-preserving FAILED_SAFE results.
+
+    This deliberately derives from ``SecurePersistentWriteStore`` instead of
+    creating a parallel plain-SQLite implementation. DEV01 can integrate one
+    store object and retain both owner-private topology controls and structured
+    failure semantics. The canonical method surface remains unchanged so DEV08
+    can wrap this store with its process-shared reliability proxy.
+    """
+
+    def _record_ambiguous_best_effort(
+        self,
+        idempotency_key: str,
+        fingerprint: str,
+        *,
+        now: int,
+    ) -> None:
+        """Persist AMBIGUOUS when possible; CALLING is also fail-closed."""
+
+        try:
+            self._record_ambiguous(idempotency_key, fingerprint, now=now)
+        except Exception:
+            # A storage/topology failure may leave CALLING durable. Exact retry
+            # still cannot execute the external callback, and recovery may later
+            # promote that orphan to AMBIGUOUS. Never leak persistence details.
+            pass
 
     def commit(
         self,
@@ -125,7 +150,16 @@ class StructuredSafePersistentWriteStore(PersistentWriteStore):
         try:
             result = dict(external_write(payload))
         except SafeNoSideEffectFailure as exc:
-            self._record_safe_failure(idempotency_key, fingerprint, now=ts)
+            try:
+                self._record_safe_failure(idempotency_key, fingerprint, now=ts)
+            except Exception:
+                # The Telegram outcome is known safe, but durable transaction
+                # classification is not. Do not return a retryable FAILED_SAFE
+                # contract unless that state was actually persisted.
+                self._record_ambiguous_best_effort(
+                    idempotency_key, fingerprint, now=ts
+                )
+                raise ReconciliationRequired() from None
             status = _bounded_status(getattr(exc, "status", 502))
             retry = _bounded_retry(
                 getattr(exc, "retry_after_seconds", None)
@@ -136,29 +170,31 @@ class StructuredSafePersistentWriteStore(PersistentWriteStore):
                 retry_after_seconds=retry,
             ) from None
         except Exception:
-            self._record_ambiguous(idempotency_key, fingerprint, now=ts)
+            # After CALLING, arbitrary external errors are outcome-unknown. Even
+            # if AMBIGUOUS persistence fails, return the same conservative public
+            # contract; a durable CALLING row also prevents blind resend.
+            self._record_ambiguous_best_effort(
+                idempotency_key, fingerprint, now=ts
+            )
             raise ReconciliationRequired() from None
         except BaseException:
             # Python 3.11 asyncio.CancelledError and process-control exceptions do
-            # not inherit Exception. At this point the durable state is CALLING
-            # and the external callback has been entered, so the only safe claim
-            # is AMBIGUOUS. Preserve cancellation/SystemExit/KeyboardInterrupt
-            # semantics by re-raising the original BaseException after a best-
-            # effort durable classification. If SQLite itself is unavailable,
-            # CALLING remains fail-closed and a later recovery layer can reconcile.
-            try:
-                self._record_ambiguous(idempotency_key, fingerprint, now=ts)
-            except Exception:
-                pass
+            # not inherit Exception. The external callback has already been
+            # entered, so cancellation cannot be promoted to FAILED_SAFE.
+            self._record_ambiguous_best_effort(
+                idempotency_key, fingerprint, now=ts
+            )
             raise
 
         try:
             self._commit_result(idempotency_key, fingerprint, result, now=ts)
         except Exception:
-            try:
-                self._record_ambiguous(idempotency_key, fingerprint, now=ts)
-            finally:
-                raise ReconciliationRequired() from None
+            # External success may already have happened. Receipt/result
+            # persistence failure is therefore always reconciliation-required.
+            self._record_ambiguous_best_effort(
+                idempotency_key, fingerprint, now=ts
+            )
+            raise ReconciliationRequired() from None
         return CommitResult("COMMITTED", False, fingerprint, result)
 
 
