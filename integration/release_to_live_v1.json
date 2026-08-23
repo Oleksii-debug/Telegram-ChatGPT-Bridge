@@ -2,7 +2,7 @@
   "schema_version": 2,
   "round": "RELEASE_TO_LIVE_ROUND_2",
   "source_checkpoint": "30de1000672d18e2b17a4c4c91a0c583f7699071",
-  "purpose": "canonical_release_packaging_runtime_evidence_production_wiring_and_final_qa_integration",
+  "purpose": "canonical_release_packaging_runtime_evidence_and_final_qa_integration",
   "paths": [
     "bridge/runtime.py",
     "bridge/runtime_wsgi.py",
