@@ -2,16 +2,16 @@
 """Phase-aware Telegram write adapter for duplicate-safe commit handling.
 
 The canonical write store already distinguishes a proven no-side-effect failure
-from an unknown external outcome.  The base Telegram adapter intentionally maps
-Telegram exceptions but does not expose *when* the mutating RPC boundary was
-crossed.  This specialist adapter adds that proof without relying on exception
-class names to decide safety.
+from an unknown external outcome. The base Telegram adapter maps Telegram
+exceptions but does not expose *when* the mutating RPC boundary was crossed.
+This specialist adapter adds that proof without relying on exception class names
+to decide safety.
 
-A failure is converted to ``SafeNoSideEffectFailure`` only while execution is
-still strictly before the first call to ``send_message``, ``send_file`` or
-``forward_messages``.  Once one of those mutating methods has been invoked, any
-exception/timeout remains a normal ``TelegramContractError`` so the persistent
-store records AMBIGUOUS and never performs a blind resend.
+A failure is converted to a structured no-side-effect failure only while
+execution is still strictly before the first call to ``send_message``,
+``send_file`` or ``forward_messages``. Once one of those mutating methods has
+been invoked, any exception/timeout remains a normal ``TelegramContractError``
+so the persistent store records AMBIGUOUS and never performs a blind resend.
 
 No Telegram connection is created at import time and no credentials are stored
 or logged by this module.
@@ -22,6 +22,7 @@ import asyncio
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Sequence
 
+from ops.structured_safe_write import SafeWriteMetadataFailure
 from ops.telegram_session_lock import SessionLockError
 from ops.telegram_write_adapter import (
     TelegramClientProtocol,
@@ -45,10 +46,14 @@ class _EffectBoundary:
         self.started = True
 
 
-def _safe_code(exc: TelegramContractError) -> SafeNoSideEffectFailure:
-    """Return the store-recognized failure only after phase proof says pre-effect."""
+def _safe_code(exc: TelegramContractError) -> SafeWriteMetadataFailure:
+    """Preserve only bounded structured metadata after pre-effect proof."""
 
-    return SafeNoSideEffectFailure(exc.code)
+    return SafeWriteMetadataFailure(
+        exc.code,
+        status=exc.status,
+        retry_after_seconds=exc.retry_after,
+    )
 
 
 class PhaseAwareTelegramWriteAdapter(TelegramWriteAdapter):
@@ -61,7 +66,9 @@ class PhaseAwareTelegramWriteAdapter(TelegramWriteAdapter):
         ],
     ) -> WriteReceipt:
         if not self.config.configured():
-            raise SafeNoSideEffectFailure("telegram_not_configured")
+            raise SafeWriteMetadataFailure(
+                "telegram_not_configured", status=503
+            )
 
         client = self.client_factory()
         connected = False
@@ -80,21 +87,24 @@ class PhaseAwareTelegramWriteAdapter(TelegramWriteAdapter):
                 timeout=self.config.request_timeout_seconds,
             )
             if not authorized:
-                raise SafeNoSideEffectFailure("telegram_session_unauthorized")
+                raise SafeWriteMetadataFailure(
+                    "telegram_session_unauthorized", status=503
+                )
             return await asyncio.wait_for(
                 operation(client, boundary.cross),
                 timeout=self.config.request_timeout_seconds,
             )
         except asyncio.CancelledError:
-            # Cancellation is deliberately not reclassified as safe.  If it
-            # reaches the store after CALLING, recovery will conservatively mark
-            # the transaction AMBIGUOUS rather than risk a duplicate send.
+            # Cancellation is deliberately not reclassified as safe. If it
+            # reaches the store after CALLING, recovery remains conservative.
             raise
         except SafeNoSideEffectFailure:
             raise
         except asyncio.TimeoutError as exc:
             if not boundary.started:
-                raise SafeNoSideEffectFailure("telegram_timeout") from None
+                raise SafeWriteMetadataFailure(
+                    "telegram_timeout", status=504
+                ) from None
             raise TelegramContractError("telegram_timeout", status=504) from exc
         except SessionLockError as exc:
             if exc.code == "session_lock_timeout":
@@ -131,14 +141,23 @@ class PhaseAwareTelegramWriteAdapter(TelegramWriteAdapter):
                     pass
 
     @staticmethod
-    def _preflight_failure(code: str) -> SafeNoSideEffectFailure:
-        return SafeNoSideEffectFailure(code)
+    def _preflight_failure(
+        code: str,
+        *,
+        status: int = 400,
+        retry_after_seconds: int | None = None,
+    ) -> SafeWriteMetadataFailure:
+        return SafeWriteMetadataFailure(
+            code,
+            status=status,
+            retry_after_seconds=retry_after_seconds,
+        )
 
     async def send_async(self, target: Any, text: Any) -> WriteReceipt:
         if not isinstance(text, str) or not text.strip():
             raise self._preflight_failure("text_required")
         if len(text) > self.config.max_send_chars:
-            raise self._preflight_failure("text_too_long")
+            raise self._preflight_failure("text_too_long", status=413)
 
         async def operation(
             client: TelegramClientProtocol, cross_effect: Callable[[], None]
@@ -156,7 +175,7 @@ class PhaseAwareTelegramWriteAdapter(TelegramWriteAdapter):
         if not isinstance(text, str) or not text.strip():
             raise self._preflight_failure("text_required")
         if len(text) > self.config.max_send_chars:
-            raise self._preflight_failure("text_too_long")
+            raise self._preflight_failure("text_too_long", status=413)
 
         async def operation(
             client: TelegramClientProtocol, cross_effect: Callable[[], None]
@@ -240,7 +259,7 @@ class PhaseAwareTelegramWriteAdapter(TelegramWriteAdapter):
         if any(not path or "\x00" in path for path in paths):
             raise self._preflight_failure("invalid_file_reference")
         if not isinstance(caption, str) or len(caption) > self.config.max_send_chars:
-            raise self._preflight_failure("caption_too_long")
+            raise self._preflight_failure("caption_too_long", status=413)
         if voice_note and len(paths) != 1:
             raise self._preflight_failure("voice_note_requires_single_file")
 
