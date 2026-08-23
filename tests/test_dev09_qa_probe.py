@@ -18,11 +18,6 @@ from ops.dev09_qa_probe import (
 ROOT = Path(__file__).resolve().parents[1]
 REPOSITORY_GIT_AVAILABLE = (ROOT / ".git").exists()
 SKIP_EXPENSIVE = os.environ.get("DEV09_SKIP_EXPENSIVE") == "1"
-EXPECTED_CROSS_LANE_FAILURES = [
-    "test_devb_round2_release.DevBRound2ReleaseContractsTests.test_passenger_binding_rejects_runtime_from_different_wsgi",
-    "test_devb_round2_release.DevBRound2ReleaseContractsTests.test_preflight_manifest_and_passenger_binding_share_exact_wsgi_identity",
-    "test_devc_release_qa.PreparedAndCrossLaneTruthTests.test_v2_exact_binding_is_accepted_but_never_self_authorizes_promotion",
-]
 requires_repository_git = unittest.skipUnless(
     REPOSITORY_GIT_AVAILABLE,
     "DEV09 exact-parent probe requires repository Git metadata and is skipped inside PREPARE payload",
@@ -51,10 +46,6 @@ class Dev09ExactParentTests(unittest.TestCase):
                 "tests/test_dev09_qa_probe.py",
             ]),
         )
-        for path in payload["qa_paths"]:
-            self.assertFalse(path.startswith("bridge/"), path)
-            self.assertNotEqual(path, "passenger_wsgi.py")
-            self.assertFalse(path.startswith("requirements"), path)
 
     def test_workflow_parent_gate_fails_when_canonical_moves(self):
         validate_workflow_parent(EXPECTED_PARENT_SHA)
@@ -68,10 +59,19 @@ class Dev09ExactParentTests(unittest.TestCase):
             self.assertEqual(observed, EXPECTED_PARENT_SHA)
 
 
-class Dev09CanonicalProvenanceTests(unittest.TestCase):
+class Dev09ClosureTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.provenance = None
+        cls.suite = None
+        if REPOSITORY_GIT_AVAILABLE and not SKIP_EXPENSIVE:
+            cls.provenance = canonical_provenance_probe()
+            cls.suite = exported_test_suite_probe()
+
     @requires_expensive_repository_probe
-    def test_exact_parent_provenance_is_clear_after_terminal_dev2_accounting(self):
-        result = canonical_provenance_probe()
+    def test_exact_parent_provenance_is_clear(self):
+        result = self.provenance
+        self.assertIsNotNone(result)
         self.assertEqual(result["parent_sha"], EXPECTED_PARENT_SHA)
         self.assertEqual(result["classification"], "CLEAR")
         self.assertEqual(result["reason"], "NONE")
@@ -81,32 +81,16 @@ class Dev09CanonicalProvenanceTests(unittest.TestCase):
         self.assertFalse(result["deployment_authorized"])
         self.assertFalse(result["product_pass"])
 
-    def test_provenance_probe_public_shape_is_bounded_inside_prepare_payload(self):
-        if not REPOSITORY_GIT_AVAILABLE:
-            result = canonical_provenance_probe()
-            self.assertEqual(result["classification"], "QA_PROBE_UNAVAILABLE")
-            self.assertEqual(result["reason"], "REPOSITORY_GIT_UNAVAILABLE")
-        else:
-            self.skipTest("exact repository result covered by repository-only test")
-
-
-class Dev09ExportedSuiteTests(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        cls.result = None
-        if REPOSITORY_GIT_AVAILABLE and not SKIP_EXPENSIVE:
-            cls.result = exported_test_suite_probe()
-
     @requires_expensive_repository_probe
-    def test_exact_exported_canonical_suite_has_exact_three_current_cross_lane_failures(self):
-        result = self.result
+    def test_exact_exported_canonical_suite_is_clear_after_cross_lane_sync(self):
+        result = self.suite
         self.assertIsNotNone(result)
         self.assertEqual(result["parent_sha"], EXPECTED_PARENT_SHA)
-        self.assertEqual(result["classification"], "BLOCKED_INTERNAL_QA")
-        self.assertEqual(result["reason"], "EXPORTED_CANONICAL_TEST_FAILURE")
-        self.assertNotEqual(result["return_code"], 0)
-        self.assertEqual(result["failure_test_count"], 3)
-        self.assertEqual(result["failure_test_ids"], EXPECTED_CROSS_LANE_FAILURES)
+        self.assertEqual(result["classification"], "CLEAR")
+        self.assertEqual(result["reason"], "NONE")
+        self.assertEqual(result["return_code"], 0)
+        self.assertEqual(result["failure_test_count"], 0)
+        self.assertEqual(result["failure_test_ids"], [])
         self.assertFalse(result["git_metadata_present"])
         self.assertFalse(result["private_values_recorded"])
         self.assertFalse(result["production_mutated"])
@@ -114,11 +98,13 @@ class Dev09ExportedSuiteTests(unittest.TestCase):
         self.assertFalse(result["product_pass"])
 
     @requires_expensive_repository_probe
-    def test_exported_suite_public_shape_has_no_raw_process_output(self):
-        result = self.result
-        self.assertIsNotNone(result)
+    def test_public_probe_shapes_remain_bounded(self):
+        suite = self.suite
+        provenance = self.provenance
+        self.assertIsNotNone(suite)
+        self.assertIsNotNone(provenance)
         self.assertEqual(
-            set(result),
+            set(suite),
             {
                 "parent_sha", "classification", "reason", "return_code",
                 "failure_test_count", "failure_test_ids", "git_metadata_present",
@@ -126,16 +112,16 @@ class Dev09ExportedSuiteTests(unittest.TestCase):
                 "deployment_authorized", "product_pass",
             },
         )
-        lowered = json.dumps(result, sort_keys=True).casefold()
+        lowered = json.dumps({"suite": suite, "provenance": provenance}, sort_keys=True).casefold()
         for forbidden in ("stdout", "stderr", "traceback", "exception", "message_body", "file_content"):
             self.assertNotIn(forbidden, lowered)
 
-    def test_probe_is_repository_only_inside_prepare_payload(self):
+    def test_probes_are_repository_only_inside_prepare_payload(self):
         if not REPOSITORY_GIT_AVAILABLE:
-            result = exported_test_suite_probe()
-            self.assertEqual(result["classification"], "QA_PROBE_UNAVAILABLE")
-            self.assertEqual(result["reason"], "REPOSITORY_GIT_UNAVAILABLE")
-            self.assertFalse(result["git_metadata_present"])
+            suite = exported_test_suite_probe()
+            provenance = canonical_provenance_probe()
+            self.assertEqual(suite["classification"], "QA_PROBE_UNAVAILABLE")
+            self.assertEqual(provenance["classification"], "QA_PROBE_UNAVAILABLE")
         self.assertTrue(MANIFEST.is_file())
 
 

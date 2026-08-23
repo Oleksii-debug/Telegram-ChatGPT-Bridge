@@ -28,7 +28,7 @@ from ops.candidate_contracts import (
 
 ROOT = Path(__file__).resolve().parents[1]
 MANIFEST = ROOT / "integration" / "dev09_qa_v1.json"
-EXPECTED_PARENT_SHA = "cb058b74fcb9fc8afdff52a294b94b54a1c36b71"
+EXPECTED_PARENT_SHA = "999709f0ab2daee08fdb5c793419d1c45967238d"
 MAX_FAILURE_IDS = 20
 _TEST_ID_RE = re.compile(r"\(([A-Za-z0-9_.]+)\) \.\.\. (?:ERROR|FAIL)$")
 _ERROR_HEADER_RE = re.compile(r"^(?:ERROR|FAIL): ([A-Za-z0-9_.]+)$")
@@ -100,17 +100,12 @@ def _safe_probe_base() -> dict[str, Any]:
 
 @functools.lru_cache(maxsize=4)
 def exported_test_suite_probe(root: Path = ROOT, sha: str = EXPECTED_PARENT_SHA) -> dict[str, Any]:
-    """Run exact canonical tests in a clean Git archive with no repository metadata."""
     root = root.resolve(strict=True)
     if not (root / ".git").exists():
         return {
-            **_safe_probe_base(),
-            "classification": "QA_PROBE_UNAVAILABLE",
-            "reason": "REPOSITORY_GIT_UNAVAILABLE",
-            "return_code": -1,
-            "failure_test_count": 0,
-            "failure_test_ids": [],
-            "git_metadata_present": False,
+            **_safe_probe_base(), "classification": "QA_PROBE_UNAVAILABLE",
+            "reason": "REPOSITORY_GIT_UNAVAILABLE", "return_code": -1,
+            "failure_test_count": 0, "failure_test_ids": [], "git_metadata_present": False,
         }
     with tempfile.TemporaryDirectory(prefix="dev09-suite-probe-") as tmp:
         tmp_root = Path(tmp)
@@ -150,45 +145,35 @@ def exported_test_suite_probe(root: Path = ROOT, sha: str = EXPECTED_PARENT_SHA)
 
 @functools.lru_cache(maxsize=4)
 def canonical_provenance_probe(root: Path = ROOT, sha: str = EXPECTED_PARENT_SHA) -> dict[str, Any]:
-    """Run canonical provenance verifier against the exact parent in an isolated worktree."""
     root = root.resolve(strict=True)
     if not (root / ".git").exists():
         return {
-            **_safe_probe_base(),
-            "classification": "QA_PROBE_UNAVAILABLE",
-            "reason": "REPOSITORY_GIT_UNAVAILABLE",
-            "return_code": -1,
+            **_safe_probe_base(), "classification": "QA_PROBE_UNAVAILABLE",
+            "reason": "REPOSITORY_GIT_UNAVAILABLE", "return_code": -1,
         }
     with tempfile.TemporaryDirectory(prefix="dev09-provenance-") as tmp:
         worktree = Path(tmp) / "canonical"
         try:
             added = subprocess.run(
-                ["git", "worktree", "add", "--detach", str(worktree), sha],
-                cwd=root, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                timeout=60, check=False,
+                ["git", "worktree", "add", "--detach", str(worktree), sha], cwd=root,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=60, check=False,
             )
             if added.returncode != 0:
                 raise ValueError("DEV09 exact parent worktree unavailable")
             completed = subprocess.run(
-                [sys.executable, "tools/verify_integration_provenance.py"],
-                cwd=worktree, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                text=True, encoding="utf-8", errors="replace", timeout=60, check=False,
+                [sys.executable, "tools/verify_integration_provenance.py"], cwd=worktree,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8",
+                errors="replace", timeout=60, check=False,
             )
             if completed.returncode == 0:
                 classification, reason = "CLEAR", "NONE"
             else:
                 classification, reason = "BLOCKED_CANONICAL_PROVENANCE", "PROVENANCE_FAILURE"
-            return {
-                **_safe_probe_base(),
-                "classification": classification,
-                "reason": reason,
-                "return_code": int(completed.returncode),
-            }
+            return {**_safe_probe_base(), "classification": classification, "reason": reason, "return_code": int(completed.returncode)}
         finally:
             subprocess.run(
-                ["git", "worktree", "remove", "--force", str(worktree)],
-                cwd=root, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                timeout=30, check=False,
+                ["git", "worktree", "remove", "--force", str(worktree)], cwd=root,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30, check=False,
             )
 
 
@@ -199,19 +184,14 @@ def candidate_truth_snapshot() -> dict[str, Any]:
     validate_integrated_api_inventory(inventory)
     k5 = next(row for row in coverage if row["criterion"] == "K5")
     return {
-        "criterion_count": len(coverage),
-        "coverage_counts": counts,
+        "criterion_count": len(coverage), "coverage_counts": counts,
         "product_pass_count": sum(1 for row in coverage if row["product_pass"] is True),
         "route_count": len(inventory),
         "action_operation_count": sum(1 for row in inventory if row["action_operation_id"] is not None),
-        "private_surface_count": sum(
-            1 for row in inventory
-            if any(term in row["path"].casefold() for term in ("setup", "login", "session", "2fa"))
-        ),
+        "private_surface_count": sum(1 for row in inventory if any(term in row["path"].casefold() for term in ("setup", "login", "session", "2fa"))),
         "k5_evidence_class": k5["evidence_class"],
         "k5_explicit_write_approval_required": k5["explicit_write_approval_required"],
-        "product_pass": False,
-        "deployment_authorized": False,
+        "product_pass": False, "deployment_authorized": False,
     }
 
 
@@ -221,12 +201,7 @@ def main(argv: list[str] | None = None) -> int:
     group.add_argument("--suite-probe", action="store_true")
     group.add_argument("--provenance-probe", action="store_true")
     args = parser.parse_args(argv)
-    if args.suite_probe:
-        payload = exported_test_suite_probe()
-    elif args.provenance_probe:
-        payload = canonical_provenance_probe()
-    else:
-        payload = candidate_truth_snapshot()
+    payload = exported_test_suite_probe() if args.suite_probe else canonical_provenance_probe() if args.provenance_probe else candidate_truth_snapshot()
     print(json.dumps(payload, sort_keys=True, separators=(",", ":")))
     return 0
 

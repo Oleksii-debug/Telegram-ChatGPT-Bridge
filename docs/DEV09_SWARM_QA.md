@@ -1,27 +1,24 @@
-# DEV09 SWARM QA — exact-current checkpoint
+# DEV09 SWARM QA — closure checkpoint
 
 Role: DEV09 independent engineering QA. This layer is QA-only and does not authorize merge, deploy, Passenger restart, Telegram authorization, or live Telegram write.
 
-Exact canonical parent: `cb058b74fcb9fc8afdff52a294b94b54a1c36b71` on `work3/integration-release-candidate`.
+Exact canonical parent: `999709f0ab2daee08fdb5c793419d1c45967238d` on `work3/integration-release-candidate`.
 
-## Current result
+## Current source/non-live state
 
-Canonical integration provenance is now reconciled and green on this exact parent. Recovery Guard #353 reaches the full regression gate and fails on exactly three stale cross-lane tests; exact non-live PREPARE is therefore not executed on this SHA.
+The two blocker classes found during this DEV09 round have been integrated as test/provenance corrections without weakening production business logic:
 
-The three current source/non-live blockers are:
+- terminal DEV02 runtime provenance is now explicitly accounted and deterministic provenance is green;
+- the three stale cross-lane tests have been synchronized with the hardened Passenger challenge/WSGI/evidence contract and conservative legacy-v2 readiness semantics.
 
-1. `test_devb_round2_release.DevBRound2ReleaseContractsTests.test_passenger_binding_rejects_runtime_from_different_wsgi`
-2. `test_devb_round2_release.DevBRound2ReleaseContractsTests.test_preflight_manifest_and_passenger_binding_share_exact_wsgi_identity`
-3. `test_devc_release_qa.PreparedAndCrossLaneTruthTests.test_v2_exact_binding_is_accepted_but_never_self_authorizes_promotion`
-
-DEV09 reproduces those same three in a clean `git archive` of the exact parent without `.git` metadata. No production implementation weakening is indicated: DEV02 current tests already contain the updated WSGI/challenge/strong-evidence fixtures, and canonical production-readiness tests already classify legacy v2 Passenger evidence as `BLOCKED_EXTERNAL` rather than `PASS`.
+DEV09 independently requires the exact-parent provenance verifier and the full clean `git archive` unittest suite to be clear. These are source/non-live QA statements only. Exact non-live PREPARE is a separate canonical Recovery Guard gate and must be evidenced on this same exact SHA before any source-release closure statement includes PREPARE.
 
 ## Independent QA checks
 
 - exact PR-base SHA guard;
-- exact-parent deterministic provenance check in an isolated detached worktree;
-- exact-parent full unittest discovery in a clean Git archive without `.git`;
-- all 67 A1-K5 criteria accounted exactly once with conservative evidence classes;
+- deterministic provenance against the exact parent in an isolated detached worktree;
+- full unittest discovery from exact-parent `git archive` without `.git`;
+- all 67 A1-K5 criteria exactly once with conservative evidence classes;
 - 19 integrated routes / 17 ChatGPT Action operations;
 - zero product PASS claims from synthetic/source-only evidence;
 - K5 remains live/external and independently write-gated;
@@ -32,7 +29,7 @@ Probe outputs are bounded and do not publish raw stdout/stderr, traceback text, 
 
 ## Same-role deduplication
 
-Concurrent DEV09 PR #47 has broader auth/fuzz/mock-flow/runtime-security coverage and independently reproduces the same three cross-lane regression failures. This overlay is retained for its exact-parent bounded provenance/export diagnostics; the two QA overlays must not be mechanically merged as duplicate production changes.
+Concurrent DEV09 PR #47 has broader auth/fuzz/mock-flow/runtime-security coverage. This overlay is retained for exact-parent bounded provenance/export closure diagnostics. The two QA overlays must not be mechanically merged as duplicate production work.
 
 ## Evidence boundary
 
