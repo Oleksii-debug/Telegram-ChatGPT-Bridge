@@ -1,0 +1,74 @@
+name: DEV06 API Contracts
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  dev06-api-contracts:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout full history
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Set up Python 3.11
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.11'
+      - name: Compile DEV06 source and tests
+        run: >-
+          python -m py_compile
+          ops/dev06_api_contracts.py
+          tools/build_dev06_action_openapi.py
+          tests/test_dev06_api_contracts.py
+      - name: Verify DEV06 overlay path isolation
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          test -n "$BASE_SHA"
+          test -n "$HEAD_SHA"
+          git cat-file -e "$BASE_SHA^{commit}"
+          git cat-file -e "$HEAD_SHA^{commit}"
+          cat > /tmp/dev06.expected <<'EOF'
+          .github/workflows/dev06-api-contracts.yml
+          docs/DEV06_API_CONTRACTS.md
+          ops/dev06_api_contracts.py
+          tests/test_dev06_api_contracts.py
+          tools/build_dev06_action_openapi.py
+          EOF
+          git diff --name-only "$BASE_SHA...$HEAD_SHA" | sort > /tmp/dev06.actual
+          sort -o /tmp/dev06.expected /tmp/dev06.expected
+          diff -u /tmp/dev06.expected /tmp/dev06.actual
+          echo DEV06_OVERLAY_PATH_ISOLATION_PASS
+      - name: Validate DEV06 authoritative Action schema
+        run: python tools/build_dev06_action_openapi.py --validate-only
+      - name: Run DEV06 positive and adversarial contracts
+        run: |
+          umask 022
+          python -m unittest tests.test_dev06_api_contracts -v
+      - name: Recheck integrated API and write policy regressions
+        run: |
+          umask 022
+          python tools/build_action_openapi.py --validate-only
+          python -m unittest \
+            tests.test_dev_a_candidate_contracts \
+            tests.test_dev_a_integration \
+            tests.test_dev4_endpoint_policy -v
+      - name: Current-tree secret scan
+        if: always()
+        run: python tools/secret_scan.py --mode current
+      - name: Full-history secret scan
+        if: always()
+        run: python tools/secret_scan.py --mode history
+      - name: Verify non-deploy safety markers
+        if: always()
+        run: |
+          test -f RECOVERY_BASELINE.md
+          grep -q 'DO NOT MERGE / DO NOT DEPLOY' RECOVERY_BASELINE.md
+          test ! -e .cpanel.yml
+          test ! -e ops/ENABLE_HOSTIQ_AUTO_DEPLOY
