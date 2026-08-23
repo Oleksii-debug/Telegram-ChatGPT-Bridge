@@ -15,6 +15,15 @@ import sys
 import tempfile
 from pathlib import Path
 
+# GitHub Actions and one-time operator validation invoke this file directly as
+# ``python tools/verify_release_prepare.py``.  Direct script execution places
+# ``tools/`` rather than the repository root on sys.path, so make the public
+# repository package root explicit before importing ``ops``.  This changes only
+# module resolution; it does not read environment secrets or private state.
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
 from ops.deploy_release import prepare_versioned_release, verify_prepared_release
 from ops.release_guard import SafetyError, sha256_file
 from ops.release_package import build_release_identity, validate_public_release_tree
