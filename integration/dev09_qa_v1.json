@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "role": "DEV09",
-  "parent_sha": "00684e834a523f55ea3b61c1a12cb9dc54cfd947",
+  "parent_sha": "4ebfceb153e94840fa046af88cee1131e0705657",
   "target_branch": "work3/integration-release-candidate",
   "qa_paths": [
     ".github/workflows/dev09-e2e-qa.yml",
