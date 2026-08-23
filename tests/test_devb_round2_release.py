@@ -21,8 +21,6 @@ class DevBRound2ReleaseContractsTests(unittest.TestCase):
         self.write(root, "install_server.sh", "")
         self.write(root, "requirements.txt", "Telethon==1.42.0\n")
         self.write(root, "requirements.lock", f"Telethon==1.42.0 --hash=sha256:{self.HASH}\n")
-        self.write(root, "requirements-test.txt", "pytest==9.0.0\n")
-        self.write(root, "requirements-test.lock", f"pytest==9.0.0 --hash=sha256:{self.HASH}\n")
         self.write(root, "bridge/app.py", "application = object()\n")
         self.write(root, "tests/test_smoke.py", "import unittest\n")
 
@@ -30,10 +28,9 @@ class DevBRound2ReleaseContractsTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td); self.package(root)
             package = candidate_runtime_preflight.validate_candidate_release_envelope(root, candidate_sha=self.SHA)
+            self.assertFalse(package["test_dependencies"]["present"])
             manifest = server_manifest.collect_server_manifest(root)
             rows = {row["path"]: row for row in manifest["files"]}
-            self.assertEqual("dependency_input", rows["requirements-test.txt"]["category"])
-            self.assertEqual("dependency_input", rows["requirements-test.lock"]["category"])
             self.assertEqual(package["wsgi_sha256"], rows["passenger_wsgi.py"]["sha256"])
 
             marker = passenger_evidence_hook.build_arm_marker(self.SHA, package["wsgi_sha256"])
