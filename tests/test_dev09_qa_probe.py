@@ -2,9 +2,13 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
+import tempfile
 import unittest
 from pathlib import Path
 
+from bridge.downloads import DownloadManager
+from bridge.storage import CheckpointStore, DownloadItem, FileRecordStore
 from ops.dev09_qa_probe import (
     EXPECTED_PARENT_SHA,
     MANIFEST,
@@ -26,6 +30,30 @@ requires_expensive_repository_probe = unittest.skipIf(
     (not REPOSITORY_GIT_AVAILABLE) or SKIP_EXPENSIVE,
     "DEV09 nested exact-parent probe skipped in aggregate regression",
 )
+
+
+class _CountingDownloadBackend:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def download_media(self, **kwargs):  # type: ignore[no-untyped-def]
+        self.calls += 1
+        target = Path(kwargs["destination"])
+        target.write_bytes(b"abc")
+        return {"path": str(target)}
+
+
+class _FailOnSaveCheckpointStore(CheckpointStore):
+    def __init__(self, db_path: Path) -> None:
+        self.save_calls = 0
+        self.fail_at: int | None = None
+        super().__init__(db_path)
+
+    def save(self, payload):  # type: ignore[no-untyped-def]
+        self.save_calls += 1
+        if self.fail_at is not None and self.save_calls == self.fail_at:
+            raise RuntimeError("fault_injected_checkpoint_save")
+        return super().save(payload)
 
 
 class Dev09ExactParentTests(unittest.TestCase):
@@ -112,6 +140,60 @@ class Dev09CurrentCanonicalTests(unittest.TestCase):
             self.assertEqual(exported_test_suite_probe()["classification"], "QA_PROBE_UNAVAILABLE")
             self.assertEqual(canonical_provenance_probe()["classification"], "QA_PROBE_UNAVAILABLE")
         self.assertTrue(MANIFEST.is_file())
+
+
+@unittest.skipUnless(os.name == "posix", "download durability fault oracle is POSIX/HOSTiQ oriented")
+class Dev09DownloadDurabilityFindingTests(unittest.TestCase):
+    def test_current_canonical_reproduces_registry_before_checkpoint_crash_window(self):
+        with tempfile.TemporaryDirectory(prefix="dev09-download-crash-") as td:
+            root = Path(td)
+            files = FileRecordStore(root / "state" / "files.sqlite3", root / "files")
+            checkpoints = _FailOnSaveCheckpointStore(root / "state" / "downloads.sqlite3")
+            backend = _CountingDownloadBackend()
+            manager = DownloadManager(
+                backend=backend,
+                files=files,
+                checkpoints=checkpoints,
+                staging_dir=root / "tmp" / "downloads",
+            )
+            item = DownloadItem(
+                "item1",
+                "1",
+                1,
+                "tg_1_0123456789abcdefabcd",
+                "a.txt",
+                "text/plain",
+                3,
+                None,
+            )
+            job_id = checkpoints.create([item])
+            checkpoints.fail_at = 3
+
+            with self.assertRaisesRegex(RuntimeError, "fault_injected_checkpoint_save"):
+                manager.resume(job_id)
+            self.assertEqual(backend.calls, 1)
+
+            durable_checkpoint = CheckpointStore(checkpoints.db_path).load(job_id)
+            self.assertEqual(durable_checkpoint["results"], {})
+            with sqlite3.connect(str(files.db_path)) as connection:
+                first_rows = connection.execute("SELECT file_ref FROM files").fetchall()
+            self.assertEqual(len(first_rows), 1)
+
+            restarted = DownloadManager(
+                backend=backend,
+                files=files,
+                checkpoints=CheckpointStore(checkpoints.db_path),
+                staging_dir=root / "tmp-restarted" / "downloads",
+            )
+            result = restarted.resume(job_id)
+            self.assertEqual(result["status"], "complete")
+            self.assertEqual(backend.calls, 2)
+            self.assertEqual(len(result["files"]), 1)
+
+            with sqlite3.connect(str(files.db_path)) as connection:
+                final_rows = {str(row[0]) for row in connection.execute("SELECT file_ref FROM files").fetchall()}
+            self.assertEqual(len(final_rows), 2)
+            self.assertIn(str(result["files"][0]["file_ref"]), final_rows)
 
 
 class Dev09AcceptanceTruthTests(unittest.TestCase):
