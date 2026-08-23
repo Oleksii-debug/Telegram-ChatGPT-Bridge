@@ -12,6 +12,10 @@ execution is still strictly before the first call to ``send_message``,
 ``send_file`` or ``forward_messages``. Once one of those mutating methods has
 been invoked, any exception/timeout remains a normal ``TelegramContractError``
 so the persistent store records AMBIGUOUS and never performs a blind resend.
+Even ``SafeNoSideEffectFailure`` is subordinate to this explicit phase marker:
+if such an exception escapes after the boundary, it is downgraded to an ordinary
+post-effect failure rather than being allowed to create a retryable FAILED_SAFE
+transaction.
 
 SEND_FILES additionally supports the DEV04 snapshot-safe upload contract without
 reconstructing a filesystem path. A verified upload object is accepted only as a
@@ -179,7 +183,14 @@ class PhaseAwareTelegramWriteAdapter(TelegramWriteAdapter):
             # reaches the store after CALLING, recovery remains conservative.
             raise
         except SafeNoSideEffectFailure:
-            raise
+            if not boundary.started:
+                raise
+            # Exception *type* is not proof that no Telegram side effect happened.
+            # After the explicit boundary, convert it to an ordinary stable
+            # transport failure so the durable store records AMBIGUOUS.
+            raise TelegramContractError(
+                "telegram_operation_failed", status=502
+            ) from None
         except asyncio.TimeoutError as exc:
             if not boundary.started:
                 raise SafeWriteMetadataFailure(
