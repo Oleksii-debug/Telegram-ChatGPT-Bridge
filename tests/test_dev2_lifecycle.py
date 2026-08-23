@@ -28,7 +28,10 @@ class LifecycleTests(unittest.TestCase):
             "auth": "configured",
             "backend": "configured" if ready else "unconfigured",
             "storage": "configured",
-            "rate_limit": "configured",
+            "read_rate_limit": "configured",
+            "write_store": "configured",
+            "write_rate_limit": "configured",
+            "telegram_writer": "configured" if ready else "unconfigured",
         }
         return json.dumps({"ok": True, "service": "telegram-bridge", "ready": ready, "components": components}).encode()
 
@@ -90,6 +93,18 @@ class LifecycleTests(unittest.TestCase):
         with mock.patch.object(hostiq_lifecycle, "_request", return_value=(200, b'{"status":"ok"}', "application/json")):
             self.assertEqual("FAIL", hostiq_lifecycle.health_check("https://tg-api.rukadopomogy.org.ua/health").status)
 
+    def test_legacy_four_component_health_is_rejected(self):
+        legacy = json.dumps({
+            "ok": True,
+            "service": "telegram-bridge",
+            "ready": True,
+            "components": {"auth": "configured", "backend": "configured", "storage": "configured", "rate_limit": "configured"},
+        }).encode()
+        with mock.patch.object(hostiq_lifecycle, "_request", return_value=(200, legacy, "application/json")):
+            result = hostiq_lifecycle.health_check("https://tg-api.rukadopomogy.org.ua/health")
+        self.assertEqual("FAIL", result.status)
+        self.assertEqual("HEALTH_EXCEPTION", result.detail_code)
+
     def test_health_ready_shape_passes(self):
         with mock.patch.object(hostiq_lifecycle, "_request", return_value=(200, self.health_payload(ready=True), "application/json")):
             result = hostiq_lifecycle.health_check("https://tg-api.rukadopomogy.org.ua/health")
@@ -109,13 +124,23 @@ class LifecycleTests(unittest.TestCase):
             self.assertEqual("HEALTH_BOOTSTRAP_NOT_READY", result.detail_code)
 
     def test_health_inconsistent_ready_flag_fails(self):
-        body = json.dumps({
-            "ok": True,
-            "service": "telegram-bridge",
-            "ready": True,
-            "components": {"auth": "configured", "backend": "unconfigured", "storage": "configured", "rate_limit": "configured"},
-        }).encode()
+        components = {
+            "auth": "configured",
+            "backend": "unconfigured",
+            "storage": "configured",
+            "read_rate_limit": "configured",
+            "write_store": "configured",
+            "write_rate_limit": "configured",
+            "telegram_writer": "unconfigured",
+        }
+        body = json.dumps({"ok": True, "service": "telegram-bridge", "ready": True, "components": components}).encode()
         with mock.patch.object(hostiq_lifecycle, "_request", return_value=(200, body, "application/json")):
+            self.assertEqual("FAIL", hostiq_lifecycle.health_check("https://tg-api.rukadopomogy.org.ua/health").status)
+
+    def test_unknown_extra_health_component_fails_closed(self):
+        payload = json.loads(self.health_payload())
+        payload["components"]["surprise"] = "configured"
+        with mock.patch.object(hostiq_lifecycle, "_request", return_value=(200, json.dumps(payload).encode(), "application/json")):
             self.assertEqual("FAIL", hostiq_lifecycle.health_check("https://tg-api.rukadopomogy.org.ua/health").status)
 
     def test_unauth_reject_and_leak_signature(self):
