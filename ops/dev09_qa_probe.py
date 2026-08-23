@@ -28,7 +28,7 @@ from ops.candidate_contracts import (
 
 ROOT = Path(__file__).resolve().parents[1]
 MANIFEST = ROOT / "integration" / "dev09_qa_v1.json"
-EXPECTED_PARENT_SHA = "00684e834a523f55ea3b61c1a12cb9dc54cfd947"
+EXPECTED_PARENT_SHA = "4ebfceb153e94840fa046af88cee1131e0705657"
 MAX_FAILURE_IDS = 20
 _TEST_ID_RE = re.compile(r"\(([A-Za-z0-9_.]+)\) \.\.\. (?:ERROR|FAIL)$")
 _ERROR_HEADER_RE = re.compile(r"^(?:ERROR|FAIL): ([A-Za-z0-9_.]+)$")
