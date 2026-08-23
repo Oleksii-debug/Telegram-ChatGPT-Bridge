@@ -11,9 +11,14 @@ MANIFEST = ROOT / "integration" / "provenance_v1.json"
 SOURCE_SHA = "2916828628a091a9edd8c4992d9db8834ac1ff68"
 MERGE_COMMIT = "5e35599cca1162bad9501044dfb6a79fa358e182"
 FIRST_PARENT = "4ebfceb153e94840fa046af88cee1131e0705657"
+AUTHORITATIVE_PARENT = "2480d74b623283eeebfdb74c711cbc229d89cd14"
 EXACT_PATHS = {
     "docs/DEV08_DEPLOYMENT_RECOVERY_R3.md",
     "ops/dev08_deploy_recovery.py",
+}
+AUTHORITATIVE_RUNTIME_PATHS = {
+    "ops/deploy_release.py",
+    "tests/test_dev01_dev08_authoritative_recovery.py",
 }
 EXCLUDED_PATHS = {
     "tests/test_dev08_deploy_recovery.py",
@@ -44,7 +49,7 @@ def _blob(ref: str, path: str) -> str:
 
 
 class Dev01Dev08PeerProvenanceTests(unittest.TestCase):
-    def test_manifest_records_exact_non_authorizing_oracle_sync(self):
+    def test_manifest_records_exact_oracle_and_authoritative_runtime_sync(self):
         payload = json.loads(MANIFEST.read_text(encoding="utf-8"))
         sync = payload["swarm_integrations"]["DEV08_DEPLOYMENT_RECOVERY_ORACLE"]
         self.assertEqual(48, sync["pr"])
@@ -55,12 +60,15 @@ class Dev01Dev08PeerProvenanceTests(unittest.TestCase):
         self.assertEqual(EXCLUDED_PATHS, set(sync["excluded_specialist_paths"]))
         self.assertEqual(32646112339, sync["source_validation_run_id"])
         self.assertEqual(97210515630, sync["source_validation_job_id"])
-        self.assertFalse(sync["production_runtime_modified"])
+        self.assertEqual("A01-11", sync["auditor_finding"])
+        self.assertEqual(AUTHORITATIVE_PARENT, sync["authoritative_runtime_parent_sha"])
+        self.assertEqual(AUTHORITATIVE_RUNTIME_PATHS, set(sync["authoritative_runtime_paths"]))
+        self.assertTrue(sync["production_runtime_modified"])
         self.assertFalse(sync["production_mutated"])
         self.assertFalse(sync["deployment_authorized"])
 
     @requires_repository_git
-    def test_semantic_merge_parent_order_and_exact_blobs(self):
+    def test_semantic_merge_parent_order_and_exact_oracle_blobs(self):
         self.assertEqual(
             [FIRST_PARENT, SOURCE_SHA],
             _git("show", "-s", "--format=%P", MERGE_COMMIT).split(),
