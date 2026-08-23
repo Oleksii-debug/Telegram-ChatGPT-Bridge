@@ -79,6 +79,23 @@ def validate_probe_endpoint(url: str) -> str:
     return url
 
 
+def validate_probe_transport(endpoint: str, timeout: float) -> tuple[str, float]:
+    """Validate every local transport parameter before evidence is armed.
+
+    One-shot callers persist an owner-private marker. They must be able to
+    reject deterministic local configuration errors before that state exists;
+    otherwise a typo can strand a marker even though no HTTPS request ran.
+    """
+    endpoint = validate_probe_endpoint(endpoint)
+    if (
+        not isinstance(timeout, (int, float))
+        or isinstance(timeout, bool)
+        or not 0.1 <= float(timeout) <= MAX_TIMEOUT
+    ):
+        raise SafetyError("Passenger probe timeout invalid")
+    return endpoint, float(timeout)
+
+
 def _bounded_health_identity(body: bytes, content_type: str) -> bool:
     if len(body) > MAX_BODY or "json" not in content_type.casefold():
         return False
@@ -105,11 +122,9 @@ def dispatch_challenged_health_probe(
     *,
     timeout: float = 5.0,
 ) -> ProbeResult:
-    validate_probe_endpoint(endpoint)
+    endpoint, timeout_value = validate_probe_transport(endpoint, timeout)
     if not isinstance(raw_challenge, str) or not CHALLENGE_RE.fullmatch(raw_challenge):
         raise SafetyError("Passenger probe challenge invalid")
-    if not isinstance(timeout, (int, float)) or isinstance(timeout, bool) or not 0.1 <= float(timeout) <= MAX_TIMEOUT:
-        raise SafetyError("Passenger probe timeout invalid")
 
     request = urllib.request.Request(
         endpoint,
@@ -121,7 +136,7 @@ def dispatch_challenged_health_probe(
         method="GET",
     )
     try:
-        with _open_no_redirect(request, timeout=float(timeout)) as response:
+        with _open_no_redirect(request, timeout=timeout_value) as response:
             status = int(response.status)
             body = response.read(MAX_BODY + 1)
             content_type = response.headers.get("Content-Type", "")
