@@ -16,8 +16,9 @@ def valid_package(candidate: str = "a" * 40) -> dict:
     runtime_payload = h(b"runtime-payload")
     challenge = h(b"serving-challenge")
     probe = production_readiness._probe_sha(candidate, wsgi, challenge, runtime_payload)
+    binding_payload = h(b"binding-payload")
     return {
-        "schema_version": 3,
+        "schema_version": 4,
         "candidate_sha": candidate,
         "evidence_classes": {
             "source": "PRIVATE_SERVER_EVIDENCE",
@@ -57,6 +58,7 @@ def valid_package(candidate: str = "a" * 40) -> dict:
         },
         "runtime_binding": {
             "artifact_sha256": h(b"runtime-binding"),
+            "payload_sha256": binding_payload,
             "candidate_sha": candidate,
             "expected_wsgi_sha256": wsgi,
             "actual_wsgi_sha256": wsgi,
@@ -65,6 +67,17 @@ def valid_package(candidate: str = "a" * 40) -> dict:
             "serving_probe_sha256": probe,
             "serving_request_verified": True,
             "binding_valid": True,
+        },
+        "consumed_receipt": {
+            "artifact_sha256": h(b"consumed-receipt"),
+            "payload_sha256": h(b"receipt-payload"),
+            "candidate_sha": candidate,
+            "expected_wsgi_sha256": wsgi,
+            "runtime_payload_sha256": runtime_payload,
+            "binding_payload_sha256": binding_payload,
+            "serving_probe_sha256": probe,
+            "serving_request_verified": True,
+            "receipt_valid": True,
         },
         "lifecycle": {
             "mode": "LIVE_SERVER",
@@ -85,8 +98,16 @@ def valid_package(candidate: str = "a" * 40) -> dict:
     }
 
 
-def legacy_v2(candidate: str = "a" * 40) -> dict:
+def legacy_v3(candidate: str = "a" * 40) -> dict:
     package = valid_package(candidate)
+    package["schema_version"] = 3
+    package.pop("consumed_receipt")
+    package["runtime_binding"].pop("payload_sha256")
+    return package
+
+
+def legacy_v2(candidate: str = "a" * 40) -> dict:
+    package = legacy_v3(candidate)
     package["schema_version"] = 2
     package["runtime"].pop("serving_request_verified")
     for key in ("request_challenge_sha256", "serving_probe_sha256", "serving_request_verified"):
@@ -104,7 +125,7 @@ def legacy_v1(candidate: str = "a" * 40) -> dict:
 
 
 class SupportReturnValidationTests(unittest.TestCase):
-    def test_strong_v3_package_is_accepted_but_never_authorizes(self):
+    def test_strong_v4_package_is_accepted_but_never_authorizes(self):
         package = valid_package()
         validated = production_readiness.validate_support_return(package)
         self.assertEqual(package["candidate_sha"], validated["candidate_sha"])
@@ -113,7 +134,7 @@ class SupportReturnValidationTests(unittest.TestCase):
         self.assertEqual("PASS", result["checks"]["source_reconciliation"]["status"])
         self.assertEqual("PASS", result["checks"]["exact_candidate_runtime_binding"]["status"])
         self.assertEqual("PASS", result["checks"]["passenger_python_311"]["status"])
-        self.assertEqual("PASSENGER_CHALLENGED_SERVING_CONTEXT_CONFIRMED", result["checks"]["passenger_python_311"]["reason_code"])
+        self.assertEqual("PASSENGER_TERMINAL_RECEIPT_CONTEXT_CONFIRMED", result["checks"]["passenger_python_311"]["reason_code"])
         self.assertEqual("PASS", result["checks"]["backup_restart_identity_health_smoke_resume"]["status"])
         self.assertEqual("PASS", result["checks"]["rollback"]["status"])
         self.assertEqual("BLOCKED_EXTERNAL", result["checks"]["independent_auditor_gate"]["status"])
@@ -121,6 +142,14 @@ class SupportReturnValidationTests(unittest.TestCase):
         self.assertFalse(result["promotion_authorized"])
         self.assertTrue(result["non_auditor_prerequisites_structurally_present"])
         production_readiness.validate_public_readiness(result)
+
+    def test_legacy_v3_challenge_package_remains_parseable_but_not_terminal(self):
+        package = legacy_v3()
+        production_readiness.validate_support_return(package)
+        result = production_readiness.build_deployment_readiness(package)
+        self.assertEqual("PASS", result["checks"]["exact_candidate_runtime_binding"]["status"])
+        self.assertEqual("BLOCKED_EXTERNAL", result["checks"]["passenger_python_311"]["status"])
+        self.assertFalse(result["non_auditor_prerequisites_structurally_present"])
 
     def test_legacy_v2_exact_binding_remains_parseable_but_not_strong(self):
         package = legacy_v2()
@@ -137,6 +166,28 @@ class SupportReturnValidationTests(unittest.TestCase):
         self.assertEqual("BLOCKED_EXTERNAL", result["checks"]["exact_candidate_runtime_binding"]["status"])
         self.assertEqual("BLOCKED_EXTERNAL", result["checks"]["passenger_python_311"]["status"])
         self.assertFalse(result["non_auditor_prerequisites_structurally_present"])
+
+    def test_v4_missing_receipt_fails_closed(self):
+        package = valid_package(); package.pop("consumed_receipt")
+        with self.assertRaises(SafetyError): production_readiness.validate_support_return(package)
+
+    def test_consumed_receipt_cross_binding_mismatch_blocks(self):
+        mutations = {
+            "candidate_sha": "b" * 40,
+            "expected_wsgi_sha256": h(b"wrong-wsgi"),
+            "runtime_payload_sha256": h(b"wrong-runtime"),
+            "binding_payload_sha256": h(b"wrong-binding"),
+            "serving_probe_sha256": h(b"wrong-probe"),
+        }
+        for field, value in mutations.items():
+            package = valid_package(); package["consumed_receipt"][field] = value
+            with self.subTest(field=field), self.assertRaises(SafetyError): production_readiness.validate_support_return(package)
+
+    def test_consumed_receipt_flags_fail_closed(self):
+        package = valid_package(); package["consumed_receipt"]["serving_request_verified"] = False
+        with self.assertRaises(SafetyError): production_readiness.validate_support_return(package)
+        package = valid_package(); package["consumed_receipt"]["receipt_valid"] = False
+        with self.assertRaises(SafetyError): production_readiness.validate_support_return(package)
 
     def test_candidate_binding_sha_mismatch_blocks(self):
         package = valid_package(); package["runtime_binding"]["candidate_sha"] = "b" * 40
@@ -262,7 +313,7 @@ class SupportReturnValidationTests(unittest.TestCase):
     def test_public_output_contains_only_bounded_status_accounting(self):
         result = production_readiness.build_deployment_readiness(valid_package())
         encoded = str(result)
-        for forbidden in ("artifact_sha256", "wsgi_sha256", "server_manifest", "request_challenge_sha256", "serving_probe_sha256"):
+        for forbidden in ("artifact_sha256", "wsgi_sha256", "server_manifest", "request_challenge_sha256", "serving_probe_sha256", "consumed_receipt", "binding_payload_sha256"):
             self.assertNotIn(forbidden, encoded)
         self.assertFalse(result["private_values_copied"])
         self.assertFalse(result["raw_response_copied"])
