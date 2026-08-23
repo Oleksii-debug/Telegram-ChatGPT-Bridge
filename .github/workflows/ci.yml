@@ -17,6 +17,9 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 0
+          clean: true
+          lfs: false
+          submodules: false
       - name: Set up Python 3.11
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
@@ -26,8 +29,10 @@ jobs:
           python -m py_compile
           passenger_wsgi.py
           bridge/app.py
+          bridge/audit.py
           bridge/integrated_app.py
           tools/secret_scan.py
+          tools/workflow_security.py
           tools/parallel_overlap_report.py
           tools/build_action_openapi.py
           tools/verify_integration_provenance.py
@@ -55,6 +60,11 @@ jobs:
           ops/snapshot_candidate.py
           ops/dev5_round2_oracles.py
           tests/test_secret_scan.py
+          tests/test_dev07_security.py
+          tests/test_dev07_audit_security.py
+          tests/test_dev07_session_lock_security.py
+          tests/test_dev07_error_privacy.py
+          tests/test_dev4_endpoint_policy.py
           tests/test_recovery_ops.py
           tests/test_release_package.py
           tests/test_audit_round5.py
@@ -72,6 +82,23 @@ jobs:
           tests/test_dev_a_integration.py
           tests/test_dev_a_provenance.py
           tests/test_dev_a_candidate_contracts.py
+      - name: Validate public-repository workflow security policy
+        if: always()
+        run: python tools/workflow_security.py
+      - name: DEV07 scanner, workflow, audit, session-lock, error-privacy and application security regressions
+        if: always()
+        run: >-
+          python -m unittest
+          tests.test_secret_scan
+          tests.test_dev07_security
+          tests.test_dev07_audit_security
+          tests.test_dev07_session_lock_security
+          tests.test_dev07_error_privacy
+          tests.test_dev4_endpoint_policy
+          tests.test_dev4_session_lock
+          tests.test_read_app
+          tests.test_dev_a_integration
+          -v
       - name: Validate canonical release startup and dependency envelope
         run: |
           python - <<'PY'
