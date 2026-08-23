@@ -54,6 +54,15 @@ TERMINAL_DEV_B_RETAINED = {
     "tests/test_server_manifest.py",
 }
 
+# BURST01-02 / A01-11 is a deliberately narrow mutation of a PR2-owned path.
+# The exception is byte-pinned in both directions: the fresh canonical parent
+# must still contain the independently audited vulnerable blob, and candidate
+# HEAD must contain exactly the repaired blob. This is not a generic allowlist.
+A01_11_PARENT_SHA = "2480d74b623283eeebfdb74c711cbc229d89cd14"
+A01_11_DEPLOY_PATH = "ops/deploy_release.py"
+A01_11_PARENT_DEPLOY_BLOB = "f745182ef60a23920d1ad0ae50031e712a324b7b"
+A01_11_REPAIRED_DEPLOY_BLOB = "83082fad304672f613788b9f1f92061206d57fcf"
+
 
 class ProvenanceError(RuntimeError):
     pass
@@ -137,6 +146,15 @@ def _load_json(path: Path, label: str) -> dict[str, Any]:
 
 def _load() -> dict[str, Any]:
     return _load_json(MANIFEST, "integration provenance manifest")
+
+
+def _validate_a01_11_deploy_repair(head: str) -> str:
+    _assert_ancestor(A01_11_PARENT_SHA, head)
+    if _blob(A01_11_PARENT_SHA, A01_11_DEPLOY_PATH) != A01_11_PARENT_DEPLOY_BLOB:
+        raise ProvenanceError("A01-11 canonical parent deploy blob mismatch")
+    if _blob("HEAD", A01_11_DEPLOY_PATH) != A01_11_REPAIRED_DEPLOY_BLOB:
+        raise ProvenanceError("A01-11 repaired deploy blob drift")
+    return A01_11_DEPLOY_PATH
 
 
 def _validate_dev_b_history(payload: dict[str, Any], release_paths: set[str]) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -414,12 +432,14 @@ def verify_repository() -> dict[str, Any]:
         if _path_exists("HEAD", forbidden):
             raise ProvenanceError("strict-history suppression layer unexpectedly imported")
 
+    a01_11_path = _validate_a01_11_deploy_repair(head)
     allowed_paths: set[str] = set(manifest["dev_a_paths"])
     for lane in ("DEV3", "DEV4", "DEV2"):
         allowed_paths.update(predecessors[lane]["paths"])
     allowed_paths.update(dev5["ported_paths"])
     release_paths = set(release["paths"])
     allowed_paths.update(release_paths)
+    allowed_paths.add(a01_11_path)
 
     changed = {
         line.strip()
@@ -465,6 +485,7 @@ def verify_repository() -> dict[str, Any]:
         "pr2_pr5_overlap_count": overlap_counts["PR2_PR5"],
         "rejected_dev5_overlap_count": len(dev5["rejected_overlaps_preserve_base"]),
         "release_to_live_path_count": len(release_paths),
+        "a01_11_exact_repair_verified": True,
         "private_values_recorded": False,
     }
 
