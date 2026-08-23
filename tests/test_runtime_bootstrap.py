@@ -202,6 +202,39 @@ class RuntimeBootstrapTests(unittest.TestCase):
             clock.value = 180.0
             self.assertTrue(first.check("actor-a").allowed)
 
+    def test_sqlite_backward_clock_fails_closed_across_store_instances(self):
+        with tempfile.TemporaryDirectory() as td:
+            state = Path(td) / "state"
+            state.mkdir(mode=0o700)
+            os.chmod(state, 0o700)
+            clock = _Clock(120.0)
+            database = state / "rate.sqlite3"
+            first = _SQLiteFixedWindowStore(database, clock=clock)
+            allowed, remaining, retry = first.take(
+                namespace="read", actor="actor-a", operation="read-api", limit=1, window_seconds=60
+            )
+            self.assertTrue(allowed)
+            self.assertEqual(0, remaining)
+            self.assertEqual(0, retry)
+            self.assertFalse(first.take(
+                namespace="read", actor="actor-a", operation="read-api", limit=1, window_seconds=60
+            )[0])
+
+            clock.value = 119.0
+            with self.assertRaises(RuntimeBootstrapError) as first_error:
+                first.take(namespace="read", actor="actor-a", operation="read-api", limit=1, window_seconds=60)
+            self.assertEqual("rate_limit_clock_moved_backward", first_error.exception.code)
+
+            second = _SQLiteFixedWindowStore(database, clock=clock)
+            with self.assertRaises(RuntimeBootstrapError) as second_error:
+                second.take(namespace="read", actor="actor-a", operation="read-api", limit=1, window_seconds=60)
+            self.assertEqual("rate_limit_clock_moved_backward", second_error.exception.code)
+
+            clock.value = 121.0
+            self.assertFalse(second.take(
+                namespace="read", actor="actor-a", operation="read-api", limit=1, window_seconds=60
+            )[0])
+
     def test_sqlite_write_quota_is_operation_scoped(self):
         with tempfile.TemporaryDirectory() as td:
             state = Path(td) / "state"
