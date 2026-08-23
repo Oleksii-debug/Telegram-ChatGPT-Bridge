@@ -11,13 +11,21 @@ ledger. A stale ledger must not be confused with a runtime-code regression, and
 a green source checkout must not be confused with proof that the reviewed
 Passenger/runtime protocol is present.
 
-DEV02 therefore pins the reviewed runtime protocol boundary to exact commit:
+DEV02 pins the current reviewed runtime protocol boundary to exact commit:
 
-`8f2044d7bca9487815f754d614ab781555671a4b`
+`12c9036eef907012590691fc0ecdaccbe17d6550`
 
-That SHA includes the challenged Passenger serving-request protocol, terminal
-consumed receipt, private-control hardening, candidate/runtime/WSGI binding and
-redirect-rejecting challenge transport.
+That SHA contains the prior challenged Passenger serving-request protocol,
+terminal consumed receipt, private-control hardening, candidate/runtime/WSGI
+binding and redirect-rejecting challenge transport, plus the later one-shot
+failure-recovery hardening: all deterministic transport validation occurs before
+arming; post-dispatch ambiguous outcomes retain the marker; terminal artifacts
+are cross-bound to the actual marker inode; and an existing attempt can be
+inspected without deleting or re-arming state.
+
+The subsequent DEV02 commit that updates this document/oracle does not modify a
+critical runtime path. The protocol SHA therefore remains an immutable ancestor
+whose critical blobs can be compared byte-for-byte with later candidates.
 
 ## Machine checks
 
@@ -56,26 +64,23 @@ The CLI emits only bounded JSON or
 `DEV02_CANONICAL_RUNTIME_SYNC_BLOCKED`; subprocess stderr and arbitrary Git
 errors are never copied to output.
 
-## Current factual observation
+## Historical synchronization observation
 
-During the 2026-08-23 DEV02 run, canonical PR #9 first reached
+Earlier on 2026-08-23, canonical PR #9 first reached
 `c609adfc9a1116aae635a0b14d632a5e59b6c2af`. That candidate was already a
-descendant of the reviewed DEV02 protocol SHA and retained the critical runtime
-bytes, but its provenance/ledger accounting was stale. Recovery Guard failed
-with `unexpected post-import mutation: DEV2:ops/private_evidence.py` even though
-direct blob comparison showed `ops/private_evidence.py` identical at the DEV02
-protocol boundary and the canonical candidate.
+descendant of the then-reviewed DEV02 boundary `8f2044d7...`, but its ledger was
+stale. DEV01 later explicitly accounted that boundary through
+`dev_b_terminal_sync` and restored same-SHA provenance/PREPARE success.
 
-DEV01 then advanced canonical PR #9 to
-`cb058b74fcb9fc8afdff52a294b94b54a1c36b71`. The release ledger now explicitly
-contains `dev_b_terminal_sync.sha =
-8f2044d7bca9487815f754d614ab781555671a4b` and accounts the critical DEV02
-runtime paths. The DEV02 verifier therefore recognizes `dev_b_terminal_sync` as
-the current canonical spelling, while retaining `dev02_runtime_sync` as a
-future-compatible spelling and `dev_b_round2_sync` as a legacy fallback.
+That history remains useful because it proves why ancestry, critical blob
+identity and ledger binding must be separate checks. It does not make the older
+`8f2044d7...` boundary current after the failure-recovery changes in
+`12c9036...`.
 
-This source compatibility result still requires the canonical exact-head CI,
-provenance and PREPARE gates to pass. It is not production evidence.
+At the time this update was written, canonical PR #9 had advanced beyond the old
+boundary without yet importing the new `12c9036...` critical bytes. Such a
+candidate must be reported as stale/drift relative to the new DEV02 boundary
+until DEV01 performs an exact semantic sync and reruns its own same-SHA gates.
 
 ## Production boundary
 
