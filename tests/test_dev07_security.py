@@ -27,6 +27,9 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 0
+          clean: true
+          lfs: false
+          submodules: false
       - name: python
         uses: actions/setup-python@{setup_python}
       - name: history
@@ -49,32 +52,117 @@ jobs:
 
     def test_write_permission_fails_closed(self):
         bad = self.good_workflow().replace("contents: read", "contents: write")
-        self.assertIn("write-capable", self.scan(bad))
+        self.assertIn("permissions must be exactly contents: read", self.scan(bad))
+
+    def test_inline_permissions_map_fails_closed(self):
+        bad = self.good_workflow().replace("permissions:\n  contents: read", "permissions: {contents: read}")
+        self.assertIn("explicit top-level block", self.scan(bad))
+
+    def test_second_job_level_permissions_stanza_fails_closed(self):
+        bad = self.good_workflow().replace(
+            "    runs-on: ubuntu-latest\n",
+            "    runs-on: ubuntu-latest\n    permissions:\n      contents: read\n",
+        )
+        self.assertIn("exactly one top-level permissions stanza", self.scan(bad))
 
     def test_pull_request_target_fails_closed(self):
         bad = self.good_workflow().replace("pull_request:", "pull_request_target:")
-        self.assertIn("pull_request_target", self.scan(bad))
+        self.assertIn("high-risk trigger", self.scan(bad))
 
-    def test_pr_secret_context_fails_closed_without_echoing_expression(self):
-        name = "DEPLOY_" + "TOKEN"
+    def test_workflow_run_trigger_fails_closed(self):
+        bad = self.good_workflow().replace("pull_request:", "workflow_run:")
+        self.assertIn("high-risk trigger", self.scan(bad))
+
+    def test_repository_dispatch_trigger_fails_closed(self):
+        bad = self.good_workflow().replace("pull_request:", "repository_dispatch:")
+        self.assertIn("high-risk trigger", self.scan(bad))
+
+    def test_secret_context_fails_closed_without_echoing_secret_name(self):
+        name = "SYNTHETIC_" + "CREDENTIAL"
         expression = "${{ secrets." + name + " }}"
         bad = self.good_workflow() + "      - name: unsafe\n        run: echo '" + expression + "'\n"
         result = self.scan(bad)
-        self.assertIn("may not reference repository secrets", result)
+        self.assertIn("secret context is forbidden", result)
         self.assertNotIn(name, result)
 
+    def test_secret_context_is_forbidden_even_on_push_only_workflow(self):
+        name = "SYNTHETIC_" + "CREDENTIAL"
+        expression = "${{ secrets." + name + " }}"
+        bad = self.good_workflow().replace("pull_request:", "push:")
+        bad += "      - name: unsafe\n        run: echo '" + expression + "'\n"
+        result = self.scan(bad)
+        self.assertIn("secret context is forbidden", result)
+        self.assertNotIn(name, result)
+
+    def test_explicit_github_token_context_fails_closed(self):
+        expression = "${{ github." + "token }}"
+        bad = self.good_workflow() + "      - name: unsafe\n        run: echo '" + expression + "'\n"
+        self.assertIn("github.token exposure", self.scan(bad))
+
+    def test_self_hosted_runner_fails_closed(self):
+        bad = self.good_workflow().replace("runs-on: ubuntu-latest", "runs-on: self-hosted")
+        self.assertIn("self-hosted runner", self.scan(bad))
+
+    def test_environment_binding_fails_closed(self):
+        bad = self.good_workflow().replace(
+            "    runs-on: ubuntu-latest\n",
+            "    runs-on: ubuntu-latest\n    environment: production\n",
+        )
+        self.assertIn("environment binding", self.scan(bad))
+
     def test_checkout_must_disable_persisted_credentials(self):
-        bad = self.good_workflow().replace("persist-credentials: false\n", "")
+        bad = self.good_workflow().replace("          persist-credentials: false\n", "")
         self.assertIn("persist-credentials: false", self.scan(bad))
 
     def test_history_scan_requires_full_history_checkout(self):
         bad = self.good_workflow().replace("fetch-depth: 0", "fetch-depth: 1")
         self.assertIn("fetch-depth: 0", self.scan(bad))
 
+    def test_checkout_requires_clean_true(self):
+        bad = self.good_workflow().replace("          clean: true\n", "")
+        self.assertIn("clean: true", self.scan(bad))
+
+    def test_checkout_requires_lfs_false(self):
+        bad = self.good_workflow().replace("          lfs: false\n", "")
+        self.assertIn("lfs: false", self.scan(bad))
+
+    def test_checkout_requires_submodules_false(self):
+        bad = self.good_workflow().replace("          submodules: false\n", "")
+        self.assertIn("submodules: false", self.scan(bad))
+
+    def test_checkout_ref_override_fails_closed(self):
+        bad = self.good_workflow().replace(
+            "          submodules: false\n",
+            "          submodules: false\n          ref: main\n",
+        )
+        self.assertIn("checkout ref override is forbidden", self.scan(bad))
+
+    def test_checkout_repository_override_fails_closed(self):
+        bad = self.good_workflow().replace(
+            "          submodules: false\n",
+            "          submodules: false\n          repository: example/other\n",
+        )
+        self.assertIn("checkout repository override is forbidden", self.scan(bad))
+
+    def test_checkout_token_override_fails_closed_without_echoing_value(self):
+        synthetic = "synthetic-placeholder-value"
+        bad = self.good_workflow().replace(
+            "          submodules: false\n",
+            "          submodules: false\n          token: " + synthetic + "\n",
+        )
+        result = self.scan(bad)
+        self.assertIn("checkout token override is forbidden", result)
+        self.assertNotIn(synthetic, result)
+
     def test_artifact_transfer_requires_privacy_review(self):
         sha = "0" * 40
         bad = self.good_workflow() + f"      - name: artifact\n        uses: actions/upload-artifact@{sha}\n"
         self.assertIn("artifact transfer", self.scan(bad))
+
+    def test_cache_action_requires_poisoning_review(self):
+        sha = "1" * 40
+        bad = self.good_workflow() + f"      - name: cache\n        uses: actions/cache@{sha}\n"
+        self.assertIn("cache restore/save", self.scan(bad))
 
     def test_network_pipe_to_shell_fails_closed(self):
         bad = self.good_workflow() + "      - name: unsafe\n        run: curl https://example.invalid/install | bash\n"
@@ -83,6 +171,31 @@ jobs:
     def test_local_action_is_allowed(self):
         good = self.good_workflow() + "      - name: local\n        uses: ./.github/actions/local-check\n"
         self.assertEqual(self.scan(good), "")
+
+    def test_group_writable_workflow_file_fails_closed(self):
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td)
+            root = repo / ".github" / "workflows"
+            root.mkdir(parents=True)
+            workflow = root / "guard.yml"
+            workflow.write_text(self.good_workflow(), encoding="utf-8")
+            workflow.chmod(0o664)
+            result = "\n".join(workflow_security.scan_repository(repo))
+            self.assertIn("unsafe topology/ownership/permissions", result)
+
+    def test_symlinked_workflow_directory_fails_closed(self):
+        if not hasattr(os, "symlink"):
+            self.skipTest("symlink unavailable")
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td)
+            github = repo / ".github"
+            real = repo / "real-workflows"
+            github.mkdir()
+            real.mkdir()
+            (real / "guard.yml").write_text(self.good_workflow(), encoding="utf-8")
+            (github / "workflows").symlink_to(real, target_is_directory=True)
+            result = "\n".join(workflow_security.scan_repository(repo))
+            self.assertIn("unsafe topology/ownership", result)
 
 
 class Dev07SecretScannerBoundaryTests(unittest.TestCase):
