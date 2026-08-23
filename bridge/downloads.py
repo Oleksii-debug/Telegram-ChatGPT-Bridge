@@ -53,6 +53,7 @@ class DownloadManager:
         "download_result_collision",
         "duplicate_item_id",
         "file_hash_mismatch",
+        "file_registry_collision",
         "file_size_mismatch",
         "file_too_large",
         "unsafe_backend_path",
