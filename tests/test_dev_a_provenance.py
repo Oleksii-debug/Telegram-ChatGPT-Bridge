@@ -22,19 +22,21 @@ class DevAProvenanceTests(unittest.TestCase):
         result = verify_repository()
         self.assertEqual(result["schema_version"], 2)
         self.assertEqual(result["base"], "26a2df12c350f670a703b236edc3648f339b64a9")
-        self.assertEqual(result["verified_predecessor_count"], 6)
-        self.assertEqual(result["semantic_merge_count"], 6)
+        self.assertEqual(result["verified_predecessor_count"], 7)
+        self.assertEqual(result["semantic_merge_count"], 7)
         self.assertEqual(result["dev_b_imported_path_count"], 16)
         self.assertEqual(result["dev_b_adapted_path_count"], 4)
         self.assertEqual(result["dev_b_superseded_path_count"], 2)
         self.assertEqual(result["dev_b_round2_sync_path_count"], 9)
         self.assertEqual(result["dev_b_round2_adapted_path_count"], 3)
-        self.assertEqual(result["release_to_live_path_count"], 32)
+        self.assertEqual(result["dev_c_exact_path_count"], 3)
+        self.assertEqual(result["dev_c_adapted_path_count"], 1)
+        self.assertEqual(result["release_to_live_path_count"], 36)
         self.assertEqual(result["pr2_pr3_overlap_count"], 7)
         self.assertEqual(result["pr2_pr5_overlap_count"], 3)
         self.assertEqual(result["rejected_dev5_overlap_count"], 7)
         self.assertFalse(result["private_values_recorded"])
-        self.assertGreaterEqual(result["changed_path_count"], 76)
+        self.assertGreaterEqual(result["changed_path_count"], 80)
 
     def test_cross_pr_overlap_matrix_is_recomputed_not_trusted_as_prose(self):
         payload = json.loads(MANIFEST.read_text(encoding="utf-8"))
@@ -88,6 +90,26 @@ class DevAProvenanceTests(unittest.TestCase):
         )
         self.assertFalse(_path_exists("HEAD", "tools/strict_history_secret_scan.py"))
         self.assertFalse(_path_exists("HEAD", "tests/test_strict_history_secret_scan.py"))
+
+    def test_dev_c_qa_sync_is_exact_except_declared_adaptation(self):
+        release = json.loads(RELEASE_OVERRIDE.read_text(encoding="utf-8"))
+        sync = release["dev_c_qa_sync"]
+        self.assertEqual(sync["sha"], "5758bfdcd9ecee4011fc3caaa3c68eb46ee2af19")
+        self.assertEqual(sync["merge_commit"], "df318aa089f754b7a14f624b7c27cca59758cbe8")
+        self.assertEqual(sync["first_parent"], "94c6ab7e3afabd769a63b44b222bfc0bbf067f67")
+        self.assertFalse(sync["production_logic_modified"])
+        self.assertEqual(
+            set(sync["exact_blob_paths"]),
+            {"docs/DEV_C_RELEASE_TO_LIVE_QA.md", "ops/devc_release_qa.py", "tests/test_devc_release_e2e.py"},
+        )
+        self.assertEqual(set(sync["adapted_paths"]), {"tests/test_devc_release_qa.py"})
+        for path in sync["exact_blob_paths"]:
+            with self.subTest(path=path):
+                self.assertEqual(_blob("HEAD", path), _blob(sync["sha"], path))
+        self.assertNotEqual(
+            _blob("HEAD", "tests/test_devc_release_qa.py"),
+            _blob(sync["sha"], "tests/test_devc_release_qa.py"),
+        )
 
     def test_dev_b_supersession_is_narrow_and_explicit(self):
         release = json.loads(RELEASE_OVERRIDE.read_text(encoding="utf-8"))
