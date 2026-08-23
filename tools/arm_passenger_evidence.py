@@ -1,10 +1,17 @@
 # -*- coding: utf-8 -*-
-"""Create the one-time Passenger evidence marker from validated package preflight."""
+"""Create the one-time Passenger evidence marker from validated package preflight.
+
+The raw serving-request challenge is deliberately NOT stored by this tool.  A
+separate one-time probe orchestration owns the raw random value in memory and
+passes only its SHA-256 digest here.  The armed marker therefore cannot reveal
+the value required to finalize serving-request evidence.
+"""
 from __future__ import annotations
 
 import argparse
 import json
 import os
+import re
 import stat
 import sys
 from pathlib import Path
@@ -15,10 +22,15 @@ _REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 if str(_REPOSITORY_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPOSITORY_ROOT))
 
-from ops.passenger_evidence_hook import ARM_MARKER_NAME, build_arm_marker
+from ops.passenger_evidence_hook import (
+    ARM_MARKER_NAME,
+    CONSUMED_RECEIPT_NAME,
+    build_arm_marker,
+)
 from ops.private_control import read_private_text
 from ops.release_guard import SafetyError
 
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _EXPECTED_PREFLIGHT_KEYS = {
     "schema_version", "candidate_sha", "wsgi_sha256", "requirements_sha256",
     "requirements_lock_sha256", "direct_package_count", "locked_package_count",
@@ -77,6 +89,16 @@ def _write_marker_no_clobber(control: Path, expected_root: os.stat_result, paylo
             or stat.S_IMODE(root_after.st_mode) & 0o077
         ):
             raise SafetyError("private control root changed during arming")
+
+        # A validated consumed receipt is terminal one-shot state.  Arming never
+        # overwrites either a prior marker or a prior receipt.
+        for name in (ARM_MARKER_NAME, CONSUMED_RECEIPT_NAME):
+            try:
+                os.stat(name, dir_fd=root_fd, follow_symlinks=False)
+            except FileNotFoundError:
+                continue
+            raise SafetyError("Passenger evidence control state already exists")
+
         raw = (json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True) + "\n").encode("ascii")
         flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | nofollow | cloexec
         try:
@@ -107,6 +129,8 @@ def _write_marker_no_clobber(control: Path, expected_root: os.stat_result, paylo
         return control / ARM_MARKER_NAME
     except Exception:
         if marker_created:
+            # This cleanup is safe because the fd-bound directory is still held
+            # and this process created the unique O_EXCL marker in this call.
             try:
                 os.unlink(ARM_MARKER_NAME, dir_fd=root_fd)
                 os.fsync(root_fd)
@@ -117,16 +141,28 @@ def _write_marker_no_clobber(control: Path, expected_root: os.stat_result, paylo
         os.close(root_fd)
 
 
-def arm_from_preflight(*, preflight_path: Path, control_root: Path) -> Path:
+def arm_from_preflight(
+    *,
+    preflight_path: Path,
+    control_root: Path,
+    request_challenge_sha256: str,
+) -> Path:
+    if not isinstance(request_challenge_sha256, str) or not _SHA256_RE.fullmatch(request_challenge_sha256):
+        raise SafetyError("Passenger serving-request challenge digest invalid")
     preflight = _private_file_json(preflight_path)
     control, root_stat = _private_control_root(control_root)
-    payload = build_arm_marker(preflight["candidate_sha"], preflight["wsgi_sha256"])
+    payload = build_arm_marker(
+        preflight["candidate_sha"],
+        preflight["wsgi_sha256"],
+        request_challenge_sha256,
+    )
     return _write_marker_no_clobber(control, root_stat, payload)
 
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--preflight", required=True)
+    parser.add_argument("--challenge-sha256", required=True)
     parser.add_argument(
         "--control-root",
         default=str(Path.home() / ".telegram_bridge_private_control"),
@@ -136,6 +172,7 @@ def main(argv=None) -> int:
         arm_from_preflight(
             preflight_path=Path(args.preflight),
             control_root=Path(args.control_root),
+            request_challenge_sha256=args.challenge_sha256,
         )
     except (SafetyError, OSError, ValueError):
         print("PASSENGER_EVIDENCE_ARM_BLOCKED")
