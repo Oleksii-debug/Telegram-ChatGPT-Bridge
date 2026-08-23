@@ -64,7 +64,9 @@
         "tests/test_archive_security.py", "tests/test_backend_read.py", "tests/test_dev3_round2.py",
         "tests/test_read_app.py", "tests/test_storage_downloads.py", "tests/test_validation_security.py"
       ],
-      "dev_a_overrides": ["bridge/__init__.py", "bridge/archive.py"]
+      "dev_a_overrides": [
+        "bridge/__init__.py", "bridge/app.py", "bridge/archive.py", "bridge/downloads.py", "bridge/storage.py"
+      ]
     },
     "DEV4": {
       "pr": 7,
@@ -132,15 +134,43 @@
     "adapted_dev5_fuzz": "0e9fbf39f9dd6f0bfdf32accbdcb0fb9a31cb797",
     "candidate_truth_contracts": "c9c162b78460024b2bec407a05d3d34e26b34f81",
     "candidate_truth_tests": "70985119a21c1951078a8f1b8031ceb3baa3c00b",
-    "candidate_truth_ci_gate": "545e963f7ec89ab534fcb8b1dfafdedb9a8d504b"
+    "candidate_truth_ci_gate": "545e963f7ec89ab534fcb8b1dfafdedb9a8d504b",
+    "dev04_media_storage_sync": "301817d7e2c1a2fa55435d11ce5c6edc0cef5d71"
   },
   "dev_a_paths": [
-    ".github/workflows/ci.yml", "bridge/__init__.py", "bridge/integrated_app.py",
-    "docs/DEV_A_INTEGRATED_RELEASE_CANDIDATE.md", "docs/DEV_A_PROVENANCE_LEDGER.md",
+    ".github/workflows/ci.yml", "bridge/__init__.py", "bridge/file_access.py", "bridge/filenames.py", "bridge/integrated_app.py",
+    "docs/DEV04_MEDIA_STORAGE.md", "docs/DEV_A_INTEGRATED_RELEASE_CANDIDATE.md", "docs/DEV_A_PROVENANCE_LEDGER.md",
     "integration/provenance_v1.json", "ops/candidate_contracts.py", "ops/integration_interfaces.py",
-    "tests/test_dev_a_candidate_contracts.py", "tests/test_dev_a_integration.py", "tests/test_dev_a_provenance.py",
-    "tools/verify_integration_provenance.py"
+    "tests/test_dev01_dev04_peer_provenance.py", "tests/test_dev04_media_storage.py", "tests/test_dev04_migration_concurrency.py",
+    "tests/test_dev04_private_serving.py", "tests/test_dev_a_candidate_contracts.py", "tests/test_dev_a_integration.py",
+    "tests/test_dev_a_provenance.py", "tools/verify_integration_provenance.py"
   ],
+  "swarm_integrations": {
+    "DEV04_MEDIA_STORAGE": {
+      "pr": 37,
+      "source_sha": "c10ca6aa40755a88c98e2c200001bc05ca0bcf98",
+      "merge_commit": "301817d7e2c1a2fa55435d11ce5c6edc0cef5d71",
+      "first_parent": "2d98d036a3dc13545a9661005d6e290f12bcfe22",
+      "exact_blob_paths": [
+        "bridge/app.py",
+        "bridge/archive.py",
+        "bridge/downloads.py",
+        "bridge/file_access.py",
+        "bridge/filenames.py",
+        "bridge/storage.py",
+        "docs/DEV04_MEDIA_STORAGE.md",
+        "tests/test_dev04_media_storage.py",
+        "tests/test_dev04_migration_concurrency.py",
+        "tests/test_dev04_private_serving.py"
+      ],
+      "excluded_specialist_paths": [".github/workflows/dev04-media-storage-qa.yml"],
+      "auditor_finding": "A01-06",
+      "source_ci_run_id": 32641698071,
+      "source_ci_job_id": 97199658228,
+      "production_mutated": false,
+      "deployment_authorized": false
+    }
+  },
   "safety_boundary": {
     "merge": false,
     "deploy": false,
