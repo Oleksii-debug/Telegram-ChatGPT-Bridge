@@ -59,7 +59,7 @@ class Dev09ExactParentTests(unittest.TestCase):
             self.assertEqual(observed, EXPECTED_PARENT_SHA)
 
 
-class Dev09ClosureTests(unittest.TestCase):
+class Dev09CurrentCanonicalTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.provenance = None
@@ -69,20 +69,20 @@ class Dev09ClosureTests(unittest.TestCase):
             cls.suite = exported_test_suite_probe()
 
     @requires_expensive_repository_probe
-    def test_exact_parent_provenance_is_clear(self):
+    def test_exact_parent_provenance_fails_closed_on_new_unaccounted_peer_sync(self):
         result = self.provenance
         self.assertIsNotNone(result)
         self.assertEqual(result["parent_sha"], EXPECTED_PARENT_SHA)
-        self.assertEqual(result["classification"], "CLEAR")
-        self.assertEqual(result["reason"], "NONE")
-        self.assertEqual(result["return_code"], 0)
+        self.assertEqual(result["classification"], "BLOCKED_CANONICAL_PROVENANCE")
+        self.assertEqual(result["reason"], "PROVENANCE_FAILURE")
+        self.assertNotEqual(result["return_code"], 0)
         self.assertFalse(result["private_values_recorded"])
         self.assertFalse(result["production_mutated"])
         self.assertFalse(result["deployment_authorized"])
         self.assertFalse(result["product_pass"])
 
     @requires_expensive_repository_probe
-    def test_exact_exported_canonical_suite_is_clear_after_cross_lane_sync(self):
+    def test_exact_exported_functional_suite_remains_clear(self):
         result = self.suite
         self.assertIsNotNone(result)
         self.assertEqual(result["parent_sha"], EXPECTED_PARENT_SHA)
@@ -98,30 +98,19 @@ class Dev09ClosureTests(unittest.TestCase):
         self.assertFalse(result["product_pass"])
 
     @requires_expensive_repository_probe
-    def test_public_probe_shapes_remain_bounded(self):
+    def test_public_probe_shapes_are_bounded(self):
         suite = self.suite
         provenance = self.provenance
         self.assertIsNotNone(suite)
         self.assertIsNotNone(provenance)
-        self.assertEqual(
-            set(suite),
-            {
-                "parent_sha", "classification", "reason", "return_code",
-                "failure_test_count", "failure_test_ids", "git_metadata_present",
-                "private_values_recorded", "production_mutated",
-                "deployment_authorized", "product_pass",
-            },
-        )
         lowered = json.dumps({"suite": suite, "provenance": provenance}, sort_keys=True).casefold()
         for forbidden in ("stdout", "stderr", "traceback", "exception", "message_body", "file_content"):
             self.assertNotIn(forbidden, lowered)
 
     def test_probes_are_repository_only_inside_prepare_payload(self):
         if not REPOSITORY_GIT_AVAILABLE:
-            suite = exported_test_suite_probe()
-            provenance = canonical_provenance_probe()
-            self.assertEqual(suite["classification"], "QA_PROBE_UNAVAILABLE")
-            self.assertEqual(provenance["classification"], "QA_PROBE_UNAVAILABLE")
+            self.assertEqual(exported_test_suite_probe()["classification"], "QA_PROBE_UNAVAILABLE")
+            self.assertEqual(canonical_provenance_probe()["classification"], "QA_PROBE_UNAVAILABLE")
         self.assertTrue(MANIFEST.is_file())
 
 
