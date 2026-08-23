@@ -14,10 +14,11 @@ re-raised. If FAILED_SAFE or AMBIGUOUS persistence itself fails, the request is
 never presented as safely retryable: the caller receives reconciliation-required
 while durable CALLING/AMBIGUOUS continues to block a blind exact retry.
 
-Public error metadata is positive-grammar only. A buggy internal callback cannot
-smuggle a target, filename, server path, token fragment or other private label
-through the nominal ``code`` field: invalid codes collapse to one stable generic
-code before serialization.
+Public safe-write error metadata is allowlist-only. Syntax is not a privacy
+boundary: even a lower-case token such as ``alice_private_chat`` could contain a
+private label. Only stable protocol codes emitted by the audited write adapter /
+preflight seams are allowed through; every other value collapses to
+``external_write_rejected`` before serialization.
 
 No raw exception text, Telegram content, target, token or server path is stored
 in these error objects.
@@ -25,7 +26,6 @@ in these error objects.
 from __future__ import annotations
 
 import json
-import re
 import time
 from typing import Any, Callable, Mapping
 
@@ -39,12 +39,54 @@ from ops.write_safety import (
 )
 
 
-_PUBLIC_CODE_RE = re.compile(r"^[a-z][a-z0-9_]{0,79}$")
 _GENERIC_SAFE_CODE = "external_write_rejected"
+_PUBLIC_SAFE_CODES = frozenset(
+    {
+        _GENERIC_SAFE_CODE,
+        # Local request/preflight validation.
+        "text_required",
+        "text_too_long",
+        "invalid_target",
+        "invalid_reply_target",
+        "invalid_message_ids",
+        "files_required",
+        "invalid_file_count",
+        "invalid_file_reference",
+        "caption_too_long",
+        "voice_note_requires_single_file",
+        "reply_target_not_found",
+        "reply_target_chat_mismatch",
+        "reply_target_mismatch",
+        "forward_source_missing",
+        "forward_source_mismatch",
+        # Telegram lifecycle / mapped transport codes. These are safe to expose
+        # only after the phase-aware adapter has separately proved no mutating
+        # RPC was invoked.
+        "telegram_not_configured",
+        "telegram_session_unauthorized",
+        "telegram_session_busy",
+        "telegram_session_lock_unsafe",
+        "telegram_timeout",
+        "telegram_flood_wait",
+        "telegram_2fa_required",
+        "telegram_target_invalid",
+        "telegram_message_invalid",
+        "telegram_file_rejected",
+        "telegram_rpc_error",
+        "telegram_operation_failed",
+        "telegram_invalid_receipt",
+        # Unified application / private file preflight codes.
+        "telegram_writer_unconfigured",
+        "private_file_store_unavailable",
+        "registered_private_file_unavailable",
+        "registered_private_file_identity_mismatch",
+        "private_file_preflight_failed",
+    }
+)
 
 
 def _bounded_code(value: Any, default: str = _GENERIC_SAFE_CODE) -> str:
-    if isinstance(value, str) and _PUBLIC_CODE_RE.fullmatch(value):
+    if isinstance(value, str) and value in _PUBLIC_SAFE_CODES:
         return value
     return default
 
