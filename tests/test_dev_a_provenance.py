@@ -37,7 +37,7 @@ class DevAProvenanceTests(unittest.TestCase):
         self.assertEqual(result["base"], "26a2df12c350f670a703b236edc3648f339b64a9")
         self.assertEqual(result["verified_predecessor_count"], 8)
         self.assertEqual(result["semantic_merge_count"], 8)
-        self.assertEqual(result["dev4_override_count"], 1)
+        self.assertEqual(result["dev4_override_count"], 5)
         self.assertEqual(result["dev_b_imported_path_count"], 16)
         self.assertEqual(result["dev_b_adapted_path_count"], 4)
         self.assertEqual(result["dev_b_superseded_path_count"], 2)
@@ -78,13 +78,21 @@ class DevAProvenanceTests(unittest.TestCase):
         self.assertTrue(set(dev5["ported_paths"]).isdisjoint(dev5["rejected_overlaps_preserve_base"]))
 
     @requires_repository_git
-    def test_dev4_write_safety_override_is_narrow_and_explicit(self):
+    def test_dev4_overrides_are_narrow_explicit_and_real(self):
         payload = json.loads(MANIFEST.read_text(encoding="utf-8"))
-        self.assertEqual(set(payload["predecessors"]["DEV4"]["dev_a_overrides"]), {"ops/write_safety.py"})
-        self.assertNotEqual(
-            _blob("HEAD", "ops/write_safety.py"),
-            _blob(payload["predecessors"]["DEV4"]["sha"], "ops/write_safety.py"),
-        )
+        dev4 = payload["predecessors"]["DEV4"]
+        expected = {
+            "ops/telegram_session_lock.py",
+            "ops/write_endpoint_policy.py",
+            "ops/write_safety.py",
+            "tests/test_dev4_endpoint_policy.py",
+            "tools/build_action_openapi.py",
+        }
+        self.assertEqual(set(dev4["dev_a_overrides"]), expected)
+        self.assertTrue(expected.issubset(set(dev4["paths"])))
+        for path in expected:
+            with self.subTest(path=path):
+                self.assertNotEqual(_blob("HEAD", path), _blob(dev4["sha"], path))
 
     @requires_repository_git
     def test_dev_b_nonadapted_historical_imports_are_owned_by_exact_layers(self):
