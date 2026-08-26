@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
+import importlib
 import json
 import os
 import tempfile
@@ -146,6 +147,50 @@ class Finalwave28PassengerV3Tests(unittest.TestCase):
             self.assertNotEqual(passenger_evidence_hook.STRONG_STATUS, report["runtime_compliance"])
             self.assertFalse(report["serving_request_verified"])
             self.assertTrue(runtime_evidence.system_shell_cannot_prove_passenger(report))
+
+    def test_terminal_marker_payload_cross_bind_rejects_identity_changes(self):
+        """Candidate, challenge and expected-WSGI marker fields remain terminal-bound."""
+        helper_module = importlib.import_module("test_run_passenger_evidence_probe")
+        cases = (
+            ("candidate_sha", "e" * 40),
+            ("request_challenge_sha256", "e" * 64),
+            ("expected_wsgi_sha256", "e" * 64),
+        )
+        for field, replacement in cases:
+            with self.subTest(field=field), tempfile.TemporaryDirectory() as td:
+                helper = helper_module.OneShotPassengerProbeTests(methodName="runTest")
+                _, evidence, control, preflight = helper.roots(td)
+
+                def dispatch(endpoint, raw, timeout=5.0):
+                    helper.materialize_terminal(control, evidence)
+                    marker_path = control / passenger_evidence_hook.ARM_MARKER_NAME
+                    payload = json.loads(marker_path.read_text(encoding="utf-8"))
+                    payload[field] = replacement
+                    marker_path.write_text(
+                        json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n",
+                        encoding="utf-8",
+                    )
+                    os.chmod(marker_path, 0o600)
+                    return passenger_probe.ProbeResult(
+                        "PASS", 200, "PROBE_HEALTH_REQUEST_CONFIRMED"
+                    )
+
+                with mock.patch.object(
+                    run_passenger_evidence_probe.secrets,
+                    "token_hex",
+                    return_value=helper.RAW,
+                ), mock.patch.object(
+                    run_passenger_evidence_probe,
+                    "dispatch_challenged_health_probe",
+                    side_effect=dispatch,
+                ):
+                    with self.assertRaises(SafetyError):
+                        run_passenger_evidence_probe.run_one_shot_probe(
+                            preflight_path=preflight,
+                            control_root=control,
+                            evidence_root=evidence,
+                            attempts=1,
+                        )
 
 
 if __name__ == "__main__":
