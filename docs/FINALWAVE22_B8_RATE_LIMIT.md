@@ -24,13 +24,17 @@ Windows are epoch-aligned fixed windows:
 
 A blocked request returns `Retry-After = max(1, window_end - now)`. At the exact boundary a new window begins and the quota resets. FINALWAVE-22 makes the write limiter's successful `reset_at` use the same `window_end` produced by the atomic store decision; the previous implementation returned `now + window_seconds`, which could point beyond the real fixed-window boundary and was computed from a second clock sample.
 
-## Actor and operation policy
+## Actor, operation and parser-boundary policy
 
 Read and write traffic have independent namespaces in the same persistent database.
 
-Read runtime uses one fixed non-private service actor class, `authenticated-read-api`, and one aggregate operation class, `read-api`. Missing or wrong bearer authentication is rejected before the read limiter is consumed.
+Read runtime uses one fixed non-private service actor class, `authenticated-read-api`, and one aggregate operation class, `read-api`. Missing or wrong bearer authentication is rejected before the read limiter is consumed. Signed private-file reads use their own fixed non-private `private-file-read` actor class and do not bypass the read limiter.
 
-Write runtime uses a fixed non-private SHA-256 service actor identity. Write quotas are intentionally operation-scoped by canonical operation ID, so preview/commit/action operation classes do not consume each other's rows. The bearer value, client address, Telegram chat/person, message text, filenames, and other private content are not stored as rate-limit keys. Store keys are SHA-256 digests.
+Write runtime uses a fixed non-private SHA-256 service actor identity. The canonical operation quota remains operation-scoped by operation ID, so preview/commit/action operation classes do not consume each other's semantic rows.
+
+FINALWAVE-22 also closes a parser-boundary bypass found on the canonical head: authenticated malformed write JSON was parsed and rejected before `WriteEndpointPolicy.authorize()` reached the limiter, so repeated malformed write requests consumed no B8 quota. Each authenticated write route now consumes a separate `request:<canonical operation id>` pre-parse bucket before JSON parsing. A valid write therefore passes both the pre-parse abuse bucket and the existing semantic operation bucket; because these are separate counters, the request is not double-charged against one quota. Missing/wrong bearer requests still fail before either write counter is touched.
+
+The bearer value, client address, Telegram chat/person, message text, filenames, malformed body bytes, and other private content are not stored as rate-limit keys. Store keys are SHA-256 digests of fixed service actors and canonical operation identifiers.
 
 The current production defaults are a shared window of 60 seconds, read limit 120, and write limit 20, with bounded environment overrides. These are source defaults only; live HOSTiQ configuration is not asserted by this specialist run.
 
@@ -44,7 +48,7 @@ The high-water clock advances only forward. If a later request observes wall tim
 
 The quota table stores at most one current row for each `(namespace, actor_hash, operation_hash)` primary key. On each mutation, rows with `window_start < current_window_start - 2 * window_seconds` are deleted. This removes inactive stale actors/operations while retaining the current and recent safety horizon. The monotonic high-water row is never pruned.
 
-Production actor/operation cardinality is bounded by fixed service actors and the canonical operation registry; private user-controlled strings are not used as production actor keys.
+Production actor/operation cardinality is bounded by fixed service actors and the canonical operation registry, including the fixed `request:` prefix; private user-controlled strings are not used as production actor/operation keys.
 
 ## Failure policy
 
@@ -69,8 +73,16 @@ Unsafe database or sidecar topology also fails closed during bootstrap/use. No f
 - read/write namespace isolation;
 - write `reset_at` alignment with the actual fixed-window boundary.
 
+`tests/test_finalwave22_rate_limit_auth_failclosed.py` covers:
+
+- read/write adapter mapping of store failure to stable fail-closed HTTP 503 policy errors;
+- missing/wrong bearer rejection before quota consumption;
+- exact shared store identity for production read/write limiters;
+- authenticated malformed write requests consuming pre-parse quota before JSON failure;
+- valid write previews traversing the separate pre-parse and semantic operation quota layers.
+
 These are non-live source/runtime tests. They can establish B8 implementation behavior on the tested filesystem/process model, but they are not substitutes for candidate-bound Passenger/HOSTiQ live evidence or final production acceptance.
 
 ## Integration recommendation
 
-Canonical integrator should semantically select the narrow `bridge/runtime.py` outcome/reset-boundary change plus this test/documentation package only after exact-head CI and independent review. Do not cherry-pick unrelated specialist history, do not weaken integration provenance, and do not treat a generic Recovery Guard provenance failure on this isolated overlay as permission to relax canonical guards.
+Canonical integrator should semantically select the narrow `bridge/runtime.py` outcome/reset-boundary change, the `bridge/integrated_app.py` authenticated write pre-parse quota change, and the focused tests/documentation only after exact-head CI and independent review. Do not cherry-pick unrelated specialist history, do not weaken integration provenance, and do not treat a generic Recovery Guard provenance failure on this isolated overlay as permission to relax canonical guards.
