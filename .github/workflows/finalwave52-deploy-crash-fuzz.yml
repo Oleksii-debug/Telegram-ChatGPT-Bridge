@@ -40,8 +40,8 @@ jobs:
           cp tools/finalwave52_terminal_persistence_fuzz.py /tmp/finalwave52_terminal_persistence_fuzz.py
       - name: Checkout exact role01 source under test
         run: |
-          git checkout --detach c4a4f2f050cdab8937db97091844884bd1fb8f3f
-          test "$(git rev-parse HEAD)" = "c4a4f2f050cdab8937db97091844884bd1fb8f3f"
+          git checkout --detach cf2e56a0ed8cd1321a7c989232ad11b559d0062c
+          test "$(git rev-parse HEAD)" = "cf2e56a0ed8cd1321a7c989232ad11b559d0062c"
           cp /tmp/finalwave52_deploy_crash_fuzz.py tools/finalwave52_deploy_crash_fuzz.py
           cp /tmp/finalwave52_lifecycle_replay_fuzz.py tools/finalwave52_lifecycle_replay_fuzz.py
           cp /tmp/finalwave52_previous_release_fuzz.py tools/finalwave52_previous_release_fuzz.py
