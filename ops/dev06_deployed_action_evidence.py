@@ -1,10 +1,10 @@
 # -*- coding: utf-8 -*-
 """Privacy-safe deployment-bound ChatGPT Action schema comparison for DEV06.
 
-This module performs no network, Telegram, HOSTiQ or production mutation.  It
+This module performs no network, Telegram, HOSTiQ or production mutation. It
 compares an externally captured/sanitized OpenAPI document with the exact DEV06
 schema generated for a candidate and emits hashes/counts/stable mismatch codes
-only.  A matching result is evidence input for H1; it never self-authorizes H1,
+only. A matching result is evidence input for H1; it never self-authorizes H1,
 deployment, K5, or any live operation.
 """
 from __future__ import annotations
@@ -29,6 +29,15 @@ from ops.dev06_runtime_conformance import (
 PRODUCTION_BASE_URL = "https://tg-api.rukadopomogy.org.ua"
 MAX_SCHEMA_BYTES = 1024 * 1024  # ingestion safety bound, not a ChatGPT platform limit
 _ALLOWED_SOURCE_CLASSIFICATIONS = {"SOURCE_MOCK", "DEPLOYED_CAPTURE"}
+_ALLOWED_MISMATCH_CODES = frozenset({
+    "DOCUMENT_DIGEST_DRIFT",
+    "OBSERVED_SCHEMA_VALIDATION_FAILED",
+    "OPERATION_CONTRACT_DRIFT",
+    "OPERATION_COUNT_DRIFT",
+    "PATH_SET_DRIFT",
+    "ROOT_SECURITY_DRIFT",
+    "SERVER_ORIGIN_DRIFT",
+})
 _SHA40_RE = re.compile(r"^[0-9a-f]{40}$")
 
 
@@ -63,7 +72,13 @@ def _require_base_url(value: str) -> str:
         or parts.path not in {"", "/"}
     ):
         raise DeployedActionEvidenceError("BASE_URL_INVALID")
-    return raw[:-1] if raw.endswith("/") else raw
+    normalized = raw[:-1] if raw.endswith("/") else raw
+    # H1 is production-deployment evidence, not a generic HTTPS schema comparator.
+    # Letting the caller redefine the expected origin would allow a wrong-host
+    # capture to compare cleanly against a schema generated for that same host.
+    if normalized != PRODUCTION_BASE_URL:
+        raise DeployedActionEvidenceError("BASE_URL_NOT_PRODUCTION")
+    return normalized
 
 
 def canonical_json_bytes(document: Mapping[str, Any]) -> bytes:
@@ -77,7 +92,7 @@ def canonical_json_bytes(document: Mapping[str, Any]) -> bytes:
             separators=(",", ":"),
             allow_nan=False,
         ).encode("utf-8")
-    except (TypeError, ValueError, UnicodeError) as exc:
+    except (TypeError, ValueError, UnicodeError):
         raise DeployedActionEvidenceError("SCHEMA_DOCUMENT_NOT_CANONICAL_JSON") from None
     if not encoded or len(encoded) > MAX_SCHEMA_BYTES:
         raise DeployedActionEvidenceError("SCHEMA_DOCUMENT_SIZE_INVALID")
@@ -156,7 +171,7 @@ def compare_deployed_action_schema(
 ) -> dict[str, Any]:
     """Compare expected vs captured schema and emit privacy-safe bounded evidence.
 
-    ``source_classification`` is a caller-supplied provenance label only.  Even a
+    ``source_classification`` is a caller-supplied provenance label only. Even a
     ``DEPLOYED_CAPTURE`` match leaves ``product_h1_pass`` and
     ``deployment_authorized`` false; independent audit/live provenance is a
     separate gate.
@@ -237,6 +252,8 @@ def validate_evidence_summary(summary: Mapping[str, Any]) -> None:
     }
     if not isinstance(summary, Mapping) or set(summary) != required:
         raise DeployedActionEvidenceError("EVIDENCE_SUMMARY_SHAPE_INVALID")
+    if summary.get("schema_version") != 1:
+        raise DeployedActionEvidenceError("EVIDENCE_SCHEMA_VERSION_INVALID")
     _require_candidate_sha(summary["candidate_sha"])
     _require_source_classification(summary["source_classification"])
     for key in ("server_origin_sha256", "expected_schema_sha256", "observed_schema_sha256"):
@@ -250,14 +267,27 @@ def validate_evidence_summary(summary: Mapping[str, Any]) -> None:
         value = summary.get(key)
         if not isinstance(value, int) or isinstance(value, bool) or value < 0:
             raise DeployedActionEvidenceError("EVIDENCE_COUNT_INVALID")
+    if (
+        summary["expected_schema_bytes"] > MAX_SCHEMA_BYTES
+        or summary["observed_schema_bytes"] > MAX_SCHEMA_BYTES
+        or summary["expected_operation_count"] > 1024
+        or summary["observed_operation_count"] > 1024
+        or summary["operation_drift_count"] > 1024
+        or summary["mismatch_count"] > len(_ALLOWED_MISMATCH_CODES)
+    ):
+        raise DeployedActionEvidenceError("EVIDENCE_COUNT_INVALID")
+
     codes = summary.get("mismatch_codes")
-    if not isinstance(codes, list) or len(codes) > 8 or any(
-        not isinstance(code, str) or re.fullmatch(r"[A-Z][A-Z0-9_]{0,63}", code) is None
-        for code in codes
+    if (
+        not isinstance(codes, list)
+        or len(codes) > len(_ALLOWED_MISMATCH_CODES)
+        or any(code not in _ALLOWED_MISMATCH_CODES for code in codes)
+        or codes != sorted(set(codes))
     ):
         raise DeployedActionEvidenceError("EVIDENCE_MISMATCH_CODES_INVALID")
     if summary["mismatch_count"] != len(codes):
         raise DeployedActionEvidenceError("EVIDENCE_MISMATCH_COUNT_INVALID")
+
     for key in (
         "schema_match", "product_h1_pass", "deployment_authorized",
         "production_mutated", "private_values_recorded",
@@ -268,8 +298,41 @@ def validate_evidence_summary(summary: Mapping[str, Any]) -> None:
         "product_h1_pass", "deployment_authorized", "production_mutated", "private_values_recorded"
     )):
         raise DeployedActionEvidenceError("EVIDENCE_MUST_NOT_SELF_AUTHORIZE_OR_RECORD_PRIVATE_VALUES")
-    if summary["schema_match"] is not (summary["mismatch_count"] == 0):
+
+    expected_document = build_compatible_chatgpt_action_openapi(PRODUCTION_BASE_URL)
+    expected_bytes = canonical_json_bytes(expected_document)
+    expected_digest = hashlib.sha256(expected_bytes).hexdigest()
+    expected_operation_count = _declared_operation_count(expected_document)
+    if summary["server_origin_sha256"] != _origin_sha256(PRODUCTION_BASE_URL):
+        raise DeployedActionEvidenceError("EVIDENCE_ORIGIN_BINDING_INVALID")
+    if (
+        summary["expected_schema_sha256"] != expected_digest
+        or summary["expected_schema_bytes"] != len(expected_bytes)
+        or summary["expected_operation_count"] != expected_operation_count
+    ):
+        raise DeployedActionEvidenceError("EVIDENCE_SOURCE_SCHEMA_BINDING_INVALID")
+
+    derived_match = bool(
+        summary["mismatch_count"] == 0
+        and summary["expected_schema_sha256"] == summary["observed_schema_sha256"]
+        and summary["expected_schema_bytes"] == summary["observed_schema_bytes"]
+        and summary["expected_operation_count"] == summary["observed_operation_count"]
+        and summary["operation_drift_count"] == 0
+    )
+    if summary["schema_match"] is not derived_match:
         raise DeployedActionEvidenceError("EVIDENCE_MATCH_STATE_INVALID")
+
+
+def _stat_fingerprint(info: os.stat_result) -> tuple[int, int, int, int, int, int, int]:
+    return (
+        info.st_dev,
+        info.st_ino,
+        info.st_mode,
+        info.st_nlink,
+        info.st_size,
+        getattr(info, "st_mtime_ns", int(info.st_mtime * 1_000_000_000)),
+        getattr(info, "st_ctime_ns", int(info.st_ctime * 1_000_000_000)),
+    )
 
 
 def load_observed_schema(path: str | Path) -> Mapping[str, Any]:
@@ -285,8 +348,8 @@ def load_observed_schema(path: str | Path) -> Mapping[str, Any]:
     except OSError:
         raise DeployedActionEvidenceError("OBSERVED_SCHEMA_FILE_UNSAFE") from None
     try:
-        info = os.fstat(fd)
-        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size <= 0 or info.st_size > MAX_SCHEMA_BYTES:
+        before = os.fstat(fd)
+        if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1 or before.st_size <= 0 or before.st_size > MAX_SCHEMA_BYTES:
             raise DeployedActionEvidenceError("OBSERVED_SCHEMA_FILE_UNSAFE")
         chunks: list[bytes] = []
         remaining = MAX_SCHEMA_BYTES + 1
@@ -299,6 +362,9 @@ def load_observed_schema(path: str | Path) -> Mapping[str, Any]:
         data = b"".join(chunks)
         if len(data) > MAX_SCHEMA_BYTES:
             raise DeployedActionEvidenceError("OBSERVED_SCHEMA_FILE_TOO_LARGE")
+        after = os.fstat(fd)
+        if _stat_fingerprint(before) != _stat_fingerprint(after) or len(data) != before.st_size:
+            raise DeployedActionEvidenceError("OBSERVED_SCHEMA_FILE_CHANGED_DURING_READ")
     finally:
         os.close(fd)
     try:
