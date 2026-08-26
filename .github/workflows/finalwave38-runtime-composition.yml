@@ -42,13 +42,13 @@ jobs:
           ops/telegram_write_adapter.py
           ops/phase_aware_write_adapter.py
           ops/telegram_session_lock.py
-          tests/test_runtime_bootstrap.py
           tests/test_finalwave38_runtime_composition.py
-      - name: Runtime composition and adjacent bootstrap regressions
+          tests/test_finalwave38_session_lock_security.py
+      - name: Runtime composition crash concurrency and security regressions
         run: |
           python -m unittest -v \
             tests.test_finalwave38_runtime_composition \
-            tests.test_runtime_bootstrap
+            tests.test_finalwave38_session_lock_security
       - name: Validate unified ChatGPT Action schema offline
         run: python tools/build_action_openapi.py --validate-only
       - name: Verify production WSGI import identity is lazy runtime wrapper
