@@ -9,7 +9,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from ops import passenger_evidence_hook, passenger_probe
+from ops import passenger_evidence_hook, passenger_probe, runtime_evidence
 from ops.release_guard import SafetyError
 from tools import run_passenger_evidence_probe
 
@@ -127,6 +127,25 @@ class Finalwave28PassengerV3Tests(unittest.TestCase):
                 )
             self.assertEqual(before, orphan.read_bytes())
             self.assertFalse((control / passenger_evidence_hook.ARM_MARKER_NAME).exists())
+
+    def test_shell_caller_cannot_impersonate_passenger_with_flags_or_env(self):
+        """CLI-controlled flags/env never create STRONG serving-request evidence."""
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            wsgi = root / "passenger_wsgi.py"
+            wsgi.write_text("from bridge.app import application\n", encoding="utf-8")
+            fake_module = type("FakeModule", (), {"application": object()})
+            with mock.patch.object(runtime_evidence.importlib, "import_module", return_value=fake_module), \
+                 mock.patch.dict(os.environ, {"PASSENGER_APP_ENV": "production"}, clear=False):
+                report = runtime_evidence.collect_runtime_evidence(
+                    app_root=root,
+                    wsgi_file=wsgi,
+                    application_process=True,
+                )
+            self.assertEqual("APPLICATION_PROCESS", report["collector_context"])
+            self.assertNotEqual(passenger_evidence_hook.STRONG_STATUS, report["runtime_compliance"])
+            self.assertFalse(report["serving_request_verified"])
+            self.assertTrue(runtime_evidence.system_shell_cannot_prove_passenger(report))
 
 
 if __name__ == "__main__":
