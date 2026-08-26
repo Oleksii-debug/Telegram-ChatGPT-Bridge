@@ -26,6 +26,14 @@ _GITHUB_TOKEN_CONTEXT_RE = re.compile(
     r"\$\{\{[^}\r\n]*\bgithub\s*(?:\.\s*token|\[\s*['\"]token['\"]\s*\])",
     re.IGNORECASE,
 )
+_GITHUB_BRACKET_CONTEXT_RE = re.compile(
+    r"\$\{\{[^}\r\n]*\bgithub\s*\[",
+    re.IGNORECASE,
+)
+_GITHUB_WHOLE_CONTEXT_RE = re.compile(
+    r"\$\{\{[^}\r\n]*\btojson\s*\(\s*github\s*\)",
+    re.IGNORECASE,
+)
 _DANGEROUS_PIPE_RE = re.compile(
     r"(?im)(?:curl|wget)\b[^\r\n|]*\|\s*(?:sudo\s+)?(?:sh|bash|zsh|python(?:3)?)\b"
 )
@@ -144,7 +152,11 @@ def _permissions_findings(path: str, lines: list[str]) -> list[str]:
     GitHub allows job-level overrides and compact permission maps. This project
     does not need them, so both are rejected rather than partially parsed.
     """
-    indexes = [i for i, line in enumerate(lines) if re.match(r"^\s*permissions\s*:", line)]
+    indexes = [
+        i
+        for i, line in enumerate(lines)
+        if re.match(r"^\s*['\"]?permissions['\"]?\s*:", line)
+    ]
     if len(indexes) != 1:
         return [f"workflow: exactly one top-level permissions stanza is required: {path}"]
     index = indexes[0]
@@ -207,6 +219,10 @@ def scan_workflow_text(path: str, text: str) -> list[str]:
         findings.append(f"workflow: repository/environment secret context is forbidden in tracked public CI: {path}")
     if _GITHUB_TOKEN_CONTEXT_RE.search(text):
         findings.append(f"workflow: explicit github.token exposure is forbidden: {path}")
+    if _GITHUB_BRACKET_CONTEXT_RE.search(text):
+        findings.append(f"workflow: dynamic github[...] context access is forbidden: {path}")
+    if _GITHUB_WHOLE_CONTEXT_RE.search(text):
+        findings.append(f"workflow: whole github context serialization is forbidden: {path}")
     if _DANGEROUS_PIPE_RE.search(text):
         findings.append(f"workflow: network pipe-to-interpreter command is forbidden: {path}")
     findings.extend(_permissions_findings(path, lines))

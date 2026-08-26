@@ -175,6 +175,20 @@ jobs:
         bad = self.workflow() + "      - run: echo \"" + expression + "\"\n"
         self.assertIn("github.token exposure", self.findings(bad))
 
+    def test_dynamic_github_bracket_context_is_rejected(self):
+        expression = "${{ github[format('{0}{1}', 'to', 'ken')] }}"
+        bad = self.workflow() + "      - run: echo \"" + expression + "\"\n"
+        result = self.findings(bad)
+        self.assertIn("dynamic github[...] context access is forbidden", result)
+        self.assertNotIn(expression, result)
+
+    def test_whole_github_context_serialization_is_rejected(self):
+        expression = "${{ toJSON(github) }}"
+        bad = self.workflow() + "      - run: echo \"" + expression + "\"\n"
+        result = self.findings(bad)
+        self.assertIn("whole github context serialization is forbidden", result)
+        self.assertNotIn(expression, result)
+
     def test_quoted_self_hosted_runner_is_rejected(self):
         bad = self.workflow().replace("runs-on: ubuntu-latest", "runs-on: 'self-hosted'")
         self.assertIn("approved GitHub-hosted runner", self.findings(bad))
@@ -193,6 +207,13 @@ jobs:
             "    runs-on: ubuntu-latest\n    'environment': production\n",
         )
         self.assertIn("environment binding", self.findings(bad))
+
+    def test_quoted_job_permissions_cannot_override_read_only_policy(self):
+        bad = self.workflow().replace(
+            "    runs-on: ubuntu-latest\n",
+            "    'permissions':\n      contents: write\n    runs-on: ubuntu-latest\n",
+        )
+        self.assertIn("exactly one top-level permissions stanza is required", self.findings(bad))
 
     def test_quoted_unpinned_uses_key_is_rejected(self):
         bad = self.workflow().replace(
