@@ -14,6 +14,7 @@ and requires independent Auditor adjudication of the private live provenance.
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import stat
@@ -34,7 +35,15 @@ from ops.dev06_runtime_conformance import (
 
 
 MAX_H2_EVIDENCE_BYTES = 64 * 1024
+MAX_H2_RESPONSE_NODES = 8192
+MAX_H2_RESPONSE_DEPTH = 24
+MAX_H2_RESPONSE_COLLECTION_ITEMS = 2048
+MAX_H2_RESPONSE_STRING_CHARS = 262_144
+MAX_H2_RESPONSE_TOTAL_STRING_CHARS = 2_000_000
+MAX_H2_RESPONSE_HEADERS = 128
+MAX_H2_RESPONSE_HEADER_CHARS = 8192
 _ALLOWED_CAPTURE_SOURCES = {"SOURCE_MOCK", "PRIVATE_LIVE_ACTION_CAPTURE"}
+_ALLOWED_VALIDATION_HEADERS = {"content-type", "retry-after"}
 _SHA40_RE = re.compile(r"^[0-9a-f]{40}$")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
@@ -77,6 +86,73 @@ def _expected_schema_digest() -> str:
     return schema_sha256(build_compatible_chatgpt_action_openapi(PRODUCTION_BASE_URL))
 
 
+def _bounded_private_json(value: Any) -> None:
+    """Bound private response work without retaining or exporting response values."""
+    state = {"nodes": 0, "chars": 0}
+
+    def walk(item: Any, depth: int) -> None:
+        state["nodes"] += 1
+        if state["nodes"] > MAX_H2_RESPONSE_NODES or depth > MAX_H2_RESPONSE_DEPTH:
+            raise ActionE2EEvidenceError("H2_RESPONSE_PAYLOAD_BOUNDS_INVALID")
+        if item is None or isinstance(item, bool):
+            return
+        if isinstance(item, int) and not isinstance(item, bool):
+            return
+        if isinstance(item, float):
+            if not math.isfinite(item):
+                raise ActionE2EEvidenceError("H2_RESPONSE_PAYLOAD_BOUNDS_INVALID")
+            return
+        if isinstance(item, str):
+            if len(item) > MAX_H2_RESPONSE_STRING_CHARS:
+                raise ActionE2EEvidenceError("H2_RESPONSE_PAYLOAD_BOUNDS_INVALID")
+            state["chars"] += len(item)
+            if state["chars"] > MAX_H2_RESPONSE_TOTAL_STRING_CHARS:
+                raise ActionE2EEvidenceError("H2_RESPONSE_PAYLOAD_BOUNDS_INVALID")
+            return
+        if isinstance(item, list):
+            if len(item) > MAX_H2_RESPONSE_COLLECTION_ITEMS:
+                raise ActionE2EEvidenceError("H2_RESPONSE_PAYLOAD_BOUNDS_INVALID")
+            for child in item:
+                walk(child, depth + 1)
+            return
+        if isinstance(item, Mapping):
+            if len(item) > MAX_H2_RESPONSE_COLLECTION_ITEMS:
+                raise ActionE2EEvidenceError("H2_RESPONSE_PAYLOAD_BOUNDS_INVALID")
+            for key, child in item.items():
+                if not isinstance(key, str) or len(key) > 256:
+                    raise ActionE2EEvidenceError("H2_RESPONSE_PAYLOAD_BOUNDS_INVALID")
+                walk(child, depth + 1)
+            return
+        raise ActionE2EEvidenceError("H2_RESPONSE_PAYLOAD_BOUNDS_INVALID")
+
+    walk(value, 0)
+
+
+def _validation_headers(headers: Mapping[str, Any]) -> dict[str, str]:
+    """Copy only non-secret headers required by the response contract validator.
+
+    Unknown headers are deliberately ignored without coercing their values. This
+    prevents Authorization/Cookie/private diagnostic material from being touched
+    by the public-evidence layer merely because it was present on the live HTTP
+    response.
+    """
+    if not isinstance(headers, Mapping) or len(headers) > MAX_H2_RESPONSE_HEADERS:
+        raise ActionE2EEvidenceError("H2_RESPONSE_HEADERS_INVALID")
+    selected: dict[str, str] = {}
+    seen: set[str] = set()
+    for key, value in headers.items():
+        if not isinstance(key, str) or len(key) > 256:
+            raise ActionE2EEvidenceError("H2_RESPONSE_HEADERS_INVALID")
+        folded = key.casefold()
+        if folded not in _ALLOWED_VALIDATION_HEADERS:
+            continue
+        if folded in seen or not isinstance(value, str) or len(value) > MAX_H2_RESPONSE_HEADER_CHARS:
+            raise ActionE2EEvidenceError("H2_RESPONSE_HEADERS_INVALID")
+        seen.add(folded)
+        selected[key] = value
+    return selected
+
+
 def build_read_capture(
     candidate_sha: str,
     operation_id: str,
@@ -90,10 +166,10 @@ def build_read_capture(
 ) -> dict[str, Any]:
     """Validate one already-observed read response and emit no response content.
 
-    ``payload`` and ``headers`` are used only for in-memory conformance checking.
-    They are never copied to the returned capture. The caller is responsible for
-    acquiring them in an authorized private environment; this function never
-    performs a request itself.
+    ``payload`` and the two response-contract headers are used only for bounded
+    in-memory conformance checking. Payload/header values are never copied to the
+    returned capture. Unknown headers, including Authorization/Cookie values,
+    are not coerced or passed to the schema validator at all.
     """
     sha = _require_sha40(candidate_sha)
     route = _read_action(operation_id)
@@ -106,9 +182,11 @@ def build_read_capture(
     if not isinstance(headers, Mapping):
         raise ActionE2EEvidenceError("H2_RESPONSE_HEADERS_INVALID")
 
+    _bounded_private_json(payload)
+    safe_headers = _validation_headers(headers)
     document = build_compatible_chatgpt_action_openapi(PRODUCTION_BASE_URL)
     errors = validate_action_runtime_response(
-        document, route.action_operation_id or "", status, headers, payload
+        document, route.action_operation_id or "", status, safe_headers, payload
     )
     capture = {
         "schema_version": 1,
