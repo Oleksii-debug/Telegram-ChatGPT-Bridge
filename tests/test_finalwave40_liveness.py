@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import multiprocessing
+import os
 import sqlite3
 import tempfile
 import time
@@ -12,6 +14,7 @@ from bridge.archive import ArchiveBuilder, ArchiveLimits
 from bridge.backend import TelethonReadBackend, TelethonReadConfig
 from bridge.errors import BridgeError
 from bridge.storage import FileRecordStore
+from ops.telegram_session_lock import TelegramSessionLock
 from ops.telegram_write_adapter import (
     DeterministicFakeTelegramClient,
     TelegramContractError,
@@ -19,6 +22,14 @@ from ops.telegram_write_adapter import (
     TelegramWriteAdapter,
 )
 from ops.write_safety import PersistentWriteStore
+
+
+def _hold_session_lock_until_killed(path: str, ready) -> None:
+    lock = TelegramSessionLock(path, timeout_seconds=1).acquire()
+    ready.send("locked")
+    ready.close()
+    while True:
+        time.sleep(60)
 
 
 class ArchiveLivenessTests(unittest.TestCase):
@@ -53,6 +64,26 @@ class ArchiveLivenessTests(unittest.TestCase):
         self.assertEqual(cm.exception.status, 504)
         self.assertTrue(cm.exception.details.get("retryable"))
         self.assert_no_archive_artifacts()
+
+    def test_archive_deadline_during_stream_cleans_partial_state(self) -> None:
+        source = self.add_file("slow.bin", b"x" * (4 * 1024 * 1024))
+        clock = {"now": -0.1}
+
+        def monotonic() -> float:
+            clock["now"] += 0.1
+            return clock["now"]
+
+        builder = ArchiveBuilder(
+            files=self.store,
+            output_dir=self.output,
+            limits=ArchiveLimits(max_build_seconds=1.0),
+            monotonic=monotonic,
+        )
+        with self.assertRaises(BridgeError) as cm:
+            builder.build([source.file_ref])
+        self.assertEqual(cm.exception.code, "archive_timeout")
+        self.assert_no_archive_artifacts()
+        self.assertIsNotNone(self.store.get(source.file_ref))
 
     def test_archive_cancellation_during_stream_cleans_partial_state(self) -> None:
         source = self.add_file("large.bin", b"x" * (4 * 1024 * 1024))
@@ -188,6 +219,31 @@ class ExistingBoundaryEvidenceTests(unittest.TestCase):
             finally:
                 blocker.rollback()
                 blocker.close()
+
+    @unittest.skipUnless(os.name == "posix", "POSIX flock evidence")
+    def test_session_lock_holder_death_releases_kernel_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "private"
+            root.mkdir(mode=0o700)
+            lock_path = root / "telegram-session.lock"
+            ctx = multiprocessing.get_context("fork")
+            receiver, sender = ctx.Pipe(duplex=False)
+            process = ctx.Process(target=_hold_session_lock_until_killed, args=(str(lock_path), sender))
+            process.start()
+            sender.close()
+            try:
+                self.assertTrue(receiver.poll(3.0), "child did not acquire session lock")
+                self.assertEqual(receiver.recv(), "locked")
+                process.terminate()
+                process.join(3.0)
+                self.assertFalse(process.is_alive(), "terminated lock holder did not exit")
+                with TelegramSessionLock(lock_path, timeout_seconds=1):
+                    pass
+            finally:
+                receiver.close()
+                if process.is_alive():
+                    process.kill()
+                    process.join(3.0)
 
 
 if __name__ == "__main__":
