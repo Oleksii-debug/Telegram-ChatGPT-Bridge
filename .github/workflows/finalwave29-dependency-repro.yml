@@ -1,0 +1,50 @@
+name: FINALWAVE29 Dependency Repro
+
+on:
+  pull_request:
+    paths:
+      - 'requirements.txt'
+      - 'requirements.lock'
+      - 'passenger_wsgi.py'
+      - 'ops/release_package.py'
+      - 'ops/dependency_repro.py'
+      - 'tools/verify_dependency_repro.py'
+      - 'tests/test_release_package.py'
+      - 'tests/test_finalwave29_dependency_repro.py'
+      - '.github/workflows/finalwave29-dependency-repro.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  dependency-repro:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout full history
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Set up Python 3.11
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.11'
+      - name: Compile dependency verification surface
+        run: >-
+          python -m py_compile
+          passenger_wsgi.py
+          ops/release_package.py
+          ops/dependency_repro.py
+          tools/verify_dependency_repro.py
+          tests/test_release_package.py
+          tests/test_finalwave29_dependency_repro.py
+      - name: Run package and adversarial dependency contracts
+        run: python -m unittest -v tests.test_release_package tests.test_finalwave29_dependency_repro
+      - name: Real clean fetch then forced-offline install
+        run: python tools/verify_dependency_repro.py --repo .
+      - name: Current-tree secret scan
+        if: always()
+        run: python tools/secret_scan.py --mode current
+      - name: Full-history secret scan
+        if: always()
+        run: python tools/secret_scan.py --mode history
