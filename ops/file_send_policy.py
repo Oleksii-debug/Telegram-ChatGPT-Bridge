@@ -10,6 +10,8 @@ from pathlib import PurePath
 from typing import Iterable, Sequence
 from urllib.parse import urlsplit, urlunsplit
 
+from bridge.filenames import safe_filename as normalize_filename
+
 
 class FileSendPolicyError(RuntimeError):
     def __init__(self, code: str, *, status: int = 400):
@@ -88,14 +90,21 @@ def safe_filename(value: str) -> str:
     if not isinstance(value, str):
         raise FileSendPolicyError("invalid_file_name")
     name = value.strip()
-    if not name or len(name) > 180 or any(ord(ch) < 32 for ch in name):
+    if (
+        not name
+        or len(name) > 180
+        or any(ord(ch) < 32 or 0xD800 <= ord(ch) <= 0xDFFF for ch in name)
+    ):
         raise FileSendPolicyError("invalid_file_name")
     if "/" in name or "\\" in name or name in {".", ".."}:
         raise FileSendPolicyError("invalid_file_name")
     # PurePath catches platform-shaped basename attempts without touching the filesystem.
     if PurePath(name).name != name:
         raise FileSendPolicyError("invalid_file_name")
-    return name
+    # Use the same NFC/Windows/confusable/UTF-8-byte policy as archive/media
+    # metadata after rejecting genuine path input. This keeps the external
+    # reference JSON and eventual Telegram-visible name in one namespace.
+    return normalize_filename(name, "file", limit=180)
 
 
 def validate_https_url(url: str) -> str:
