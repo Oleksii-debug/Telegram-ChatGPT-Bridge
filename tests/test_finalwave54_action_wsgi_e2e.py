@@ -618,13 +618,33 @@ class ActionMockE2ETests(unittest.TestCase):
             results = [future.result() for future in (pool.submit(worker), pool.submit(worker))]
 
         for result in results:
-            self.assertEqual(result["status"], 200, result)
+            self.assertIn(result["status"], {200, 409}, result)
             self._assert_response_matches_schema("commitTelegramSend", result)
-        self.assertEqual(
-            sorted(result["json"]["data"]["idempotent_replay"] for result in results),
-            [False, True],
-        )
+        self.assertEqual(sum(result["status"] == 200 for result in results), 1)
         self.assertEqual(len(self.client.external_writes), 1)
+
+        terminal_replay = self._call_success("commitTelegramSend", commit_body)
+        self.assertTrue(terminal_replay["json"]["data"]["idempotent_replay"])
+        self.assertEqual(len(self.client.external_writes), 1)
+
+    def test_every_action_is_bearer_hidden_before_request_parsing(self) -> None:
+        before_backend = len(self.backend.calls)
+        before_writes = len(self.client.external_writes)
+        for route in CANONICAL_ROUTES:
+            if route.exposure is not ApiExposure.ACTION:
+                continue
+            with self.subTest(operation_id=route.action_operation_id):
+                result = wsgi_request(
+                    self.app,
+                    route.path,
+                    {},
+                    method=route.method,
+                    token=None,
+                )
+                self.assertEqual(result["status"], 404, result)
+                self._assert_response_matches_schema(route.action_operation_id or "", result)
+        self.assertEqual(len(self.backend.calls), before_backend)
+        self.assertEqual(len(self.client.external_writes), before_writes)
 
     def test_read_and_write_rate_limits_emit_contractual_retry_after(self) -> None:
         read_limited = self._build_app(read_limiter=DenyReadLimiter(7))
