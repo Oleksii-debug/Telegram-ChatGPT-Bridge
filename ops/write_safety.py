@@ -82,27 +82,28 @@ def _canonical_json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
 
 
-def _require_hash(value: str, code: str) -> str:
+def _require_hash(value: Any, code: str) -> str:
     if not isinstance(value, str) or len(value) != 64 or any(ch not in "0123456789abcdef" for ch in value):
         raise WriteSafetyError(code, status=400)
     return value
 
 
 def _positive_int(value: Any, code: str) -> int:
-    if isinstance(value, bool):
+    # Action/OpenAPI integer fields are strict JSON integers. Numeric strings
+    # must not be silently coerced because that makes runtime acceptance wider
+    # than the generated schema and hides client contract defects.
+    if isinstance(value, bool) or not isinstance(value, int):
         raise WriteSafetyError(code, status=400)
-    try:
-        number = int(value)
-    except (TypeError, ValueError) as exc:
-        raise WriteSafetyError(code, status=400) from exc
-    if number <= 0:
+    if value <= 0:
         raise WriteSafetyError(code, status=400)
-    return number
+    return value
 
 
 def _safe_id(value: Any, code: str, *, max_len: int = 128) -> str:
+    # Action/OpenAPI target/source/file IDs are strings. Do not stringify ints
+    # or arbitrary objects at the runtime boundary.
     if not isinstance(value, str):
-        value = str(value or "")
+        raise WriteSafetyError(code, status=400)
     value = value.strip()
     if not value or len(value) > max_len or any(ord(ch) < 32 for ch in value):
         raise WriteSafetyError(code, status=400)
@@ -160,7 +161,7 @@ def normalize_write_payload(action: WriteAction | str, payload: Mapping[str, Any
         if not isinstance(item, Mapping):
             raise WriteSafetyError("invalid_file_reference", status=400)
         file_id = _safe_id(item.get("file_id"), "invalid_file_reference", max_len=128)
-        digest = _require_hash(str(item.get("sha256") or ""), "file_hash_required")
+        digest = _require_hash(item.get("sha256"), "file_hash_required")
         size = _positive_int(item.get("size"), "invalid_file_size")
         if size > 100 * 1024 * 1024:
             raise WriteSafetyError("file_too_large", status=413)
@@ -173,7 +174,9 @@ def normalize_write_payload(action: WriteAction | str, payload: Mapping[str, Any
         raise WriteSafetyError("invalid_file_count", status=400)
     if sum(item["size"] for item in files) > 250 * 1024 * 1024:
         raise WriteSafetyError("files_total_too_large", status=413)
-    voice_note = bool(payload.get("voice_note", False))
+    voice_note = payload.get("voice_note", False)
+    if not isinstance(voice_note, bool):
+        raise WriteSafetyError("invalid_voice_note", status=400)
     if voice_note and len(files) != 1:
         raise WriteSafetyError("voice_note_requires_single_file", status=400)
     result: dict[str, Any] = {"target": target, "files": files, "caption": caption, "voice_note": voice_note}
