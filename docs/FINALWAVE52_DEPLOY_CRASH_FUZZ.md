@@ -48,24 +48,39 @@ When a committed pre-switch transaction fails after quiesce, recovery restarts a
 
 Required integration repair: make pre-live recovery lifecycle progress explicit or use an audited idempotency/receipt protocol for mutating hooks. A process loss after dispatch must converge to a safe durable/manual ambiguity without blind repeated mutation.
 
+### FW52-H6 — SWITCHED/VERIFIED can become DEPLOYED with no previous release available
+
+For `SWITCHED` or `VERIFIED` with the candidate active, role01 checks whether the previous release is available only when candidate verification fails and rollback is required. If the previous release directory has disappeared but the candidate is currently healthy, recovery completes the candidate lifecycle and writes `DEPLOYED`. The transaction is then terminal-successful even though its automated last-known-good rollback target is absent.
+
+Required integration repair: before any post-switch recovery can terminalize `DEPLOYED`, require independently validated rollback availability bound to the transaction/backup evidence. Missing, symlinked, unsafe, or provenance-unverified previous release must block successful terminalization even if the candidate is healthy, unless an independently verified backup restoration path is available and transaction-bound.
+
+### FW52-H7 — rollback accepts an unverified tampered previous release tree
+
+The transaction journal binds only `previous_sha`; rollback resolves the directory named by that SHA and switches `active` to it without verifying its code bytes against a captured previous-release manifest or the predeploy code backup. The synthetic role01 harness can modify the previous tree while preserving the SHA-shaped directory name; when candidate verification is forced to fail, rollback switches to the modified previous tree, its hook-based identity check succeeds, and the journal terminalizes `ROLLED_BACK`.
+
+Required integration repair: capture immutable previous-release provenance before mutation and bind it to the transaction/backup record. Before rollback switch/restart, verify the previous release's immutable application payload (and persistent-binding topology) against that durable provenance, or restore and verify from a transaction-bound backup whose archive/hash evidence is itself durably recorded. A directory name equal to a Git SHA is not sufficient rollback provenance.
+
 ## Boundary matrix conclusion
 
-The locally inspectable/durable boundaries are materially stronger than the uninspectable hook boundaries:
+The locally inspectable/durable boundaries are materially stronger than the uninspectable hook and rollback-provenance boundaries:
 
 - approval consumption: committed marker is externally inspectable and duplicate consumption is blocked;
 - materialize/final release: candidate tree and journal provenance are inspectable;
-- backup: recovery does not re-run backup when journal remains `QUIESCED`/`BACKED_UP`;
+- backup: recovery does not re-run backup when journal remains `QUIESCED`/`BACKED_UP`, but exact backup path/hash is not currently journal-bound for automated recovery;
 - candidate symlink switch: `active` target makes switch completion inspectable; no second candidate switch is needed;
-- rollback symlink restore: `active==previous` makes physical link restoration inspectable; recovery need not restore the link a second time;
+- rollback symlink restore: `active==previous` makes physical link restoration inspectable, but previous-content authenticity is not proved;
 - running identity, unauth smoke, auth smoke: read-only evidence may safely be repeated;
-- restart/reload and resume/unquiesce: external mutations have no durable receipt/idempotency boundary and are replayed in several recovery paths.
+- restart/reload and resume/unquiesce: external mutations have no durable receipt/idempotency boundary and are replayed in several recovery paths;
+- previous release: name/path existence is insufficient to prove last-known-good content integrity or rollback availability.
 
-The existing A01-11 candidate symlink switch crash seam is substantially repaired: `BACKED_UP + active==candidate` is locally observable and recovered without a second candidate switch after marker/runtime/candidate/previous-release validation. Existing tests also cover missing/tampered committed markers, missing previous release, candidate tamper rollback, lock contention, state-boundary process loss, and repeated terminal recovery.
+The existing A01-11 candidate symlink switch crash seam is substantially repaired: `BACKED_UP + active==candidate` is locally observable and recovered without a second candidate switch after marker/runtime/candidate/previous-release validation. Existing tests also cover missing/tampered committed markers, missing previous release in the BACKED_UP observed-switch classifier, candidate tamper rollback, lock contention, state-boundary process loss, and repeated terminal recovery. Those tests do not cover the post-SWITCHED healthy-candidate missing-previous case or previous-content tamper before rollback.
+
+Control-plane file topology tamper (for example missing/unsafe runtime or hook files) is validated before execute reconciliation and therefore fails closed without further physical deployment mutation; that is a safe manual-ambiguity boundary, not a claimed terminal recovery path.
 
 The durability claim remains narrow: process loss on the same POSIX host/filesystem. No full host/power-loss durability claim is made here.
 
 ## Integration recommendation
 
-Do not integrate PR #66 as complete durable-boundary closure yet. Preserve its valid runtime-manifest terminalization and fsync work, then address FW52-H1 through FW52-H5 and convert the FINALWAVE-52 falsification scenarios into positive safe-contract regressions. The preferred architecture is to keep inspectable physical transitions recoverable by observation while making non-inspectable mutating hook dispatches either idempotency-keyed/receipt-bound or fail closed to durable/manual ambiguity after an uncertain dispatch. Canonical provenance must explicitly account any selected source/tests; do not relax provenance to obtain green CI.
+Do not integrate PR #66 as complete durable-boundary closure yet. Preserve its valid runtime-manifest terminalization and fsync work, then address FW52-H1 through FW52-H7 and convert the FINALWAVE-52 falsification scenarios into positive safe-contract regressions. The preferred architecture is to keep inspectable physical transitions recoverable by observation, bind previous-release/backup provenance durably before the candidate switch, and make non-inspectable mutating hook dispatches either idempotency-keyed/receipt-bound or fail closed to durable/manual ambiguity after an uncertain dispatch. Canonical provenance must explicitly account any selected source/tests; do not relax provenance to obtain green CI.
 
 `USER_TELEGRAM_AUTH_NOT_YET_REQUIRED` remains authoritative.
