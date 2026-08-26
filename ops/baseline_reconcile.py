@@ -203,9 +203,10 @@ def main(argv=None) -> int:
                 raise SafetyError("directory reconciliation arguments incomplete")
             result=reconcile(Path(args.recovered_root),Path(args.repo),args.git_ref)
         write_json_atomic(Path(args.output),result,mode=0o600)
-    except (SafetyError,OSError,json.JSONDecodeError) as exc:
-        print(f"RECONCILIATION_BLOCKED: {type(exc).__name__}"); return 2
+    except (SafetyError,OSError,json.JSONDecodeError):
+        # Public/support stdout intentionally exposes only one stable result code.
+        print("RECONCILIATION_BLOCKED"); return 2
     print("RECONCILIATION_READY_FOR_AUDIT"); return 0
 
-if __name__ == "__main__":
+if __name__=="__main__":
     raise SystemExit(main())
