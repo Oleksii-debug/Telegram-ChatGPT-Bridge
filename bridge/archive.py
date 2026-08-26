@@ -117,7 +117,11 @@ class ArchiveBuilder:
             raise BridgeError("Archive source integrity changed", status=409, code="archive_source_changed")
 
     def build(self, file_refs: Iterable[str], *, archive_name: str = "telegram-files.zip") -> FileRecord:
-        refs = list(dict.fromkeys(file_refs))
+        refs = list(file_refs)
+        # The public Action schema declares file_refs uniqueItems=true. Runtime
+        # must reject a duplicate instead of silently normalizing it away.
+        if len(refs) != len(dict.fromkeys(refs)):
+            raise BridgeError("Duplicate archive file reference", code="invalid_list")
         if not refs:
             raise BridgeError("No files selected", code="empty_archive")
         if len(refs) > self.limits.max_members:
