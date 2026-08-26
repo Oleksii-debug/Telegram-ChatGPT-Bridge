@@ -57,7 +57,7 @@ def _validate_instance(instance: Any, schema: Mapping[str, Any], *, path: str = 
     """Validate the bounded JSON-Schema subset emitted for Action requests.
 
     This deliberately fails closed on malformed/unknown schema constructs used by
-    the request contract.  Error strings contain field paths/schema categories,
+    the request contract. Error strings contain field paths/schema categories,
     never request values.
     """
 
@@ -180,7 +180,7 @@ class ActionRequestGuard:
         if not is_zero:
             return environ
         normalized = dict(environ)
-        # WSGI Content-Length: 0 means exactly zero entity bytes.  Never inspect
+        # WSGI Content-Length: 0 means exactly zero entity bytes. Never inspect
         # bytes a non-conforming upstream stream may expose past that boundary.
         normalized["wsgi.input"] = io.BytesIO(b"")
         return normalized
@@ -205,7 +205,7 @@ class ActionRequestGuard:
         if spec.operation_class not in {OperationClass.WRITE_PREVIEW, OperationClass.WRITE_COMMIT}:
             return self.application(normalized, start_response)
 
-        # Authentication must precede quota consumption.  Delegate auth failures
+        # Authentication must precede quota consumption. Delegate auth failures
         # to the canonical app so hidden-404 behavior remains exactly unchanged.
         auth = getattr(getattr(self.application, "read_app", None), "auth", None)
         if auth is None:
@@ -218,7 +218,7 @@ class ActionRequestGuard:
         read_app = self.application.read_app
         request_id = read_app._request_id()
         try:
-            # Separate bucket from semantic preview/commit authorization.  Every
+            # Separate bucket from semantic preview/commit authorization. Every
             # authenticated attempt is bounded even when JSON is malformed.
             self.application._write_limiter.consume(
                 _REQUEST_ACTOR_SHA256,
@@ -233,7 +233,7 @@ class ActionRequestGuard:
                     code="invalid_request_contract",
                     details={"count": len(errors)},
                 )
-        except BaseException as exc:
+        except Exception as exc:
             return self.application._write_error(start_response, exc, request_id)
 
         return self.application(self._canonicalize_body(normalized, body), start_response)
