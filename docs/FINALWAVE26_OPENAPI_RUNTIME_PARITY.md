@@ -4,72 +4,80 @@ Status: isolated specialist evidence for canonical integration. This document do
 
 ## Canonical anchor
 
-This lane started from canonical PR #9 exact head `84691967e5363bc4b88dfae97371d7bf329c105d` and only writes to `finalwave26/26-openapi-runtime-parity`.
+This lane started from canonical PR #9 exact head `84691967e5363bc4b88dfae97371d7bf329c105d` and writes only to `finalwave26/26-openapi-runtime-parity`.
 
-The canonical source model at that anchor has 19 WSGI/runtime routes and 17 ChatGPT Action operations. `/health` and the authenticated-or-signed raw-file GET are intentionally runtime-only. All 17 Action operations are protected POST operations; the eight write operations form four preview/commit pairs for SEND, REPLY, FORWARD, and SEND_FILES. No setup/login/session/2FA route is Action-visible.
+The exact anchor has 19 WSGI/runtime routes and 17 ChatGPT Action operations. `/health` and authenticated-or-signed raw-file GET are intentionally runtime-only. All 17 Action operations are protected POST operations. Eight write operations are four reciprocal preview/commit pairs for SEND, REPLY, FORWARD and SEND_FILES. No setup/login/session/2FA route is Action-visible.
 
-## Defects reproduced
+## Fresh defect reconstruction
 
-Three request-boundary gaps remained after the static route/OpenAPI work was already strong:
+Static route/OpenAPI parity was already strong. Three request-boundary gaps were independently reproduced from the exact anchor:
 
-1. Write preview normalization could silently coerce JSON values that the generated OpenAPI rejects. Examples included a float/numeric string becoming an integer ID, a non-string target becoming text, and a string such as `"false"` becoming truthy for `voice_note`.
-2. The core JSON reader interpreted explicit `Content-Length: 0` as an unknown-length read and could consume bytes exposed by a non-conforming upstream stream. WSGI/HTTP semantics require zero to mean zero entity bytes.
-3. Authenticated malformed/unknown write attempts reached body parsing before the semantic `WriteEndpointPolicy.authorize()` call. Consequently, repeatedly invalid bodies did not consume the write operation quota.
+1. **B21-01 — strict write JSON type drift.** Runtime normalization can coerce values rejected by generated OpenAPI: float/numeric-string message IDs, non-string targets, string file size and string `voice_note`.
+2. **B21-02 — explicit Content-Length zero framing.** The core JSON reader can treat `Content-Length: 0` as unknown-length input and inspect stream bytes outside the declared entity body.
+3. **B21-03 — malformed authenticated write attempts before B8.** Invalid write bodies can fail before semantic operation authorization/rate limiting.
 
-A suspected Passenger phantom-write route was separately falsified before repair: `passenger_wsgi.py` retains the recovered `from bridge.app import application` contract, while package initialization aliases `bridge.app.application` to `bridge.runtime_wsgi.application`. Existing and FINALWAVE-26 tests require that identity and require import to remain Telethon/network-free.
+A suspected Passenger phantom-write route was separately falsified. `passenger_wsgi.py` retains the recovered `from bridge.app import application` contract, while package initialization intentionally rebinds `bridge.app.application` to lazy `bridge.runtime_wsgi.application`. Existing and FINALWAVE-26 tests require that exact identity and require import to remain Telethon/network-free.
 
-## Repair
+## Domain convergence with parallel specialist lanes
 
-`bridge.action_request_guard.ActionRequestGuard` is now placed around the application created by the lazy production runtime WSGI builder.
+After the reproducer was written, two stronger non-overlapping specialist repairs appeared from the same exact canonical parent:
 
-The guard does four narrowly scoped things:
+- FINALWAVE-46 / PR #83 directly hardens `BridgeApplication._read_json()` and owns B21-02 plus the wider parser/framing/Unicode/non-finite-number fuzz boundary.
+- FINALWAVE-22 / PR #67 directly adds an authenticated pre-parse persistent write request bucket in `UnifiedBridgeApplication` and owns B21-03 plus production SQLite multi-process/restart B8 semantics.
 
-- resolves a request through the same `ops.openapi_registry` operation registry used to generate the Action schema;
-- for write preview/commit operations only, authenticates first and consumes a separate persistent `request-attempt:<operationId>` quota before content-type/body parsing;
-- parses the bounded JSON once, validates its exact JSON types/required fields/additional-property policy/ranges/patterns/array constraints against the canonical request schema, and returns a stable value-free `invalid_request_contract` error on mismatch;
-- treats explicit `Content-Length: 0` as exactly zero bytes before any downstream parser can inspect the stream.
+FINALWAVE-26 therefore removed its temporary duplicate zero-length and pre-body-rate-limit implementation/tests. Canonical integration should use the strongest single owner for each control instead of stacking duplicate wrappers.
 
-After validation, the body is canonically re-encoded into the WSGI environment and passed to the existing unified application. The existing semantic preview/commit rate-limit bucket remains separate and still authorizes the operation. Preview still performs no Telegram write; commit still requires its valid preview/idempotency/explicit-user-command controls.
+## FINALWAVE-26 repair — B21-01 only
 
-The guard stores or logs no request values. Authentication failures retain the existing hidden-404 behavior and do not consume an authenticated write-attempt bucket. Unknown/non-Action routes continue through the canonical application, which fails closed as before.
+`bridge.action_request_guard.ActionRequestGuard` is wired around the application created by the lazy production runtime WSGI builder.
 
-## Runtime and persistence model
+For canonical write preview/commit operations only, it:
 
-Production `bridge.runtime.build_production_application_from_env()` already supplies a persistent SQLite write limiter under the owner-private runtime root. FINALWAVE-26 deliberately reuses that limiter for request-attempt buckets rather than adding process-local counters.
+1. resolves the route through the same `ops.openapi_registry` registry that generates the Action document;
+2. preserves the existing hidden-404 authentication boundary and does not read an unauthorized request body;
+3. parses the body with the canonical bounded parser;
+4. validates exact JSON types, required/additional-property policy, ranges, patterns, array constraints, enum and const semantics against the same canonical request schema used for generated OpenAPI;
+5. returns stable value-free `invalid_request_contract` on mismatch;
+6. canonically re-encodes a validated body and then delegates to existing `UnifiedBridgeApplication`, preserving preview/commit/idempotency/effect semantics.
 
-Therefore request-attempt quota survives application reconstruction/restart and shares the existing SQLite transaction/concurrency/failure policy. A limiter outage fails closed with HTTP 503 before preview creation. The request-attempt bucket uses a fixed non-private actor digest and operation ID; bearer values, Telegram identifiers, message text, filenames, and other private request content are not rate-limit keys.
+The validator rejects Python/JSON boolean values where the schema says integer, so `true` cannot masquerade as an integer. Public error details expose only a mismatch count; request values are not logged or persisted by this layer.
 
-## Executable matrix
+Read operations and unknown/non-Action routes pass through unchanged. Unknown routes still fail closed in the canonical application.
+
+## Executable FINALWAVE-26 matrix
 
 `tests/test_finalwave26_openapi_runtime_parity.py` covers:
 
 - exact 19-runtime / 17-Action inventory and bidirectional registry/OpenAPI parity;
-- absence of private setup/login/session/2FA surface in the Action document;
-- strict rejection of float/string integer coercion, non-string targets, string file size, and string boolean `voice_note` before preview/effect;
-- strict commit `explicit_user_command` boolean/const semantics;
-- valid SEND preview still succeeds while creating no external Telegram write;
-- explicit `Content-Length: 0` ignores bytes outside the declared entity body;
-- malformed/unknown authenticated bodies consume the pre-body attempt quota and then rate-limit;
-- unauthorized writes retain hidden 404 and do not consume the authenticated attempt bucket;
-- unknown write-like paths fail closed without preview/effect.
-
-`tests/test_finalwave26_request_guard_persistence.py` covers:
-
-- malformed request-attempt quota surviving a new application/limiter instance over the same private SQLite state;
-- two independent spawned processes contending for a limit-1 request-attempt bucket with exactly one allowed result;
-- persistent limiter failure returning 503 before preview/writer need.
+- absence of private setup/login/session/2FA surface from the Action document;
+- all eight write operations having concrete canonical request schemas;
+- all four preview families rejecting representative type coercions before preview/effect;
+- all four commit families requiring exact boolean `true` for `explicit_user_command` rather than `1`, `"true"` or `false`;
+- all four valid preview families retaining 200 + preview-token + zero-external-effect semantics;
+- unauthorized write hidden 404 before guard body read;
+- read Action pass-through;
+- unknown write-like route hidden/fail-closed with no external effect.
 
 `tests/test_finalwave26_wsgi_guard_wiring.py` covers:
 
 - the lazy production runtime builder being wrapped exactly once;
-- the recovered Passenger import contract still resolving to `bridge.runtime_wsgi.application` without importing Telethon.
+- the recovered Passenger import contract resolving to `bridge.runtime_wsgi.application` without importing Telethon.
 
-All tests are synthetic/source/runtime tests and never contact Telegram or production.
+FINALWAVE-54 / PR #79 independently provides the broader all-17-operation generated-request-schema -> actual WSGI -> declared-response-schema matrix, restart/idempotency/concurrency and 429 conformance. Canonical integrator should retain that independent exhaustive oracle rather than duplicating it here.
+
+All FINALWAVE-26 tests are synthetic/source/runtime tests and never contact Telegram or production.
 
 ## Integration recommendation
 
-Canonical integrator should semantically select the narrow `bridge/action_request_guard.py` plus `bridge/runtime_wsgi.py` wiring and the FINALWAVE-26 tests/documentation after exact-head CI and independent review. Preserve the single-source request schema relationship with `ops.openapi_registry`; do not replace the guard with duplicated ad-hoc write field coercion.
+Do not merge specialist PRs wholesale. On a fresh canonical SHA, semantically compose:
 
-If canonical PR #9 advances before integration, re-run the adversarial tests against the new exact canonical head first. If another accepted lane introduces equivalent strict request validation or pre-body persistent attempt throttling, prefer the single coherent implementation and retain these tests as the falsification suite.
+1. FINALWAVE-26 `bridge/action_request_guard.py` + `bridge/runtime_wsgi.py` wiring + strict write-schema regressions for B21-01;
+2. FINALWAVE-46 direct core parser fix/tests for B21-02 if independently accepted;
+3. FINALWAVE-22 direct `UnifiedBridgeApplication` pre-parse quota + production SQLite limiter hardening/tests for B21-03 if independently accepted;
+4. FINALWAVE-54 exhaustive 17-operation WSGI Action oracle for cross-layer regression coverage.
 
-A generic Recovery Guard failure caused solely by isolated-overlay provenance is not permission to weaken provenance, approval, secret, deployment, or Recovery Guard controls.
+Preserve `ops.openapi_registry` as the single request-schema truth source. Do not replace this with duplicated ad-hoc field coercion. Register exact selected paths/source SHAs in canonical provenance, then run one exact-SHA Recovery Guard, exact-ref PREPARE, current-tree/full-history secret scans and independent audit.
+
+If canonical advances first or another accepted lane introduces equivalent strict request-schema validation, rerun the FINALWAVE-26 adversarial matrix against that exact head and prefer one coherent implementation.
+
+Generic Recovery Guard failure caused by isolated-overlay provenance or the inherited canonical A01-11 deployment-recovery defect is not permission to weaken provenance, approval, secret, deployment, or recovery controls.
