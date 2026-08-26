@@ -1,0 +1,67 @@
+name: FINALWAVE56 Acceptance D E Audit
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  AUDITED_SHA: 84691967e5363bc4b88dfae97371d7bf329c105d
+
+jobs:
+  acceptance-de:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout full history
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+          clean: true
+          lfs: false
+          submodules: false
+      - name: Set up Python 3.11
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.11'
+      - name: Verify exact audited canonical parent and QA-only overlay
+        run: |
+          test "$(git rev-parse HEAD^1)" = "$AUDITED_SHA"
+          test "$(git merge-base HEAD^1 HEAD^2)" = "$AUDITED_SHA"
+          git diff --name-only "$AUDITED_SHA"...HEAD^2 | sort > /tmp/changed
+          printf '%s\n' '.github/workflows/finalwave56-acceptance-de.yml' 'tests/test_finalwave56_acceptance_de.py' | sort > /tmp/allowed
+          diff -u /tmp/allowed /tmp/changed
+      - name: Compile D E audit surface
+        run: >-
+          python -m py_compile
+          bridge/backend.py
+          bridge/downloads.py
+          bridge/storage.py
+          bridge/archive.py
+          bridge/file_access.py
+          bridge/app.py
+          tests/test_finalwave56_acceptance_de.py
+      - name: FINALWAVE-56 independent defect reproducers
+        run: python -m unittest -v tests.test_finalwave56_acceptance_de
+      - name: Canonical D E inherited regressions
+        run: >-
+          python -m unittest -v
+          tests.test_backend_read
+          tests.test_dev03_history_offset
+          tests.test_dev03_swarm_read
+          tests.test_storage_downloads
+          tests.test_dev04_media_storage
+          tests.test_dev04_private_serving
+          tests.test_archive_security
+      - name: Validate Action OpenAPI remains source-compatible
+        run: python tools/build_action_openapi.py --validate-only
+      - name: Current-tree secret scan
+        if: always()
+        run: python tools/secret_scan.py --mode current
+      - name: Full-history secret scan
+        if: always()
+        run: python tools/secret_scan.py --mode history
+      - name: Verify non-deploy QA boundary
+        if: always()
+        run: test ! -e .cpanel.yml && test ! -e ops/ENABLE_HOSTIQ_AUTO_DEPLOY
