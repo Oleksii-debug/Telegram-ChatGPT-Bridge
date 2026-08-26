@@ -60,6 +60,12 @@ The transaction journal binds only `previous_sha`; rollback resolves the directo
 
 Required integration repair: capture immutable previous-release provenance before mutation and bind it to the transaction/backup record. Before rollback switch/restart, verify the previous release's immutable application payload (and persistent-binding topology) against that durable provenance, or restore and verify from a transaction-bound backup whose archive/hash evidence is itself durably recorded. A directory name equal to a Git SHA is not sufficient rollback provenance.
 
+### FW52-H8 — rc20/rc10 can report recovery while durable terminal journal write failed
+
+Role01 changes `_best_effort_transaction` so persistence failures for `CRITICAL_*` states are no longer swallowed, but ordinary terminal states remain best-effort. If the physical rollback and verification succeed but the `ROLLED_BACK` journal write fails, `_best_effort_transaction` returns an in-memory fallback and execute still returns rc20; the on-disk journal remains `SWITCHED`. Likewise a failed `PRELIVE_RECOVERED` write can still return rc10 with durable state left at `QUIESCED`. A caller can therefore receive the normal recovery result without durable terminalization.
+
+Required integration repair: no success-like recovery return code may be emitted unless its corresponding terminal transaction state is durably persisted and re-readable. If `ROLLED_BACK`, `PRELIVE_RECOVERED`, or another terminal write fails, attempt a legal durable critical/manual-ambiguity terminal if possible; otherwise return/raise a critical persistence failure, not rc20/rc10. Add retry tests proving no false terminal claim and no repeated physical mutation.
+
 ## Boundary matrix conclusion
 
 The locally inspectable/durable boundaries are materially stronger than the uninspectable hook and rollback-provenance boundaries:
@@ -71,9 +77,10 @@ The locally inspectable/durable boundaries are materially stronger than the unin
 - rollback symlink restore: `active==previous` makes physical link restoration inspectable, but previous-content authenticity is not proved;
 - running identity, unauth smoke, auth smoke: read-only evidence may safely be repeated;
 - restart/reload and resume/unquiesce: external mutations have no durable receipt/idempotency boundary and are replayed in several recovery paths;
-- previous release: name/path existence is insufficient to prove last-known-good content integrity or rollback availability.
+- previous release: name/path existence is insufficient to prove last-known-good content integrity or rollback availability;
+- terminal journal: critical-state write failures now propagate in role01, but ordinary recovery terminal writes can still be silently non-durable while rc20/rc10 is returned.
 
-The existing A01-11 candidate symlink switch crash seam is substantially repaired: `BACKED_UP + active==candidate` is locally observable and recovered without a second candidate switch after marker/runtime/candidate/previous-release validation. Existing tests also cover missing/tampered committed markers, missing previous release in the BACKED_UP observed-switch classifier, candidate tamper rollback, lock contention, state-boundary process loss, and repeated terminal recovery. Those tests do not cover the post-SWITCHED healthy-candidate missing-previous case or previous-content tamper before rollback.
+The existing A01-11 candidate symlink switch crash seam is substantially repaired: `BACKED_UP + active==candidate` is locally observable and recovered without a second candidate switch after marker/runtime/candidate/previous-release validation. Existing tests also cover missing/tampered committed markers, missing previous release in the BACKED_UP observed-switch classifier, candidate tamper rollback, lock contention, state-boundary process loss, and repeated terminal recovery. Those tests do not cover the post-SWITCHED healthy-candidate missing-previous case, previous-content tamper before rollback, or success-like return codes after noncritical terminal write failure.
 
 Control-plane file topology tamper (for example missing/unsafe runtime or hook files) is validated before execute reconciliation and therefore fails closed without further physical deployment mutation; that is a safe manual-ambiguity boundary, not a claimed terminal recovery path.
 
@@ -81,6 +88,6 @@ The durability claim remains narrow: process loss on the same POSIX host/filesys
 
 ## Integration recommendation
 
-Do not integrate PR #66 as complete durable-boundary closure yet. Preserve its valid runtime-manifest terminalization and fsync work, then address FW52-H1 through FW52-H7 and convert the FINALWAVE-52 falsification scenarios into positive safe-contract regressions. The preferred architecture is to keep inspectable physical transitions recoverable by observation, bind previous-release/backup provenance durably before the candidate switch, and make non-inspectable mutating hook dispatches either idempotency-keyed/receipt-bound or fail closed to durable/manual ambiguity after an uncertain dispatch. Canonical provenance must explicitly account any selected source/tests; do not relax provenance to obtain green CI.
+Do not integrate PR #66 as complete durable-boundary closure yet. Preserve its valid runtime-manifest terminalization and fsync work, then address FW52-H1 through FW52-H8 and convert the FINALWAVE-52 falsification scenarios into positive safe-contract regressions. The preferred architecture is to keep inspectable physical transitions recoverable by observation, bind previous-release/backup provenance durably before the candidate switch, make every claimed terminal outcome truly durable before returning, and make non-inspectable mutating hook dispatches either idempotency-keyed/receipt-bound or fail closed to durable/manual ambiguity after an uncertain dispatch. Canonical provenance must explicitly account any selected source/tests; do not relax provenance to obtain green CI.
 
 `USER_TELEGRAM_AUTH_NOT_YET_REQUIRED` remains authoritative.
