@@ -17,6 +17,9 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 0
+          clean: true
+          lfs: false
+          submodules: false
       - name: Set up Python 3.11
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
@@ -28,6 +31,7 @@ jobs:
           bridge/app.py
           bridge/integrated_app.py
           tools/secret_scan.py
+          tools/workflow_security.py
           tools/parallel_overlap_report.py
           tools/build_action_openapi.py
           tools/verify_integration_provenance.py
@@ -55,6 +59,8 @@ jobs:
           ops/snapshot_candidate.py
           ops/dev5_round2_oracles.py
           tests/test_secret_scan.py
+          tests/test_finalwave34_security.py
+          tests/test_dev07_security.py
           tests/test_recovery_ops.py
           tests/test_release_package.py
           tests/test_audit_round5.py
@@ -99,6 +105,14 @@ jobs:
           assert len(inventory) == 19
           print('DEV_A_CANDIDATE_CONTRACTS_PASS')
           PY
+      - name: Validate public-repository workflow security policy
+        run: python tools/workflow_security.py
+      - name: FINALWAVE-34 scanner and workflow adversarial regression
+        run: >-
+          python -m unittest -v
+          tests.test_secret_scan
+          tests.test_dev07_security
+          tests.test_finalwave34_security
       - name: Verify deterministic integration provenance and overlap decisions
         run: python tools/verify_integration_provenance.py
       - name: Verify single deploy-capable entrypoint
