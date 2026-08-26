@@ -403,7 +403,7 @@ class RuntimeCompositionTests(unittest.TestCase):
                     external_write=lambda _payload: {"unexpected": True},
                     now=103,
                 )
-            self.assertEqual("reconciliation_required", ctx_error.exception.code)
+            self.assertEqual("write_outcome_unknown_reconciliation_required", ctx_error.exception.code)
 
     def test_snapshot_factory_pins_exact_bytes_and_exposes_no_writable_descriptor(self):
         with tempfile.TemporaryDirectory() as td:
