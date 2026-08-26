@@ -310,13 +310,29 @@ class DownloadManager:
             records.append(record)
         return records
 
-    def _accept_result(self, payload: dict[str, Any], item: DownloadItem, record: FileRecord) -> None:
-        current_total = sum(existing.size for existing in self._complete_files(payload))
-        if current_total + record.size > self.limits.max_bulk_bytes:
+    def _accept_result(
+        self,
+        payload: dict[str, Any],
+        item: DownloadItem,
+        record: FileRecord,
+        *,
+        current_total: int,
+    ) -> int:
+        """Accept one verified result with O(1) cumulative size accounting.
+
+        Existing checkpoint results are fully revalidated once when resume starts.
+        Re-hashing every earlier private file after each newly accepted result makes
+        a bounded 100-file job quadratic in disk I/O.  The running total remains
+        safe because every new FileRecord has just been integrity-validated and the
+        final response performs one complete result validation pass.
+        """
+        next_total = current_total + record.size
+        if next_total > self.limits.max_bulk_bytes:
             self.files.delete(record.file_ref)
             raise BridgeError("Bulk download exceeds total size limit", status=413, code="bulk_size_limit")
         payload["results"][item.item_id] = record.file_ref
         payload["failures"].pop(item.item_id, None)
+        return next_total
 
     def resume(self, job_id: str) -> dict[str, Any]:
         with self._job_lock(job_id):
@@ -331,6 +347,14 @@ class DownloadManager:
                     "pending": 0,
                 }
 
+            # Validate every already-durable result exactly once at resume entry.
+            # Thereafter the byte total advances from the verified FileRecord sizes
+            # instead of re-reading all prior files for every accepted item.
+            existing_records = self._complete_files(payload)
+            current_total = sum(record.size for record in existing_records)
+            if current_total > self.limits.max_bulk_bytes:
+                raise BridgeError("Bulk download exceeds total size limit", status=413, code="bulk_size_limit")
+
             payload["status"] = "running"
             self.checkpoints.save(payload)
             items = [DownloadItem(**raw) for raw in payload["items"]]
@@ -340,7 +364,12 @@ class DownloadManager:
                 try:
                     recovered = self._recover_existing(item, job_id=job_id)
                     if recovered is not None:
-                        self._accept_result(payload, item, recovered)
+                        current_total = self._accept_result(
+                            payload,
+                            item,
+                            recovered,
+                            current_total=current_total,
+                        )
                         self.checkpoints.save(payload)
                         continue
                 except BridgeError as exc:
@@ -358,7 +387,12 @@ class DownloadManager:
                 payload["failures"].pop(item.item_id, None)
                 try:
                     record = self._download_one(item, job_id=job_id)
-                    self._accept_result(payload, item, record)
+                    current_total = self._accept_result(
+                        payload,
+                        item,
+                        record,
+                        current_total=current_total,
+                    )
                 except BridgeError as exc:
                     payload["failures"][item.item_id] = {
                         "code": exc.code,
