@@ -107,12 +107,16 @@ jobs:
           PY
       - name: Validate public-repository workflow security policy
         run: python tools/workflow_security.py
-      - name: FINALWAVE-34 scanner and workflow adversarial regression
+      - name: FINALWAVE-34 scanner workflow and adjacent security regression
         run: >-
           python -m unittest -v
           tests.test_secret_scan
           tests.test_dev07_security
           tests.test_finalwave34_security
+          tests.test_dev07_audit_security
+          tests.test_dev4_session_lock
+          tests.test_read_app
+          tests.test_dev_a_integration
       - name: Verify deterministic integration provenance and overlap decisions
         run: python tools/verify_integration_provenance.py
       - name: Verify single deploy-capable entrypoint
