@@ -39,12 +39,16 @@ class FinalWave41ServerManifestPrivacyTests(unittest.TestCase):
         output = io.StringIO()
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
+            server = root / "server.json"
+            candidate = root / "candidate.json"
+            server.write_text("{}", encoding="utf-8")
+            candidate.write_text("{}", encoding="utf-8")
             with mock.patch.object(baseline_reconcile, "reconcile_manifests", side_effect=failure):
                 with contextlib.redirect_stdout(output):
                     rc = baseline_reconcile.main(
                         [
-                            "--server-manifest", str(root / "missing-server.json"),
-                            "--candidate-manifest", str(root / "missing-candidate.json"),
+                            "--server-manifest", str(server),
+                            "--candidate-manifest", str(candidate),
                             "--output", str(root / "result.json"),
                         ]
                     )
