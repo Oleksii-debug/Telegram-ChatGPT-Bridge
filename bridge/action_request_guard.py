@@ -1,16 +1,15 @@
-"""Production WSGI guard that keeps Action request semantics equal to OpenAPI.
+"""Strict ChatGPT Action write-request validation at the production WSGI boundary.
 
-The canonical request schema lives in :mod:`ops.openapi_registry`.  This guard
-uses that same schema before consequential write preview/commit processing so
-runtime code cannot silently coerce JSON types that the ChatGPT Action contract
-rejects.  It also meters every authenticated write attempt before body parsing,
-using a quota bucket separate from the semantic preview/commit bucket.
+The canonical request schema lives in :mod:`ops.openapi_registry`. This guard
+uses that exact schema before consequential write preview/commit normalization so
+runtime code cannot silently coerce JSON types that the generated OpenAPI rejects.
 
-No request values are logged or persisted by this layer.
+Request framing/parser hardening and authenticated pre-parse B8 throttling are
+owned by their dedicated specialist lanes; this module deliberately does not
+duplicate those controls. No request values are logged or persisted here.
 """
 from __future__ import annotations
 
-import hashlib
 import io
 import json
 import re
@@ -25,10 +24,6 @@ from ops.openapi_registry import (
     _request_schema,
     canonical_operation,
 )
-
-
-_REQUEST_ACTOR_SHA256 = hashlib.sha256(b"authenticated-write-api-v1").hexdigest()
-_REQUEST_BUCKET_PREFIX = "request-attempt:"
 
 
 def _is_integer(value: Any) -> bool:
@@ -56,9 +51,8 @@ def _type_matches(expected: str, value: Any) -> bool:
 def _validate_instance(instance: Any, schema: Mapping[str, Any], *, path: str = "$") -> list[str]:
     """Validate the bounded JSON-Schema subset emitted for Action requests.
 
-    This deliberately fails closed on malformed/unknown schema constructs used by
-    the request contract. Error strings contain field paths/schema categories,
-    never request values.
+    Error strings contain schema paths/categories only, never request values.
+    Unknown/malformed schema constructs fail closed.
     """
 
     if not isinstance(schema, Mapping):
@@ -165,25 +159,10 @@ def validate_action_request(spec: OperationSpec, body: Mapping[str, Any]) -> tup
 
 
 class ActionRequestGuard:
-    """WSGI wrapper enforcing strict write JSON and pre-body attempt quota."""
+    """WSGI wrapper enforcing generated-OpenAPI types for all write Actions."""
 
     def __init__(self, application: Any):
         self.application = application
-
-    @staticmethod
-    def _zero_length_environ(environ: dict[str, Any]) -> dict[str, Any]:
-        raw_length = environ.get("CONTENT_LENGTH")
-        try:
-            is_zero = raw_length not in (None, "") and int(str(raw_length)) == 0
-        except (TypeError, ValueError):
-            is_zero = False
-        if not is_zero:
-            return environ
-        normalized = dict(environ)
-        # WSGI Content-Length: 0 means exactly zero entity bytes. Never inspect
-        # bytes a non-conforming upstream stream may expose past that boundary.
-        normalized["wsgi.input"] = io.BytesIO(b"")
-        return normalized
 
     @staticmethod
     def _canonicalize_body(environ: dict[str, Any], body: Mapping[str, Any]) -> dict[str, Any]:
@@ -194,37 +173,30 @@ class ActionRequestGuard:
         return normalized
 
     def __call__(self, environ: dict[str, Any], start_response: Callable) -> Iterable[bytes]:
-        normalized = self._zero_length_environ(environ)
-        method = str(normalized.get("REQUEST_METHOD") or "GET").upper()
-        path = str(normalized.get("PATH_INFO") or "/")
+        method = str(environ.get("REQUEST_METHOD") or "GET").upper()
+        path = str(environ.get("PATH_INFO") or "/")
         try:
             spec = canonical_operation(path, method)
         except OpenAPIContractError:
-            return self.application(normalized, start_response)
+            return self.application(environ, start_response)
 
         if spec.operation_class not in {OperationClass.WRITE_PREVIEW, OperationClass.WRITE_COMMIT}:
-            return self.application(normalized, start_response)
+            return self.application(environ, start_response)
 
-        # Authentication must precede quota consumption. Delegate auth failures
-        # to the canonical app so hidden-404 behavior remains exactly unchanged.
+        # Preserve the canonical hidden-404 authentication boundary and never
+        # read the body before an authenticated write request is established.
         auth = getattr(getattr(self.application, "read_app", None), "auth", None)
         if auth is None:
-            return self.application(normalized, start_response)
+            return self.application(environ, start_response)
         try:
-            auth.require(normalized)
+            auth.require(environ)
         except Exception:
-            return self.application(normalized, start_response)
+            return self.application(environ, start_response)
 
         read_app = self.application.read_app
         request_id = read_app._request_id()
         try:
-            # Separate bucket from semantic preview/commit authorization. Every
-            # authenticated attempt is bounded even when JSON is malformed.
-            self.application._write_limiter.consume(
-                _REQUEST_ACTOR_SHA256,
-                _REQUEST_BUCKET_PREFIX + spec.operation_id,
-            )
-            body = read_app._read_json(normalized)
+            body = read_app._read_json(environ)
             errors = validate_action_request(spec, body)
             if errors:
                 raise BridgeError(
@@ -236,7 +208,7 @@ class ActionRequestGuard:
         except Exception as exc:
             return self.application._write_error(start_response, exc, request_id)
 
-        return self.application(self._canonicalize_body(normalized, body), start_response)
+        return self.application(self._canonicalize_body(environ, body), start_response)
 
 
 __all__ = ["ActionRequestGuard", "validate_action_request"]
