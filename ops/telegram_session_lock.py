@@ -2,8 +2,10 @@
 """Strict POSIX process lock for a personal Telegram session.
 
 The lock contains no session material. It is expected to live in an owner-controlled
-private runtime directory outside Git. Lock acquisition is descriptor-relative so
-symlinked/replaced parent directories cannot redirect the leaf open after validation.
+private runtime directory outside Git. Acquisition walks every ancestor without
+following symlinks, opens the final parent descriptor-relatively, and binds the
+leaf inode before returning. The parent descriptor remains open while held so
+callers can re-check namespace continuity with ``assert_held()``.
 """
 from __future__ import annotations
 
@@ -27,10 +29,15 @@ def _same_inode(left: os.stat_result, right: os.stat_result) -> bool:
 
 
 class TelegramSessionLock:
-    def __init__(self, lock_path: str | Path, *, timeout_seconds: float = 5.0,
-                 poll_interval_seconds: float = 0.05,
-                 monotonic: Callable[[], float] = time.monotonic,
-                 sleeper: Callable[[float], None] = time.sleep):
+    def __init__(
+        self,
+        lock_path: str | Path,
+        *,
+        timeout_seconds: float = 5.0,
+        poll_interval_seconds: float = 0.05,
+        monotonic: Callable[[], float] = time.monotonic,
+        sleeper: Callable[[float], None] = time.sleep,
+    ):
         self.path = Path(os.path.abspath(os.fspath(Path(lock_path).expanduser())))
         if timeout_seconds < 0 or timeout_seconds > 60:
             raise ValueError("bounded session-lock timeout required")
@@ -43,6 +50,9 @@ class TelegramSessionLock:
         self.monotonic = monotonic
         self.sleeper = sleeper
         self._fd: int | None = None
+        self._parent_fd: int | None = None
+        self._parent_stat: os.stat_result | None = None
+        self._lock_stat: os.stat_result | None = None
 
     @staticmethod
     def _directory_flags() -> int:
@@ -96,19 +106,15 @@ class TelegramSessionLock:
                 current_fd = next_fd
 
             parent_stat = os.fstat(current_fd)
-            mode = stat.S_IMODE(parent_stat.st_mode)
             if (
                 not stat.S_ISDIR(parent_stat.st_mode)
                 or parent_stat.st_uid != os.geteuid()
-                or mode & 0o077
-                or not (mode & stat.S_IWUSR)
-                or not (mode & stat.S_IXUSR)
+                or stat.S_IMODE(parent_stat.st_mode) != 0o700
             ):
                 raise SessionLockError("unsafe_session_lock_parent_mode")
 
             retained = os.dup(current_fd)
-            retained_stat = os.fstat(retained)
-            return retained, retained_stat
+            return retained, os.fstat(retained)
         finally:
             for directory_fd in reversed(opened):
                 try:
@@ -124,13 +130,21 @@ class TelegramSessionLock:
         finally:
             os.close(verify_fd)
 
+    def _verify_leaf_binding(self, parent_fd: int, expected: os.stat_result) -> None:
+        try:
+            named = os.stat(self.path.name, dir_fd=parent_fd, follow_symlinks=False)
+        except OSError:
+            raise SessionLockError("session_lock_leaf_changed") from None
+        if stat.S_ISLNK(named.st_mode) or not _same_inode(named, expected):
+            raise SessionLockError("session_lock_leaf_changed")
+
     def acquire(self) -> "TelegramSessionLock":
         if self._fd is not None:
             raise SessionLockError("session_lock_already_acquired")
         parent_fd, parent_stat = self._open_parent_fd(create=True)
         fd: int | None = None
         try:
-            flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_CLOEXEC", 0)
+            flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NONBLOCK", 0)
             if not hasattr(os, "O_NOFOLLOW"):
                 raise SessionLockError("session_lock_safe_primitives_unavailable")
             flags |= os.O_NOFOLLOW
@@ -159,19 +173,21 @@ class TelegramSessionLock:
                         raise SessionLockError("session_lock_timeout")
                     self.sleeper(self.poll_interval_seconds)
 
+            # Rebind after flock. This closes the validation->open->flock race.
             self._verify_parent_binding(parent_stat)
-            try:
-                named = os.stat(self.path.name, dir_fd=parent_fd, follow_symlinks=False)
-            except OSError:
-                raise SessionLockError("session_lock_leaf_changed") from None
             current = os.fstat(fd)
-            if stat.S_ISLNK(named.st_mode) or not _same_inode(named, current):
-                raise SessionLockError("session_lock_leaf_changed")
+            self._verify_leaf_binding(parent_fd, current)
+
             self._fd = fd
+            self._parent_fd = parent_fd
+            self._parent_stat = parent_stat
+            self._lock_stat = current
             fd = None
+            parent_fd = -1
             return self
         finally:
-            os.close(parent_fd)
+            if parent_fd >= 0:
+                os.close(parent_fd)
             if fd is not None:
                 try:
                     fcntl.flock(fd, fcntl.LOCK_UN)
@@ -179,14 +195,42 @@ class TelegramSessionLock:
                     pass
                 os.close(fd)
 
+    def assert_held(self) -> None:
+        """Fail closed if the held descriptor or public namespace was replaced."""
+        fd = self._fd
+        parent_fd = self._parent_fd
+        parent_stat = self._parent_stat
+        lock_stat = self._lock_stat
+        if fd is None or parent_fd is None or parent_stat is None or lock_stat is None:
+            raise SessionLockError("session_lock_not_acquired")
+        current = os.fstat(fd)
+        if (
+            not stat.S_ISREG(current.st_mode)
+            or current.st_uid != os.geteuid()
+            or current.st_nlink != 1
+            or current.st_size != 0
+            or stat.S_IMODE(current.st_mode) != 0o600
+            or not _same_inode(current, lock_stat)
+        ):
+            raise SessionLockError("session_lock_descriptor_changed")
+        self._verify_parent_binding(parent_stat)
+        self._verify_leaf_binding(parent_fd, current)
+
     def release(self) -> None:
         fd, self._fd = self._fd, None
+        parent_fd, self._parent_fd = self._parent_fd, None
+        self._parent_stat = None
+        self._lock_stat = None
         if fd is None:
+            if parent_fd is not None:
+                os.close(parent_fd)
             return
         try:
             fcntl.flock(fd, fcntl.LOCK_UN)
         finally:
             os.close(fd)
+            if parent_fd is not None:
+                os.close(parent_fd)
 
     def __enter__(self) -> "TelegramSessionLock":
         return self.acquire()
