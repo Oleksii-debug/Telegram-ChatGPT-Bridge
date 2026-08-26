@@ -1,11 +1,14 @@
 # -*- coding: utf-8 -*-
-"""Privacy-safe deployment-bound ChatGPT Action schema comparison for DEV06.
+"""Privacy-safe, source-bound deployed ChatGPT Action schema evidence for DEV06.
 
-This module performs no network, Telegram, HOSTiQ or production mutation. It
-compares an externally captured/sanitized OpenAPI document with the exact DEV06
-schema generated for a candidate and emits hashes/counts/stable mismatch codes
-only. A matching result is evidence input for H1; it never self-authorizes H1,
-deployment, K5, or any live operation.
+This module performs no network, Telegram, HOSTiQ, credential or production
+mutation. It compares an externally captured/sanitized OpenAPI document with
+the exact DEV06 schema generated from a clean Git checkout. Candidate identity
+is derived from that checkout; callers cannot supply or relabel a SHA.
+
+A matching result is evidence input for H1 only. It never self-authorizes H1,
+deployment, K5, or any live operation, and a ``DEPLOYED_CAPTURE`` label remains
+caller-authored until an independent live/runtime gate adjudicates provenance.
 """
 from __future__ import annotations
 
@@ -14,6 +17,7 @@ import json
 import os
 import re
 import stat
+import subprocess
 from pathlib import Path
 from typing import Any, Mapping
 from urllib.parse import urlsplit
@@ -39,17 +43,109 @@ _ALLOWED_MISMATCH_CODES = frozenset({
     "SERVER_ORIGIN_DRIFT",
 })
 _SHA40_RE = re.compile(r"^[0-9a-f]{40}$")
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
 class DeployedActionEvidenceError(ResponseContractError):
     """Fail-closed deployed Action comparison error with stable public codes."""
 
 
-def _require_candidate_sha(value: str) -> str:
-    raw = str(value or "").strip()
-    if _SHA40_RE.fullmatch(raw) is None:
-        raise DeployedActionEvidenceError("CANDIDATE_SHA_INVALID")
-    return raw
+def _run_git(root: Path, *args: str, text: bool = True) -> str | bytes:
+    try:
+        proc = subprocess.run(
+            ["git", *args],
+            cwd=root,
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=text,
+            timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError):
+        raise DeployedActionEvidenceError("SOURCE_CHECKOUT_GIT_UNAVAILABLE") from None
+    if proc.returncode != 0:
+        raise DeployedActionEvidenceError("SOURCE_CHECKOUT_GIT_UNAVAILABLE")
+    return proc.stdout
+
+
+def _source_root(source_checkout: str | os.PathLike[str] | Path) -> Path:
+    try:
+        raw = Path(source_checkout)
+        info = raw.lstat()
+        if not stat.S_ISDIR(info.st_mode) or raw.is_symlink():
+            raise OSError
+        root = raw.resolve(strict=True)
+    except (OSError, TypeError, ValueError):
+        raise DeployedActionEvidenceError("SOURCE_CHECKOUT_UNSAFE") from None
+    top = str(_run_git(root, "rev-parse", "--show-toplevel")).strip()
+    try:
+        top_root = Path(top).resolve(strict=True)
+    except OSError:
+        raise DeployedActionEvidenceError("SOURCE_CHECKOUT_UNSAFE") from None
+    if top_root != root:
+        raise DeployedActionEvidenceError("SOURCE_CHECKOUT_NOT_REPOSITORY_ROOT")
+    return root
+
+
+def _require_clean_tracked_tree(root: Path) -> None:
+    for args in (
+        ("diff", "--quiet", "--no-ext-diff", "HEAD", "--"),
+        ("diff", "--cached", "--quiet", "--no-ext-diff", "HEAD", "--"),
+    ):
+        try:
+            proc = subprocess.run(
+                ["git", *args], cwd=root, check=False,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30,
+            )
+        except (OSError, subprocess.SubprocessError):
+            raise DeployedActionEvidenceError("SOURCE_CHECKOUT_GIT_UNAVAILABLE") from None
+        if proc.returncode == 1:
+            raise DeployedActionEvidenceError("SOURCE_CHECKOUT_TRACKED_TREE_DIRTY")
+        if proc.returncode != 0:
+            raise DeployedActionEvidenceError("SOURCE_CHECKOUT_GIT_UNAVAILABLE")
+
+
+def derive_source_binding(source_checkout: str | os.PathLike[str] | Path) -> dict[str, Any]:
+    """Derive an exact non-secret candidate identity from a clean Git checkout.
+
+    The binding is independent of caller-provided SHA text. ``candidate_sha`` is
+    Git's verified ``HEAD^{commit}``; the tree SHA and SHA-256 of the complete
+    recursive ``git ls-tree`` byte stream bind the exact committed source tree.
+    Paths, remotes, branch names and credentials are never emitted.
+    """
+    root = _source_root(source_checkout)
+    _require_clean_tracked_tree(root)
+    sha = str(_run_git(root, "rev-parse", "--verify", "HEAD^{commit}")).strip()
+    tree_sha = str(_run_git(root, "rev-parse", "--verify", "HEAD^{tree}")).strip()
+    listing = _run_git(root, "ls-tree", "-r", "-z", "--full-tree", "HEAD", text=False)
+    if (
+        not isinstance(listing, bytes)
+        or not listing
+        or _SHA40_RE.fullmatch(sha) is None
+        or _SHA40_RE.fullmatch(tree_sha) is None
+    ):
+        raise DeployedActionEvidenceError("SOURCE_CHECKOUT_IDENTITY_INVALID")
+    base = {
+        "schema_version": 1,
+        "identity_source": "EXACT_GIT_CHECKOUT",
+        "candidate_sha": sha,
+        "source_tree_sha": tree_sha,
+        "source_tree_listing_sha256": hashlib.sha256(listing).hexdigest(),
+        "private_values_recorded": False,
+    }
+    binding_digest = hashlib.sha256(
+        json.dumps(base, sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8")
+    ).hexdigest()
+    return {**base, "source_binding_sha256": binding_digest}
+
+
+def _validate_source_binding(
+    binding: Mapping[str, Any], source_checkout: str | os.PathLike[str] | Path
+) -> dict[str, Any]:
+    expected = derive_source_binding(source_checkout)
+    if not isinstance(binding, Mapping) or dict(binding) != expected:
+        raise DeployedActionEvidenceError("SOURCE_BINDING_MISMATCH")
+    return expected
 
 
 def _require_source_classification(value: str) -> str:
@@ -73,9 +169,6 @@ def _require_base_url(value: str) -> str:
     ):
         raise DeployedActionEvidenceError("BASE_URL_INVALID")
     normalized = raw[:-1] if raw.endswith("/") else raw
-    # H1 is production-deployment evidence, not a generic HTTPS schema comparator.
-    # Letting the caller redefine the expected origin would allow a wrong-host
-    # capture to compare cleanly against a schema generated for that same host.
     if normalized != PRODUCTION_BASE_URL:
         raise DeployedActionEvidenceError("BASE_URL_NOT_PRODUCTION")
     return normalized
@@ -163,20 +256,14 @@ def _root_security(document: Mapping[str, Any]) -> Any:
 
 
 def compare_deployed_action_schema(
-    candidate_sha: str,
+    source_checkout: str | os.PathLike[str] | Path,
     observed_document: Mapping[str, Any],
     *,
     base_url: str = PRODUCTION_BASE_URL,
     source_classification: str = "SOURCE_MOCK",
 ) -> dict[str, Any]:
-    """Compare expected vs captured schema and emit privacy-safe bounded evidence.
-
-    ``source_classification`` is a caller-supplied provenance label only. Even a
-    ``DEPLOYED_CAPTURE`` match leaves ``product_h1_pass`` and
-    ``deployment_authorized`` false; independent audit/live provenance is a
-    separate gate.
-    """
-    sha = _require_candidate_sha(candidate_sha)
+    """Compare expected vs captured schema with checkout-derived candidate identity."""
+    binding = derive_source_binding(source_checkout)
     source = _require_source_classification(source_classification)
     origin = _require_base_url(base_url)
     expected = build_compatible_chatgpt_action_openapi(origin)
@@ -193,10 +280,7 @@ def compare_deployed_action_schema(
         observed_validation = ["invalid"]
     if observed_validation:
         mismatch_codes.append("OBSERVED_SCHEMA_VALIDATION_FAILED")
-
-    expected_paths = _path_set(expected)
-    observed_paths = _path_set(observed_document)
-    if expected_paths != observed_paths:
+    if _path_set(expected) != _path_set(observed_document):
         mismatch_codes.append("PATH_SET_DRIFT")
     if _server_list(expected) != _server_list(observed_document):
         mismatch_codes.append("SERVER_ORIGIN_DRIFT")
@@ -211,15 +295,17 @@ def compare_deployed_action_schema(
     operation_drift_count = _operation_drift_count(expected, observed_document)
     if operation_drift_count:
         mismatch_codes.append("OPERATION_CONTRACT_DRIFT")
-
     if expected_digest != observed_digest:
         mismatch_codes.append("DOCUMENT_DIGEST_DRIFT")
 
     mismatch_codes = sorted(set(mismatch_codes))
     schema_match = not mismatch_codes and expected_digest == observed_digest
     summary: dict[str, Any] = {
-        "schema_version": 1,
-        "candidate_sha": sha,
+        "schema_version": 2,
+        "candidate_sha": binding["candidate_sha"],
+        "source_tree_sha": binding["source_tree_sha"],
+        "source_tree_listing_sha256": binding["source_tree_listing_sha256"],
+        "source_binding_sha256": binding["source_binding_sha256"],
         "source_classification": source,
         "server_origin_sha256": _origin_sha256(origin),
         "expected_schema_sha256": expected_digest,
@@ -237,13 +323,16 @@ def compare_deployed_action_schema(
         "production_mutated": False,
         "private_values_recorded": False,
     }
-    validate_evidence_summary(summary)
+    validate_evidence_summary(summary, source_checkout)
     return summary
 
 
-def validate_evidence_summary(summary: Mapping[str, Any]) -> None:
+def validate_evidence_summary(
+    summary: Mapping[str, Any], source_checkout: str | os.PathLike[str] | Path
+) -> None:
     required = {
-        "schema_version", "candidate_sha", "source_classification", "server_origin_sha256",
+        "schema_version", "candidate_sha", "source_tree_sha", "source_tree_listing_sha256",
+        "source_binding_sha256", "source_classification", "server_origin_sha256",
         "expected_schema_sha256", "observed_schema_sha256", "expected_schema_bytes",
         "observed_schema_bytes", "expected_operation_count", "observed_operation_count",
         "operation_drift_count", "mismatch_count", "mismatch_codes", "schema_match",
@@ -252,14 +341,29 @@ def validate_evidence_summary(summary: Mapping[str, Any]) -> None:
     }
     if not isinstance(summary, Mapping) or set(summary) != required:
         raise DeployedActionEvidenceError("EVIDENCE_SUMMARY_SHAPE_INVALID")
-    if summary.get("schema_version") != 1:
+    if summary.get("schema_version") != 2:
         raise DeployedActionEvidenceError("EVIDENCE_SCHEMA_VERSION_INVALID")
-    _require_candidate_sha(summary["candidate_sha"])
+
+    binding = derive_source_binding(source_checkout)
+    for key in (
+        "candidate_sha", "source_tree_sha", "source_tree_listing_sha256", "source_binding_sha256"
+    ):
+        if summary.get(key) != binding[key]:
+            raise DeployedActionEvidenceError("EVIDENCE_SOURCE_BINDING_INVALID")
     _require_source_classification(summary["source_classification"])
-    for key in ("server_origin_sha256", "expected_schema_sha256", "observed_schema_sha256"):
+
+    for key in (
+        "source_tree_listing_sha256", "source_binding_sha256", "server_origin_sha256",
+        "expected_schema_sha256", "observed_schema_sha256",
+    ):
         value = summary.get(key)
-        if not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{64}", value) is None:
+        if not isinstance(value, str) or _SHA256_RE.fullmatch(value) is None:
             raise DeployedActionEvidenceError("EVIDENCE_DIGEST_INVALID")
+    if _SHA40_RE.fullmatch(str(summary.get("candidate_sha", ""))) is None or _SHA40_RE.fullmatch(
+        str(summary.get("source_tree_sha", ""))
+    ) is None:
+        raise DeployedActionEvidenceError("EVIDENCE_SOURCE_BINDING_INVALID")
+
     for key in (
         "expected_schema_bytes", "observed_schema_bytes", "expected_operation_count",
         "observed_operation_count", "operation_drift_count", "mismatch_count",
