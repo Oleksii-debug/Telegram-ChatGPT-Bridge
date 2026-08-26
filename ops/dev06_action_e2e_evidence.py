@@ -73,6 +73,10 @@ def _read_action(operation_id: Any):
     return route
 
 
+def _expected_schema_digest() -> str:
+    return schema_sha256(build_compatible_chatgpt_action_openapi(PRODUCTION_BASE_URL))
+
+
 def build_read_capture(
     candidate_sha: str,
     operation_id: str,
@@ -106,7 +110,7 @@ def build_read_capture(
     errors = validate_action_runtime_response(
         document, route.action_operation_id or "", status, headers, payload
     )
-    return {
+    capture = {
         "schema_version": 1,
         "candidate_sha": sha,
         "source_classification": source_classification,
@@ -119,6 +123,8 @@ def build_read_capture(
         "chatgpt_action_observed": chatgpt_action_observed,
         "private_values_recorded": False,
     }
+    validate_read_capture(capture)
+    return capture
 
 
 def validate_read_capture(capture: Mapping[str, Any]) -> None:
@@ -140,7 +146,9 @@ def validate_read_capture(capture: Mapping[str, Any]) -> None:
     if capture.get("schema_version") != 1:
         raise ActionE2EEvidenceError("H2_CAPTURE_SCHEMA_VERSION_INVALID")
     _require_sha40(capture.get("candidate_sha"))
-    _require_sha256(capture.get("action_schema_sha256"))
+    capture_digest = _require_sha256(capture.get("action_schema_sha256"))
+    if capture_digest != _expected_schema_digest():
+        raise ActionE2EEvidenceError("H2_CAPTURE_SCHEMA_BINDING_INVALID")
     if capture.get("source_classification") not in _ALLOWED_CAPTURE_SOURCES:
         raise ActionE2EEvidenceError("H2_SOURCE_CLASSIFICATION_INVALID")
     _read_action(capture.get("operation_id"))
@@ -180,8 +188,7 @@ def summarize_h2_candidate(
     else:
         h1_deployed_match = bool(h1_summary.get("schema_match"))
 
-    expected_document = build_compatible_chatgpt_action_openapi(PRODUCTION_BASE_URL)
-    expected_schema_digest = schema_sha256(expected_document)
+    expected_schema_digest = _expected_schema_digest()
     h1_expected = _require_sha256(h1_summary.get("expected_schema_sha256"))
     h1_observed = _require_sha256(h1_summary.get("observed_schema_sha256"))
     capture_digest = _require_sha256(capture.get("action_schema_sha256"))
@@ -256,7 +263,9 @@ def validate_h2_summary(summary: Mapping[str, Any]) -> None:
     if summary.get("schema_version") != 1:
         raise ActionE2EEvidenceError("H2_SUMMARY_SCHEMA_VERSION_INVALID")
     _require_sha40(summary.get("candidate_sha"))
-    _require_sha256(summary.get("action_schema_sha256"))
+    summary_digest = _require_sha256(summary.get("action_schema_sha256"))
+    if summary_digest != _expected_schema_digest():
+        raise ActionE2EEvidenceError("H2_SUMMARY_SCHEMA_BINDING_INVALID")
     _read_action(summary.get("operation_id"))
     for key in required - {
         "schema_version", "candidate_sha", "operation_id", "action_schema_sha256"
@@ -292,6 +301,18 @@ def validate_h2_summary(summary: Mapping[str, Any]) -> None:
         raise ActionE2EEvidenceError("H2_LIVE_CANDIDATE_STATE_INVALID")
 
 
+def _stat_fingerprint(info: os.stat_result) -> tuple[int, int, int, int, int, int, int]:
+    return (
+        info.st_dev,
+        info.st_ino,
+        info.st_mode,
+        info.st_nlink,
+        info.st_size,
+        getattr(info, "st_mtime_ns", int(info.st_mtime * 1_000_000_000)),
+        getattr(info, "st_ctime_ns", int(info.st_ctime * 1_000_000_000)),
+    )
+
+
 def _load_bounded_json(path: str | Path) -> Mapping[str, Any]:
     raw_path = os.fspath(path)
     flags = os.O_RDONLY
@@ -304,17 +325,28 @@ def _load_bounded_json(path: str | Path) -> Mapping[str, Any]:
     except OSError:
         raise ActionE2EEvidenceError("H2_EVIDENCE_FILE_UNSAFE") from None
     try:
-        info = os.fstat(fd)
+        before = os.fstat(fd)
         if (
-            not stat.S_ISREG(info.st_mode)
-            or info.st_nlink != 1
-            or info.st_size <= 0
-            or info.st_size > MAX_H2_EVIDENCE_BYTES
+            not stat.S_ISREG(before.st_mode)
+            or before.st_nlink != 1
+            or before.st_size <= 0
+            or before.st_size > MAX_H2_EVIDENCE_BYTES
         ):
             raise ActionE2EEvidenceError("H2_EVIDENCE_FILE_UNSAFE")
-        data = os.read(fd, MAX_H2_EVIDENCE_BYTES + 1)
+        chunks: list[bytes] = []
+        remaining = MAX_H2_EVIDENCE_BYTES + 1
+        while remaining > 0:
+            chunk = os.read(fd, min(65536, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        data = b"".join(chunks)
         if len(data) > MAX_H2_EVIDENCE_BYTES:
             raise ActionE2EEvidenceError("H2_EVIDENCE_FILE_TOO_LARGE")
+        after = os.fstat(fd)
+        if _stat_fingerprint(before) != _stat_fingerprint(after) or len(data) != before.st_size:
+            raise ActionE2EEvidenceError("H2_EVIDENCE_FILE_CHANGED_DURING_READ")
     finally:
         os.close(fd)
     try:
