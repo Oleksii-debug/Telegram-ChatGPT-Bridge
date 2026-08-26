@@ -1,0 +1,61 @@
+name: FINALWAVE37 Rollback State Compatibility
+
+on:
+  pull_request:
+    paths:
+      - 'ops/finalwave37_rollback_state_compat.py'
+      - 'tests/test_finalwave37_rollback_state_compat.py'
+      - 'docs/FINALWAVE37_ROLLBACK_STATE_COMPAT.md'
+      - '.github/workflows/finalwave37-rollback-state.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  rollback-state-compat:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout full history
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Set up Python 3.11
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.11'
+      - name: Compile rollback-state surface
+        run: >-
+          python -m py_compile
+          ops/finalwave37_rollback_state_compat.py
+          tests/test_finalwave37_rollback_state_compat.py
+          bridge/storage.py
+          bridge/runtime.py
+          bridge/audit.py
+          ops/write_safety.py
+          ops/deploy_release.py
+      - name: FINALWAVE-37 exact predecessor and forced-rollback matrix
+        run: python -m unittest discover -s tests -p 'test_finalwave37_rollback_state_compat.py' -v
+      - name: Adjacent files downloads writes rate session audit regressions
+        run: |
+          python -m unittest discover -s tests -p 'test_storage_downloads.py' -v
+          python -m unittest discover -s tests -p 'test_dev04_media_storage.py' -v
+          python -m unittest discover -s tests -p 'test_dev04_migration_concurrency.py' -v
+          python -m unittest discover -s tests -p 'test_dev4_write_core.py' -v
+          python -m unittest discover -s tests -p 'test_runtime_bootstrap.py' -v
+          python -m unittest discover -s tests -p 'test_dev4_session_lock.py' -v
+          python -m unittest discover -s tests -p 'test_dev07_audit_security.py' -v
+          python -m unittest discover -s tests -p 'test_audit_round9.py' -v
+      - name: Current-tree secret scan
+        if: always()
+        run: python tools/secret_scan.py --mode current
+      - name: Full-history secret scan
+        if: always()
+        run: python tools/secret_scan.py --mode history
+      - name: Recovery and no-autodeploy guards
+        if: always()
+        run: |
+          test -f RECOVERY_BASELINE.md
+          grep -q 'DO NOT MERGE / DO NOT DEPLOY' RECOVERY_BASELINE.md
+          test ! -e .cpanel.yml
+          test ! -e ops/ENABLE_HOSTIQ_AUTO_DEPLOY
