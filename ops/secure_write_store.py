@@ -3,11 +3,13 @@
 
 This runtime-facing store retains the canonical PersistentWriteStore semantics,
 adds fail-closed POSIX SQLite topology validation from the reviewed DEV05 line,
-and serializes fresh schema bootstrap so concurrent Passenger workers cannot race
-on ``meta.schema_version``.
+and serializes both schema bootstrap and SQLite sidecar lifecycle across Passenger
+workers. The process-shared lock is state-local, owner-private and never stores
+private content.
 """
 from __future__ import annotations
 
+import fcntl
 import os
 import sqlite3
 import stat
@@ -104,11 +106,70 @@ class SecurePersistentWriteStore(PersistentWriteStore):
             raise WriteStateSecurityError("write_state_database_path_unsafe")
         _secure_create_database(path)
         self._secure_database_path = path
+        self._runtime_lock_path = Path(str(path) + ".runtime.lock")
         super().__init__(path, **kwargs)
         self._validate_database_and_sidecars(strict_existing=True)
 
     def _sidecar_paths(self) -> tuple[Path, ...]:
         return tuple(Path(str(self.db_path) + suffix) for suffix in self._SIDECAR_SUFFIXES)
+
+    @contextmanager
+    def _runtime_connection_lock(self) -> Iterator[None]:
+        """Serialize SQLite connection/sidecar lifecycle across Passenger workers.
+
+        WAL/SHM files are created and removed by SQLite itself. Validating those
+        paths concurrently with another process opening/closing the same database
+        creates a TOCTOU window. A separate descriptor-bound flock closes that
+        window without trusting pathnames after lock acquisition.
+        """
+        _validate_private_directory(self.db_path.parent)
+        flags = os.O_RDWR | os.O_CREAT
+        flags |= int(getattr(os, "O_NOFOLLOW", 0))
+        flags |= int(getattr(os, "O_CLOEXEC", 0))
+        try:
+            fd = os.open(self._runtime_lock_path, flags, 0o600)
+        except OSError as exc:
+            raise WriteStateSecurityError("write_state_runtime_lock_unavailable") from exc
+        locked = False
+        try:
+            before = os.fstat(fd)
+            if (
+                not stat.S_ISREG(before.st_mode)
+                or not _owned_by_current_user(before)
+                or before.st_nlink != 1
+                or stat.S_IMODE(before.st_mode) != 0o600
+                or before.st_size != 0
+            ):
+                raise WriteStateSecurityError("write_state_runtime_lock_unsafe")
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            locked = True
+            after = os.fstat(fd)
+            path_st = os.lstat(self._runtime_lock_path)
+            if (
+                after.st_dev != before.st_dev
+                or after.st_ino != before.st_ino
+                or path_st.st_dev != after.st_dev
+                or path_st.st_ino != after.st_ino
+                or stat.S_ISLNK(path_st.st_mode)
+                or not stat.S_ISREG(path_st.st_mode)
+                or not _owned_by_current_user(path_st)
+                or path_st.st_nlink != 1
+                or stat.S_IMODE(path_st.st_mode) != 0o600
+                or path_st.st_size != 0
+            ):
+                raise WriteStateSecurityError("write_state_runtime_lock_binding_unsafe")
+            yield
+        except WriteStateSecurityError:
+            raise
+        except OSError as exc:
+            raise WriteStateSecurityError("write_state_runtime_lock_unavailable") from exc
+        finally:
+            if locked:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+                except OSError:
+                    pass
+            os.close(fd)
 
     def _validate_database_and_sidecars(self, *, strict_existing: bool) -> None:
         _validate_private_directory(self.db_path.parent)
@@ -118,6 +179,12 @@ class SecurePersistentWriteStore(PersistentWriteStore):
                 continue
             try:
                 st = os.lstat(sidecar)
+            except FileNotFoundError:
+                # SQLite may remove a sidecar as the last connection closes.
+                # Under _runtime_connection_lock no other managed worker can race
+                # this validation, so disappearance here is an allowed no-object
+                # state rather than a reason to weaken topology checks.
+                continue
             except OSError as exc:
                 raise WriteStateSecurityError("write_state_sidecar_unavailable") from exc
             if stat.S_ISLNK(st.st_mode) or not stat.S_ISREG(st.st_mode):
@@ -137,30 +204,31 @@ class SecurePersistentWriteStore(PersistentWriteStore):
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
-        self._validate_database_and_sidecars(strict_existing=True)
-        try:
-            con = sqlite3.connect(
-                str(self.db_path),
-                timeout=self.busy_timeout_ms / 1000.0,
-                isolation_level=None,
-            )
-        except sqlite3.Error as exc:
-            raise WriteStateSecurityError("write_state_database_unavailable") from exc
-        try:
-            con.row_factory = sqlite3.Row
-            con.execute("PRAGMA foreign_keys=ON")
-            con.execute("PRAGMA journal_mode=WAL")
-            con.execute("PRAGMA synchronous=FULL")
-            con.execute(f"PRAGMA busy_timeout={self.busy_timeout_ms}")
-            self._validate_database_and_sidecars(strict_existing=False)
-            yield con
-        except WriteStateSecurityError:
-            raise
-        except sqlite3.Error as exc:
-            raise WriteStateSecurityError("write_state_database_unavailable") from exc
-        finally:
-            con.close()
-            self._validate_database_and_sidecars(strict_existing=False)
+        with self._runtime_connection_lock():
+            self._validate_database_and_sidecars(strict_existing=True)
+            try:
+                con = sqlite3.connect(
+                    str(self.db_path),
+                    timeout=self.busy_timeout_ms / 1000.0,
+                    isolation_level=None,
+                )
+            except sqlite3.Error as exc:
+                raise WriteStateSecurityError("write_state_database_unavailable") from exc
+            try:
+                con.row_factory = sqlite3.Row
+                con.execute("PRAGMA foreign_keys=ON")
+                con.execute("PRAGMA journal_mode=WAL")
+                con.execute("PRAGMA synchronous=FULL")
+                con.execute(f"PRAGMA busy_timeout={self.busy_timeout_ms}")
+                self._validate_database_and_sidecars(strict_existing=False)
+                yield con
+            except WriteStateSecurityError:
+                raise
+            except sqlite3.Error as exc:
+                raise WriteStateSecurityError("write_state_database_unavailable") from exc
+            finally:
+                con.close()
+                self._validate_database_and_sidecars(strict_existing=False)
 
     def _init_schema(self) -> None:
         """Serialize all fresh schema/version decisions under one writer txn."""
