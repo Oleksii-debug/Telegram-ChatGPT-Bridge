@@ -1,0 +1,37 @@
+name: FINALWAVE-28 Passenger V3
+
+on:
+  pull_request:
+    branches: [work3/integration-release-candidate]
+
+permissions:
+  contents: read
+
+jobs:
+  passenger-v3:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout isolated overlay
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Set up Python 3.11
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.11'
+      - name: Compile Passenger V3 boundary
+        run: >-
+          python -m py_compile
+          ops/passenger_probe.py
+          ops/passenger_evidence_hook.py
+          ops/private_control.py
+          ops/private_evidence.py
+          tools/arm_passenger_evidence.py
+          tools/run_passenger_evidence_probe.py
+          tests/test_passenger_probe.py
+          tests/test_passenger_evidence_hook.py
+          tests/test_arm_passenger_evidence.py
+          tests/test_run_passenger_evidence_probe.py
+      - name: Run focused Passenger V3 adversarial tests
+        run: python -m unittest discover -s tests -p 'test_*passenger*.py' -v
