@@ -233,7 +233,7 @@ def _validate_immutable_tree_permissions(root: Path, excluded_paths: list[str] |
         st = path.lstat()
         if uid is not None and st.st_uid != uid:
             raise SafetyError("immutable release path owner is unexpected")
-        if not path.is_symlink() and stat.S_IMODE(path.lstat().st_mode) & 0o222:
+        if not path.is_symlink() and stat.S_IMODE(st.st_mode) & 0o222:
             raise SafetyError("immutable release path retains write permission")
 
 
@@ -711,7 +711,9 @@ def _write_transaction_journal(control_root: Path, journal: dict) -> dict:
     updated["updated_at"] = utc_now_iso()
     updated = _validate_transaction_journal(updated)
     path = _journal_path(control_root)
-    temp = path.with_name(path.name + ".tmp")
+    temp = path.with_name(
+        f"{path.name}.tmp.{os.getpid()}.{os.urandom(8).hex()}"
+    )
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
@@ -994,7 +996,7 @@ def _reconcile_incomplete_transaction(*, control_root: Path, releases_root: Path
                                      reason_code=decision.reason_code)
             raise SafetyError("BACKED_UP candidate-active transaction evidence is ambiguous")
         if decision.action == "ROLLBACK_REQUIRED":
-            if previous is None:
+            if previous is None:  # classifier should already reject this; preserve defense in depth.
                 _best_effort_transaction(control_root, journal, "CRITICAL_TRANSACTION_AMBIGUOUS",
                                          reason_code="previous_release_missing")
                 raise SafetyError("previous release is unavailable for candidate rollback")
@@ -1035,7 +1037,8 @@ def _reconcile_incomplete_transaction(*, control_root: Path, releases_root: Path
             # We observed the switch but cannot make that observation durable. Restore the
             # previous code first, verify its running lifecycle, then record the legal
             # BACKED_UP -> PRELIVE_RECOVERED terminal state. Persistent state is shared
-            # external state and is intentionally not restored here.
+            # external state and is intentionally not restored here; schema compatibility
+            # remains a separate audited release constraint (PR #51).
             try:
                 restore_link(active_link, previous)
                 _recover_previous_release(previous_sha, restart_hook, identity_hook, unauth_hook,
@@ -1389,12 +1392,32 @@ def execute_prepared_release(*, repo: Path, prepared_release: Path, repository_i
     persistent_state_root = topology["persistent_state_root"]
     control_root = topology["control_root"]
     active_link = topology["active_link"]
-    _validate_control_plane(
-        control_root=control_root, runtime_manifest=runtime_manifest, approval_file=approval_file,
-        approval_consumption_root=approval_consumption_root, quiesce_hook=quiesce_hook,
-        resume_hook=resume_hook, restart_hook=restart_hook, identity_hook=identity_hook,
-        unauth_hook=unauth_hook, auth_hook=auth_hook, status_file=status_file)
+    validate_private_control_root(control_root)
     with _deployment_lock(control_root):
+        prior = _load_transaction_journal(control_root)
+        try:
+            validate_private_control_file(runtime_manifest, control_root, "runtime manifest")
+        except SafetyError as exc:
+            if prior and prior["state"] in ACTIVE_STATES:
+                _best_effort_transaction(
+                    control_root, prior, "CRITICAL_TRANSACTION_AMBIGUOUS",
+                    reason_code="runtime_manifest_changed")
+            raise SafetyError("runtime manifest control-plane validation failed") from exc
+        try:
+            _validate_control_plane(
+                control_root=control_root, runtime_manifest=runtime_manifest,
+                approval_file=approval_file,
+                approval_consumption_root=approval_consumption_root,
+                quiesce_hook=quiesce_hook, resume_hook=resume_hook,
+                restart_hook=restart_hook, identity_hook=identity_hook,
+                unauth_hook=unauth_hook, auth_hook=auth_hook,
+                status_file=status_file)
+        except SafetyError as exc:
+            if prior and prior["state"] in ACTIVE_STATES:
+                _best_effort_transaction(
+                    control_root, prior, "CRITICAL_TRANSACTION_AMBIGUOUS",
+                    reason_code="control_plane_changed")
+            raise SafetyError("deployment control plane changed during recovery") from exc
         return _execute_prepared_release_locked(
             repo=repo, prepared_release=prepared_release, repository_id=repository_id,
             approved_ref=approved_ref, ci_run_id=ci_run_id, audit_id=audit_id,
@@ -1427,8 +1450,8 @@ def main(argv=None) -> int:
         control = Path(args.control_root)
         validate_private_control_root(control)
         runtime = Path(args.runtime_manifest)
-        validate_private_control_file(runtime, control, "runtime manifest")
         if args.mode == "prepare":
+            validate_private_control_file(runtime, control, "runtime manifest")
             entries = load_runtime_manifest(runtime)
             if not args.sha or not args.python_executable:
                 raise SafetyError("prepare requires sha and python executable")
