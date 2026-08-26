@@ -7,6 +7,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from ops.dev06_deployed_action_evidence import (
     MAX_SCHEMA_BYTES,
@@ -36,11 +37,12 @@ class DeployedActionEvidenceTests(unittest.TestCase):
     def setUp(self):
         self.expected = build_compatible_chatgpt_action_openapi(PRODUCTION_BASE_URL)
 
-    def compare(self, document=None, *, source="SOURCE_MOCK"):
+    def compare(self, document=None, *, source="SOURCE_MOCK", base_url=PRODUCTION_BASE_URL):
         return compare_deployed_action_schema(
             CANDIDATE_SHA,
             self.expected if document is None else document,
             source_classification=source,
+            base_url=base_url,
         )
 
     def test_exact_generated_schema_matches_but_never_self_authorizes_h1(self):
@@ -64,6 +66,26 @@ class DeployedActionEvidenceTests(unittest.TestCase):
         self.assertEqual(result["source_classification"], "DEPLOYED_CAPTURE")
         self.assertFalse(result["product_h1_pass"])
         self.assertFalse(result["deployment_authorized"])
+
+    def test_caller_cannot_rebase_expected_schema_to_wrong_https_origin(self):
+        wrong_origin = "https://example.invalid"
+        wrong_document = build_compatible_chatgpt_action_openapi(wrong_origin)
+        with self.assertRaisesRegex(DeployedActionEvidenceError, "BASE_URL_NOT_PRODUCTION"):
+            self.compare(wrong_document, source="DEPLOYED_CAPTURE", base_url=wrong_origin)
+
+    def test_exact_production_origin_allows_one_trailing_slash_only(self):
+        result = self.compare(base_url=PRODUCTION_BASE_URL + "/")
+        self.assertTrue(result["schema_match"])
+        for wrong_origin in (
+            "http://tg-api.rukadopomogy.org.ua",
+            "https://tg-api.rukadopomogy.org.ua:443",
+            "https://TG-API.rukadopomogy.org.ua",
+            "https://tg-api.rukadopomogy.org.ua/path",
+            "https://tg-api.rukadopomogy.org.ua?x=1",
+        ):
+            with self.subTest(origin=wrong_origin):
+                with self.assertRaises(DeployedActionEvidenceError):
+                    self.compare(base_url=wrong_origin)
 
     def test_root_bearer_removal_is_detected(self):
         bad = copy.deepcopy(self.expected)
@@ -152,6 +174,49 @@ class DeployedActionEvidenceTests(unittest.TestCase):
             with self.assertRaisesRegex(DeployedActionEvidenceError, "EVIDENCE_MUST_NOT_SELF_AUTHORIZE"):
                 validate_evidence_summary(bad)
 
+    def test_forged_origin_and_source_schema_binding_are_rejected(self):
+        result = self.compare(source="DEPLOYED_CAPTURE")
+        bad_origin = copy.deepcopy(result)
+        bad_origin["server_origin_sha256"] = "f" * 64
+        with self.assertRaisesRegex(DeployedActionEvidenceError, "EVIDENCE_ORIGIN_BINDING_INVALID"):
+            validate_evidence_summary(bad_origin)
+
+        bad_expected = copy.deepcopy(result)
+        bad_expected["expected_schema_sha256"] = "e" * 64
+        with self.assertRaisesRegex(DeployedActionEvidenceError, "EVIDENCE_SOURCE_SCHEMA_BINDING_INVALID"):
+            validate_evidence_summary(bad_expected)
+
+        bad_expected_count = copy.deepcopy(result)
+        bad_expected_count["expected_operation_count"] += 1
+        with self.assertRaisesRegex(DeployedActionEvidenceError, "EVIDENCE_SOURCE_SCHEMA_BINDING_INVALID"):
+            validate_evidence_summary(bad_expected_count)
+
+    def test_forged_match_state_and_arbitrary_public_codes_are_rejected(self):
+        result = self.compare(source="DEPLOYED_CAPTURE")
+        bad_observed = copy.deepcopy(result)
+        bad_observed["observed_schema_sha256"] = "d" * 64
+        with self.assertRaisesRegex(DeployedActionEvidenceError, "EVIDENCE_MATCH_STATE_INVALID"):
+            validate_evidence_summary(bad_observed)
+
+        bad_drift = copy.deepcopy(result)
+        bad_drift["operation_drift_count"] = 1
+        with self.assertRaisesRegex(DeployedActionEvidenceError, "EVIDENCE_MATCH_STATE_INVALID"):
+            validate_evidence_summary(bad_drift)
+
+        bad_code = copy.deepcopy(result)
+        bad_code["mismatch_codes"] = ["PRIVATE_CHAT_LABEL"]
+        bad_code["mismatch_count"] = 1
+        bad_code["schema_match"] = False
+        with self.assertRaisesRegex(DeployedActionEvidenceError, "EVIDENCE_MISMATCH_CODES_INVALID"):
+            validate_evidence_summary(bad_code)
+
+    def test_summary_schema_version_is_exact(self):
+        result = self.compare()
+        bad = copy.deepcopy(result)
+        bad["schema_version"] = 2
+        with self.assertRaisesRegex(DeployedActionEvidenceError, "EVIDENCE_SCHEMA_VERSION_INVALID"):
+            validate_evidence_summary(bad)
+
     def test_bounded_file_loader_accepts_regular_json_and_rejects_invalid_json(self):
         with tempfile.TemporaryDirectory() as td:
             good = Path(td) / "observed.json"
@@ -162,6 +227,29 @@ class DeployedActionEvidenceTests(unittest.TestCase):
             bad.write_text("not-json", encoding="utf-8")
             with self.assertRaisesRegex(DeployedActionEvidenceError, "OBSERVED_SCHEMA_JSON_INVALID"):
                 load_observed_schema(bad)
+
+    def test_observed_schema_in_place_mutation_during_read_is_rejected(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "observed.json"
+            path.write_bytes(canonical_json_bytes(self.expected))
+            real_read = os.read
+            mutated = False
+
+            def mutating_read(fd, amount):
+                nonlocal mutated
+                chunk = real_read(fd, amount)
+                if chunk and not mutated:
+                    mutated = True
+                    with path.open("ab") as stream:
+                        stream.write(b" ")
+                return chunk
+
+            with mock.patch("ops.dev06_deployed_action_evidence.os.read", side_effect=mutating_read):
+                with self.assertRaisesRegex(
+                    DeployedActionEvidenceError,
+                    "OBSERVED_SCHEMA_FILE_CHANGED_DURING_READ",
+                ):
+                    load_observed_schema(path)
 
     @unittest.skipUnless(hasattr(os, "symlink"), "symlink unavailable")
     def test_observed_schema_symlink_is_rejected(self):
