@@ -16,7 +16,7 @@ def application(environ: dict[str, Any], start_response: Callable) -> Iterable[b
     global _default_application
     if _default_application is None:
         try:
-            from .runtime import build_production_application_from_env
+            from .runtime_composition import build_production_application_from_env
 
             _default_application = build_production_application_from_env()
         except Exception:
