@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import stat
@@ -84,6 +85,7 @@ class AuditLog:
             raise AuditSecurityError("audit path state is incomplete")
         parent_fd = self._open_parent(expected=self._parent_identity)
         fd: int | None = None
+        locked = False
         try:
             flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NONBLOCK
             if not hasattr(os, "O_NOFOLLOW"):
@@ -101,6 +103,16 @@ class AuditLog:
                 or stat.S_IMODE(info.st_mode) != 0o600
             ):
                 raise AuditSecurityError("audit file topology/ownership/permissions are unsafe")
+            # O_APPEND makes each individual write position+write atomic, but one
+            # logical JSONL record can require multiple os.write() calls after a
+            # short write. Serialize the complete record so Passenger processes
+            # cannot interleave fragments into corrupt audit evidence. Kernel flock
+            # ownership also releases automatically if a worker dies mid-record.
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX)
+                locked = True
+            except OSError as exc:
+                raise AuditSecurityError("audit file lock failed") from exc
             view = memoryview(line)
             while view:
                 try:
@@ -116,6 +128,11 @@ class AuditLog:
                 raise AuditSecurityError("audit file sync failed") from exc
         finally:
             if fd is not None:
+                if locked:
+                    try:
+                        fcntl.flock(fd, fcntl.LOCK_UN)
+                    except OSError:
+                        pass
                 os.close(fd)
             os.close(parent_fd)
 
