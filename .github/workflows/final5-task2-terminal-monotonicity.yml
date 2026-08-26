@@ -32,7 +32,7 @@ jobs:
       - name: Run adjacent canonical write-safety tests
         run: python -m unittest -v tests.test_dev4_write_core
       - name: Current-tree secret scan
-        run: python ops/secret_scan.py --scope current
+        run: python tools/secret_scan.py --mode current
       - name: Full-history secret scan
         if: always()
-        run: python ops/secret_scan.py --scope history
+        run: python tools/secret_scan.py --mode history
