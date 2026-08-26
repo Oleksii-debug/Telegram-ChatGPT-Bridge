@@ -224,6 +224,10 @@ def hold_deployment_lock(control_root: Path, lock_name: str):
         _validate_lock_stat(current)
         if not _same_inode(named, current):
             raise LockPolicyError("deployment lock leaf changed before critical section")
+        # Make the public-root namespace binding the last acquisition check. A
+        # replacement that races the post-flock leaf rebind therefore cannot be
+        # accepted merely because the leaf descriptor itself stayed valid.
+        _verify_control_root_binding(root, root_stat)
 
         yield root / lock_name
     finally:
