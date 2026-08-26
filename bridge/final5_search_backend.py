@@ -67,8 +67,6 @@ class Final5TelethonReadBackend(TelethonReadBackend):
                         raise BridgeError("Sender reference is not a person", code="sender_not_person")
                     return entity
 
-        # Display-name fallback is bounded to the configured dialog index. It
-        # never broad-scans message history just to guess a sender identity.
         dialogs = await self._iter_dialogs(client, self.config.dialog_scan_limit)
         ranked: dict[str, tuple[int, Any]] = {}
         for dialog in dialogs:
@@ -247,26 +245,17 @@ class Final5TelethonReadBackend(TelethonReadBackend):
                 resolved_global_sender: Any | None = None
                 empty_filter: Any | None = None
                 offset_id: int | None = None
+                scoped_server_continuation = bool(
+                    entity is not None and self._supports_named_parameter(client.iter_messages, "offset_id")
+                )
 
                 if entity is None:
-                    # Telethon 1.44 requires at least one of search/filter/from_user
-                    # for global search. Sender-only is constrained by from_user;
-                    # date-only/fully-empty global reads use the empty filter.
                     if sender_raw and not server_search:
                         resolved_global_sender = await self._resolve_global_sender(client, sender_raw)
                     elif not server_search:
                         empty_filter = self._global_empty_filter()
-                    # Do not pretend a local message-id boundary is sufficient
-                    # cross-dialog SearchGlobal continuation. That HIGH remains
-                    # separately open until private raw continuation state exists.
-                elif boundary is not None:
-                    method = client.iter_messages
-                    if self._supports_named_parameter(method, "offset_id"):
-                        offset_id = boundary[1]
-                    else:
-                        # Preserve bounded legacy-fake compatibility rather than
-                        # silently claiming deep production continuation.
-                        offset_id = None
+                elif boundary is not None and scoped_server_continuation:
+                    offset_id = boundary[1]
 
                 messages = await self._iter_search_messages(
                     client,
@@ -319,20 +308,19 @@ class Final5TelethonReadBackend(TelethonReadBackend):
                     filtered.append(record)
 
                 # Global cursors and legacy scoped clients retain local boundary
-                # filtering. Real Telethon scoped cursors instead move the server
-                # iterator itself with exclusive offset_id and must not apply the
-                # same boundary a second time.
-                if boundary is not None and (entity is None or offset_id is None):
+                # filtering. Real Telethon scoped cursors move the server iterator
+                # itself with exclusive offset_id and must not filter twice.
+                if boundary is not None and (entity is None or not scoped_server_continuation):
                     filtered = [record for record in filtered if message_sort_key(record) < boundary]
 
                 page = filtered[:limit]
                 next_boundary: tuple[str, int, str] | None = None
                 if len(filtered) > limit and page:
                     next_boundary = message_sort_key(page[-1])
-                elif entity is not None and len(messages) == budget and records:
-                    # The scan budget was exhausted before proving end-of-chat.
-                    # Continue strictly older than the last raw scanned message,
-                    # even when local sender/date filtering returned < limit rows.
+                elif scoped_server_continuation and len(messages) == budget and records:
+                    # Budget exhaustion does not prove end-of-chat. Advance to
+                    # the last raw scanned message so sparse local filters cannot
+                    # hide older matches behind a full server page.
                     next_boundary = message_sort_key(records[-1])
 
                 return Page(
