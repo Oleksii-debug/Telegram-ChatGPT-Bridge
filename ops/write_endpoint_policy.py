@@ -1,5 +1,9 @@
 # -*- coding: utf-8 -*-
-"""Canonical auth/rate/explicit-command policy for Telegram write endpoints."""
+"""Canonical auth/rate/explicit-command policy for Telegram write endpoints.
+
+Public error metadata is an exact reviewed contract. Exception text and
+arbitrary ``code``/``status`` attributes are never treated as a public channel.
+"""
 from __future__ import annotations
 
 import time
@@ -7,7 +11,11 @@ from dataclasses import dataclass
 from typing import Any, Callable, Mapping
 
 from ops.openapi_registry import OperationClass, OperationSpec, registry_by_operation_id
+from ops.telegram_write_adapter import TelegramContractError
 from ops.write_safety import CommitResult, PersistentWriteStore, PreviewEnvelope, WriteSafetyError
+
+
+_MAX_PUBLIC_RETRY_AFTER_SECONDS = 600
 
 
 class EndpointPolicyError(RuntimeError):
@@ -18,10 +26,7 @@ class EndpointPolicyError(RuntimeError):
         self.retry_after_seconds = retry_after_seconds
 
     def as_dict(self) -> dict[str, Any]:
-        out: dict[str, Any] = {"error": self.code, "status": self.status}
-        if self.retry_after_seconds is not None:
-            out["retry_after_seconds"] = self.retry_after_seconds
-        return out
+        return _structured_endpoint_error(self)
 
 
 @dataclass(frozen=True)
@@ -91,11 +96,6 @@ class WriteEndpointPolicy:
 
 
 def _canonical_store_payload(spec: OperationSpec, payload: Mapping[str, Any]) -> Mapping[str, Any]:
-    """Translate DEV3-compatible public file_ref into the store's opaque internal key.
-
-    Only SEND_FILES needs translation. The value is still the same opaque Bridge file
-    reference; no server path, filename or private content is introduced.
-    """
     if spec.action != "SEND_FILES":
         return payload
     out = dict(payload)
@@ -115,7 +115,6 @@ def _canonical_store_payload(spec: OperationSpec, payload: Mapping[str, Any]) ->
 
 
 class WriteCoordinator:
-    """Application service enforcing canonical route policy before store effects."""
     def __init__(self, store: PersistentWriteStore, policy: WriteEndpointPolicy):
         self.store = store
         self.policy = policy
@@ -141,18 +140,130 @@ class WriteCoordinator:
         )
 
 
+_SAFE_ENDPOINT_PUBLIC_ERRORS: dict[str, int] = {
+    "invalid_actor_identity": 400,
+    "unknown_operation": 404,
+    "operation_class_mismatch": 409,
+    "rate_limited": 429,
+    "rate_limiter_unavailable": 503,
+    "unsafe_commit_registry": 503,
+    "explicit_user_commit_required": 409,
+    "write_action_missing": 503,
+    "write_rate_limiter_unconfigured": 503,
+}
+
+_SAFE_WRITE_SAFETY_PUBLIC_ERRORS: dict[str, int] = {
+    "unsupported_write_action": 400,
+    "invalid_write_payload": 400,
+    "target_required": 400,
+    "text_required": 400,
+    "text_too_long": 413,
+    "reply_target_required": 400,
+    "send_cannot_include_reply_target": 400,
+    "source_required": 400,
+    "invalid_message_ids": 400,
+    "caption_too_long": 413,
+    "files_required": 400,
+    "invalid_file_reference": 400,
+    "file_hash_required": 400,
+    "invalid_file_size": 400,
+    "file_too_large": 413,
+    "invalid_file_count": 400,
+    "files_total_too_large": 413,
+    "voice_note_requires_single_file": 400,
+    "invalid_reply_target": 400,
+    "invalid_idempotency_key": 400,
+    "invalid_preview_ttl": 400,
+    "invalid_preview": 404,
+    "preview_action_mismatch": 409,
+    "idempotency_key_conflict": 409,
+    "write_in_progress": 409,
+    "write_outcome_unknown_reconciliation_required": 409,
+    "previous_safe_failure_requires_new_preview": 409,
+    "expired_preview": 409,
+    "used_preview": 409,
+    "idempotency_state_missing": 409,
+    "illegal_write_state_transition": 409,
+    "write_result_too_large": 502,
+    "external_write_rejected": 502,
+}
+
+_SAFE_TELEGRAM_PUBLIC_ERRORS: dict[str, int] = {
+    "invalid_target": 400,
+    "telegram_flood_wait": 429,
+    "telegram_2fa_required": 503,
+    "telegram_session_unauthorized": 503,
+    "telegram_target_invalid": 404,
+    "telegram_message_invalid": 404,
+    "telegram_file_rejected": 400,
+    "telegram_rpc_error": 502,
+    "telegram_operation_failed": 502,
+    "telegram_invalid_receipt": 502,
+    "invalid_reply_target": 400,
+    "reply_target_not_found": 404,
+    "reply_target_chat_mismatch": 409,
+    "reply_target_mismatch": 409,
+    "telegram_not_configured": 503,
+    "telegram_timeout": 504,
+    "telegram_session_busy": 409,
+    "telegram_session_lock_unsafe": 503,
+    "text_required": 400,
+    "text_too_long": 413,
+    "invalid_message_ids": 400,
+    "forward_source_missing": 404,
+    "forward_source_mismatch": 409,
+    "files_required": 400,
+    "invalid_file_count": 400,
+    "invalid_file_reference": 400,
+    "caption_too_long": 413,
+    "voice_note_requires_single_file": 400,
+}
+
+
+def _bounded_retry(value: Any) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        return None
+    return min(value, _MAX_PUBLIC_RETRY_AFTER_SECONDS)
+
+
+def _strict_public_error(code: Any, status: Any, allowed: Mapping[str, int]) -> dict[str, Any] | None:
+    if not isinstance(code, str) or isinstance(status, bool) or not isinstance(status, int):
+        return None
+    expected = allowed.get(code)
+    if expected is None or status != expected:
+        return None
+    return {"error": code, "status": expected}
+
+
+def _structured_endpoint_error(exc: EndpointPolicyError) -> dict[str, Any]:
+    out = _strict_public_error(exc.code, exc.status, _SAFE_ENDPOINT_PUBLIC_ERRORS)
+    if out is None:
+        return {"error": "internal_bridge_error", "status": 500}
+    if exc.code == "rate_limited":
+        out["retry_after_seconds"] = _bounded_retry(exc.retry_after_seconds) or 1
+    return out
+
+
+def _structured_write_safety_error(exc: WriteSafetyError) -> dict[str, Any]:
+    out = _strict_public_error(exc.code, exc.status, _SAFE_WRITE_SAFETY_PUBLIC_ERRORS)
+    return out if out is not None else {"error": "internal_bridge_error", "status": 500}
+
+
+def _structured_telegram_error(exc: TelegramContractError) -> dict[str, Any]:
+    out = _strict_public_error(exc.code, exc.status, _SAFE_TELEGRAM_PUBLIC_ERRORS)
+    if out is None:
+        return {"error": "internal_bridge_error", "status": 500}
+    if exc.code == "telegram_flood_wait":
+        out["retry_after_seconds"] = _bounded_retry(exc.retry_after) or 1
+    return out
+
+
 def structured_write_error(exc: BaseException) -> dict[str, Any]:
-    """Return stable error metadata only; never copy exception text/server paths."""
+    """Return stable allowlisted metadata only; never exception text/foreign attrs."""
     if isinstance(exc, EndpointPolicyError):
-        return exc.as_dict()
+        return _structured_endpoint_error(exc)
     if isinstance(exc, WriteSafetyError):
-        return {"error": exc.code, "status": exc.status}
-    code = getattr(exc, "code", None)
-    status = getattr(exc, "status", None)
-    retry = getattr(exc, "retry_after", None)
-    if isinstance(code, str) and code and isinstance(status, int):
-        out: dict[str, Any] = {"error": code, "status": status}
-        if isinstance(retry, int) and retry > 0:
-            out["retry_after_seconds"] = min(retry, 600)
-        return out
+        return _structured_write_safety_error(exc)
+    if isinstance(exc, TelegramContractError):
+        return _structured_telegram_error(exc)
     return {"error": "internal_bridge_error", "status": 500}
