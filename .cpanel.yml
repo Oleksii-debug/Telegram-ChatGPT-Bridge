@@ -1,6 +1,0 @@
----
-deployment:
-  tasks:
-    - /bin/cp /home/rukadopo/telegram_bridge_bootstrap_repo/ops/hostiq_auto_deploy.sh /home/rukadopo/nika_bridge_auto_deploy.sh
-    - /bin/chmod 700 /home/rukadopo/nika_bridge_auto_deploy.sh
-    - /bin/bash /home/rukadopo/telegram_bridge_bootstrap_repo/ops/hostiq_bootstrap_recovery.sh >/home/rukadopo/nika_bridge_bootstrap_cpanel_deploy.log 2>&1

@@ -1,0 +1,73 @@
+name: Hourly FINAL5 03 Telegram Product Contracts
+
+on:
+  schedule:
+    - cron: '15 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: telegram-bridge-hourly-final5-03
+  cancel-in-progress: true
+
+env:
+  TARGET_PR: '9'
+
+jobs:
+  telegram-product-contracts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    steps:
+      - name: Resolve exact current PR 9 head
+        id: target
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          json="$(curl -fsSL -H 'Accept: application/vnd.github+json' -H "Authorization: Bearer ${GH_TOKEN}" "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/pulls/${TARGET_PR}")"
+          sha="$(python -c 'import json,sys; d=json.load(sys.stdin); print(d["head"]["sha"])' <<<"$json")"
+          test "${#sha}" -eq 40
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout exact current candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ steps.target.outputs.sha }}
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.11'
+
+      - name: Install exact runtime dependencies
+        run: python -m pip install --disable-pip-version-check --require-hashes -r requirements.lock
+
+      - name: Run Telegram, search, media and file contract families
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import re, subprocess, sys
+          rx = re.compile(r'(telegram|telethon|dialog|history|search|peer|sender|media|download|archive|zip|file|backend|cursor)', re.I)
+          files = [p for p in sorted(Path('tests').glob('test_*.py')) if rx.search(p.name)]
+          if not files:
+              raise SystemExit('No Telegram product tests selected')
+          print(f'Selected {len(files)} Telegram product test files')
+          for p in files:
+              mod = p.with_suffix('').as_posix().replace('/', '.')
+              subprocess.run([sys.executable, '-m', 'unittest', '-v', mod], check=True)
+          PY
+
+      - name: Validate Action/OpenAPI contract offline
+        run: python tools/build_action_openapi.py --validate-only
+
+      - name: Record exact tested identity
+        if: always()
+        run: |
+          printf 'FINAL5-03 exact PR head: %s\n' '${{ steps.target.outputs.sha }}'
+          test "$(git rev-parse HEAD)" = '${{ steps.target.outputs.sha }}'

@@ -1,0 +1,76 @@
+name: Hourly FINAL5 01 Source Regression
+
+on:
+  schedule:
+    - cron: '15 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: telegram-bridge-hourly-final5-01
+  cancel-in-progress: true
+
+env:
+  TARGET_PR: '9'
+
+jobs:
+  source-regression:
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    steps:
+      - name: Resolve exact current PR 9 head
+        id: target
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          json="$(curl -fsSL \
+            -H 'Accept: application/vnd.github+json' \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/pulls/${TARGET_PR}")"
+          sha="$(python -c 'import json,sys; d=json.load(sys.stdin); print(d["head"]["sha"])' <<<"$json")"
+          ref="$(python -c 'import json,sys; d=json.load(sys.stdin); print(d["head"]["ref"])' <<<"$json")"
+          test "${#sha}" -eq 40
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+          echo "Testing PR #${TARGET_PR} exact head ${sha}"
+
+      - name: Checkout exact current candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ steps.target.outputs.sha }}
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.11'
+
+      - name: Install exact runtime dependencies
+        run: python -m pip install --disable-pip-version-check --require-hashes -r requirements.lock
+
+      - name: Compile complete source and tests
+        run: python -m compileall -q bridge ops tools tests passenger_wsgi.py
+
+      - name: Full deterministic regression
+        run: |
+          umask 022
+          python -m unittest discover -s tests -v
+
+      - name: Validate OpenAPI/runtime contract
+        run: python tools/build_action_openapi.py --validate-only
+
+      - name: Verify integration provenance
+        run: python tools/verify_integration_provenance.py
+
+      - name: Record exact tested identity
+        if: always()
+        run: |
+          printf 'FINAL5-01 exact PR head: %s\n' '${{ steps.target.outputs.sha }}'
+          git rev-parse HEAD
+          test "$(git rev-parse HEAD)" = '${{ steps.target.outputs.sha }}'
