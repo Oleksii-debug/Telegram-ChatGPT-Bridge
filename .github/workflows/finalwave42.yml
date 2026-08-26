@@ -1,0 +1,51 @@
+name: FINALWAVE-42 Error Privacy
+
+on:
+  pull_request:
+    paths:
+      - 'bridge/errors.py'
+      - 'ops/write_endpoint_policy.py'
+      - 'tools/build_action_openapi.py'
+      - 'tests/test_dev4_endpoint_policy.py'
+      - 'tests/test_finalwave42_public_error_privacy.py'
+      - 'docs/FINALWAVE42_PUBLIC_ERROR_PRIVACY.md'
+      - '.github/workflows/finalwave42.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  finalwave42-error-privacy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout full history without retained credentials
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Set up Python 3.11
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.11'
+      - name: Compile FINALWAVE-42 surface
+        run: >-
+          python -m py_compile
+          bridge/errors.py
+          ops/write_endpoint_policy.py
+          tools/build_action_openapi.py
+          tests/test_dev4_endpoint_policy.py
+          tests/test_finalwave42_public_error_privacy.py
+      - name: Run FINALWAVE-42 public error/privacy regressions
+        run: >-
+          python -m unittest -v
+          tests.test_dev4_endpoint_policy
+          tests.test_finalwave42_public_error_privacy
+          tests.test_dev06_api_contracts
+      - name: Validate canonical ChatGPT Action schema
+        run: python tools/build_action_openapi.py --validate-only
+      - name: Current-tree secret scan
+        if: always()
+        run: python tools/secret_scan.py --mode current
+      - name: Full-history secret scan
+        if: always()
+        run: python tools/secret_scan.py --mode history

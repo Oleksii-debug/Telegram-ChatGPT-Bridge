@@ -2,8 +2,15 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Any, Mapping
+
+
+MAX_PUBLIC_RETRY_AFTER_SECONDS = 600
+_ALLOWED_HTTP_STATUSES = {400, 404, 405, 409, 413, 415, 429, 500, 502, 503, 504}
+_CODE_RE = re.compile(r"^[a-z][a-z0-9_]{0,79}$")
+_DETAIL_ID_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,80}$")
 
 
 @dataclass(frozen=True)
@@ -14,12 +21,21 @@ class ErrorDescriptor:
     retry_after_seconds: int | None = None
 
 
-class BridgeError(Exception):
-    """Expected API failure with bounded public metadata.
+def _bounded_retry(status: int, value: Any) -> int | None:
+    if status != 429:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        return 1
+    return min(value, MAX_PUBLIC_RETRY_AFTER_SECONDS)
 
-    ``details`` is intentionally restricted to small scalar values; callers
-    must never pass exception strings, message bodies, chat names, file paths,
-    credentials, or other private content.
+
+class BridgeError(Exception):
+    """Expected API failure with bounded, typed public metadata.
+
+    Foreign exception strings are not accepted by the WSGI/backend boundaries.
+    This class additionally constrains code/status, Retry-After and ``details``
+    so paths, SQL fragments and free-form private text cannot be smuggled through
+    auxiliary metadata.
     """
 
     def __init__(
@@ -31,12 +47,27 @@ class BridgeError(Exception):
         retry_after_seconds: int | None = None,
         details: Mapping[str, Any] | None = None,
     ) -> None:
-        super().__init__(message)
-        self.message = str(message)[:240]
-        self.status = int(status)
-        self.code = str(code)[:80]
-        self.retry_after_seconds = retry_after_seconds
-        self.details = self._safe_details(details or {})
+        requested_status = status if isinstance(status, int) and not isinstance(status, bool) else 500
+        requested_code = code if isinstance(code, str) else ""
+        if requested_status not in _ALLOWED_HTTP_STATUSES or _CODE_RE.fullmatch(requested_code) is None:
+            self.status = 500
+            self.code = "internal_error"
+            self.message = "Internal server error"
+            self.details = {}
+        else:
+            self.status = requested_status
+            self.code = requested_code
+            text = str(message)
+            if any(ch in text for ch in "\r\n\x00"):
+                self.status = 500
+                self.code = "internal_error"
+                self.message = "Internal server error"
+                self.details = {}
+            else:
+                self.message = text[:240]
+                self.details = self._safe_details(details or {})
+        self.retry_after_seconds = _bounded_retry(self.status, retry_after_seconds)
+        super().__init__(self.code)
 
     @staticmethod
     def _safe_details(details: Mapping[str, Any]) -> dict[str, Any]:
@@ -49,7 +80,7 @@ class BridgeError(Exception):
                 safe[key] = value
             elif isinstance(value, int) and -(2**31) <= value <= 2**31 - 1:
                 safe[key] = value
-            elif isinstance(value, str) and len(value) <= 80 and all(ord(ch) >= 32 for ch in value):
+            elif isinstance(value, str) and _DETAIL_ID_RE.fullmatch(value):
                 safe[key] = value
         return safe
 
@@ -60,7 +91,7 @@ class BridgeError(Exception):
             "error": {"code": self.code, "message": self.message},
         }
         if self.retry_after_seconds is not None:
-            payload["error"]["retry_after_seconds"] = int(self.retry_after_seconds)
+            payload["error"]["retry_after_seconds"] = self.retry_after_seconds
         if self.details:
             payload["error"]["details"] = self.details
         return payload

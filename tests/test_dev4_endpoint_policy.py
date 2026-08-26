@@ -1,6 +1,7 @@
 import tempfile
 import unittest
 from pathlib import Path
+from ops.telegram_write_adapter import TelegramContractError
 from ops.write_endpoint_policy import (
     EndpointContext, EndpointPolicyError, FixedWindowEndpointLimiter,
     WriteCoordinator, WriteEndpointPolicy, structured_write_error,
@@ -86,10 +87,32 @@ class CoordinatorTests(unittest.TestCase):
 class StructuredErrorTests(unittest.TestCase):
     def test_policy_error_no_message(self):
         e=EndpointPolicyError('rate_limited',status=429,retry_after_seconds=3); self.assertEqual(structured_write_error(e),{'error':'rate_limited','status':429,'retry_after_seconds':3})
+    def test_policy_retry_after_is_publicly_capped(self):
+        e=EndpointPolicyError('rate_limited',status=429,retry_after_seconds=3600); self.assertEqual(structured_write_error(e),{'error':'rate_limited','status':429,'retry_after_seconds':600})
     def test_write_error_no_raw_text(self): self.assertEqual(structured_write_error(WriteSafetyError('expired_preview',status=409)),{'error':'expired_preview','status':409})
-    def test_unknown_error_redacted(self): self.assertEqual(structured_write_error(RuntimeError('/home/private/session PRIVATE BODY')),{'error':'internal_bridge_error','status':500})
-    def test_retry_after_capped(self):
+    def test_unknown_error_redacted(self): self.assertEqual(structured_write_error(RuntimeError('/srv/private/session PRIVATE BODY')),{'error':'internal_bridge_error','status':500})
+    def test_foreign_error_cannot_spoof_retry_metadata(self):
         class X(Exception): code='telegram_flood_wait'; status=429; retry_after=9999
-        self.assertEqual(structured_write_error(X())['retry_after_seconds'],600)
+        self.assertEqual(structured_write_error(X()),{'error':'internal_bridge_error','status':500})
+    def test_endpoint_error_unknown_code_fails_closed(self):
+        self.assertEqual(structured_write_error(EndpointPolicyError('private_diagnostic_marker',status=400)),{'error':'internal_bridge_error','status':500})
+    def test_endpoint_error_known_code_wrong_status_fails_closed(self):
+        self.assertEqual(structured_write_error(EndpointPolicyError('rate_limited',status=400,retry_after_seconds=2)),{'error':'internal_bridge_error','status':500})
+    def test_write_safety_unknown_code_fails_closed(self):
+        self.assertEqual(structured_write_error(WriteSafetyError('private_diagnostic_marker',status=502)),{'error':'internal_bridge_error','status':500})
+    def test_write_safety_known_code_wrong_status_fails_closed(self):
+        self.assertEqual(structured_write_error(WriteSafetyError('expired_preview',status=502)),{'error':'internal_bridge_error','status':500})
+    def test_reviewed_telegram_retry_metadata_is_bounded(self):
+        self.assertEqual(
+            structured_write_error(TelegramContractError('telegram_flood_wait',status=429,retry_after=600)),
+            {'error':'telegram_flood_wait','status':429,'retry_after_seconds':600},
+        )
+        self.assertEqual(
+            structured_write_error(TelegramContractError('telegram_flood_wait',status=429,retry_after=601)),
+            {'error':'telegram_flood_wait','status':429,'retry_after_seconds':600},
+        )
+    def test_forged_telegram_code_and_status_fail_closed(self):
+        self.assertEqual(structured_write_error(TelegramContractError('private_diagnostic_marker',status=400)),{'error':'internal_bridge_error','status':500})
+        self.assertEqual(structured_write_error(TelegramContractError('telegram_timeout',status=400)),{'error':'internal_bridge_error','status':500})
 
 if __name__=='__main__': unittest.main()
