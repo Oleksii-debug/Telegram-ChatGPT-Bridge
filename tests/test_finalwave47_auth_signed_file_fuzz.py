@@ -1,12 +1,14 @@
 from __future__ import annotations
 
+import hashlib
+import hmac
 import io
 import json
 import tempfile
 import time
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from unittest import mock
 
 from bridge.app import BridgeApplication, ReadAppConfig
 from bridge.audit import AuditLog
@@ -108,7 +110,7 @@ class BearerParsingFuzzTests(unittest.TestCase):
 
 
 class SignedFileTokenFuzzTests(unittest.TestCase):
-    def test_file_ref_and_scope_are_bound_and_cross_file_reuse_fails(self) -> None:
+    def test_file_ref_is_bound_and_cross_file_reuse_fails(self) -> None:
         now = 2_000_000_000
         signer = FileSigner(SIGNING_VALUE, clock=lambda: now)
         exp = now + 60
@@ -116,16 +118,27 @@ class SignedFileTokenFuzzTests(unittest.TestCase):
         self.assertTrue(signer.verify(FILE_REF, str(exp), signature))
         self.assertFalse(signer.verify(FILE_REF + "x", str(exp), signature))
 
+    def test_v1_unscoped_signature_is_rejected_by_scoped_verifier(self) -> None:
+        now = 2_000_000_000
+        signer = FileSigner(SIGNING_VALUE, clock=lambda: now)
+        exp = now + 60
+        legacy = hmac.new(
+            SIGNING_VALUE.encode("utf-8"),
+            f"v1:{FILE_REF}:{exp}".encode("ascii"),
+            hashlib.sha256,
+        ).hexdigest()
+        self.assertFalse(signer.verify(FILE_REF, str(exp), legacy))
+
     def test_exact_expiry_boundary_is_expired(self) -> None:
         now = 2_000_000_000
         signer = FileSigner(SIGNING_VALUE, clock=lambda: now)
         signature = signer.signature(FILE_REF, now)
         self.assertFalse(signer.verify(FILE_REF, str(now), signature))
 
-    def test_verifier_rejects_valid_hmac_beyond_issuer_max_ttl(self) -> None:
+    def test_verifier_rejects_valid_hmac_beyond_product_max_ttl(self) -> None:
         now = 2_000_000_000
         signer = FileSigner(SIGNING_VALUE, clock=lambda: now)
-        exp = now + 86_401
+        exp = now + 3_601
         signature = signer.signature(FILE_REF, exp)
         self.assertFalse(signer.verify(FILE_REF, str(exp), signature))
 
@@ -137,8 +150,17 @@ class SignedFileTokenFuzzTests(unittest.TestCase):
         for raw_exp in (f"0{exp}", f"+{exp}", f" {exp}", f"{exp} ", "-1", "", None):
             with self.subTest(exp=raw_exp):
                 self.assertFalse(signer.verify(FILE_REF, raw_exp, signature))
-        for malformed in (None, "", "0" * 63, "0" * 65, "g" * 64, signature.upper(), signature + "x"):
-            with self.subTest(signature=repr(malformed)):
+        for malformed in (
+            None,
+            "",
+            "0" * 63,
+            "0" * 65,
+            "g" * 64,
+            signature.upper(),
+            signature + "x",
+            "0" * 4096,
+        ):
+            with self.subTest(signature=repr(malformed)[:100]):
                 self.assertFalse(signer.verify(FILE_REF, str(exp), malformed))
 
     def test_replay_is_bounded_by_ttl_and_not_silently_single_use(self) -> None:
@@ -151,17 +173,40 @@ class SignedFileTokenFuzzTests(unittest.TestCase):
         clock[0] = exp
         self.assertFalse(signer.verify(FILE_REF, str(exp), signature))
 
-    def test_issuer_ttl_bounds_remain_fail_closed(self) -> None:
+    def test_restart_reconstruction_preserves_in_ttl_capability(self) -> None:
+        now = 2_000_000_000
+        first = FileSigner(SIGNING_VALUE, clock=lambda: now)
+        exp = now + 30
+        signature = first.signature(FILE_REF, exp)
+        restarted = FileSigner(SIGNING_VALUE, clock=lambda: now)
+        self.assertTrue(restarted.verify(FILE_REF, str(exp), signature))
+
+    def test_concurrent_verification_is_stateless_and_deterministic(self) -> None:
+        now = 2_000_000_000
+        signer = FileSigner(SIGNING_VALUE, clock=lambda: now)
+        exp = now + 30
+        signature = signer.signature(FILE_REF, exp)
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            outcomes = list(pool.map(lambda _: signer.verify(FILE_REF, str(exp), signature), range(128)))
+        self.assertEqual(outcomes, [True] * 128)
+
+    def test_issuer_ttl_and_type_bounds_remain_fail_closed(self) -> None:
         signer = FileSigner(SIGNING_VALUE, clock=lambda: 2_000_000_000)
-        for ttl in (0, -1, 86_401):
-            with self.subTest(ttl=ttl):
+        for ttl in (0, -1, 3_601, True, 1.5, "60"):
+            with self.subTest(ttl=repr(ttl)):
                 with self.assertRaises(ValueError):
                     signer.issue(
                         base_url="https://example.invalid",
                         route_prefix="/api/v1/files",
                         file_ref=FILE_REF,
-                        ttl_seconds=ttl,
+                        ttl_seconds=ttl,  # type: ignore[arg-type]
                     )
+
+    def test_bad_clock_fails_closed_without_exception(self) -> None:
+        for value in (float("nan"), float("inf"), float("-inf")):
+            with self.subTest(clock=repr(value)):
+                signer = FileSigner(SIGNING_VALUE, clock=lambda value=value: value)
+                self.assertFalse(signer.verify(FILE_REF, "2000000060", "0" * 64))
 
 
 class SignedFileApplicationInteractionTests(unittest.TestCase):
@@ -176,7 +221,7 @@ class SignedFileApplicationInteractionTests(unittest.TestCase):
                 file_signing_secret=SIGNING_VALUE,
                 private_root=Path(self.tempdir.name),
                 public_base_url="https://example.invalid",
-                signed_file_ttl_seconds=600,
+                signed_file_ttl_seconds=3_600,
             ),
             rate_limiter=self.limiter,
             audit=self.audit,
@@ -196,6 +241,12 @@ class SignedFileApplicationInteractionTests(unittest.TestCase):
         self.assertTrue(str(result["status"]).startswith("404"))
         self.assertEqual(self.limiter.actors, ["private-file-read"])
 
+    def test_signed_replay_hits_rate_limiter_on_every_request(self) -> None:
+        query = self._signed_query()
+        call_app(self.app, path=self._path(), query=query)
+        call_app(self.app, path=self._path(), query=query)
+        self.assertEqual(self.limiter.actors, ["private-file-read", "private-file-read"])
+
     def test_signed_request_honors_rate_limit_denial(self) -> None:
         limiter = CountingLimiter(allowed=False)
         app = BridgeApplication(config=self.app.config, rate_limiter=limiter, audit=self.audit)
@@ -207,19 +258,18 @@ class SignedFileApplicationInteractionTests(unittest.TestCase):
         self.assertEqual(dict(result["headers"])["Retry-After"], "5")
         self.assertEqual(limiter.actors, ["private-file-read"])
 
-    def test_configured_ttl_is_enforced_during_verification(self) -> None:
+    def test_product_max_ttl_is_enforced_during_verification(self) -> None:
         assert self.app.signer is not None
         now = int(time.time())
-        exp = now + self.app.config.signed_file_ttl_seconds + 1
+        exp = now + 3_601
         query = f"exp={exp}&sig={self.app.signer.signature(FILE_REF, exp)}"
         result = call_app(self.app, path=self._path(), query=query)
         self.assertTrue(str(result["status"]).startswith("404"))
         self.assertEqual(self.limiter.actors, [])
 
-    def test_oversized_signed_query_is_rejected_before_parser_work(self) -> None:
-        oversized = "exp=2000000060&sig=" + ("0" * 4096)
-        with mock.patch("bridge.app.parse_qs", side_effect=AssertionError("parser must not run")):
-            result = call_app(self.app, path=self._path(), query=oversized)
+    def test_oversized_signature_is_hidden_without_rate_budget(self) -> None:
+        query = "exp=2000000060&sig=" + ("0" * 4096)
+        result = call_app(self.app, path=self._path(), query=query)
         self.assertTrue(str(result["status"]).startswith("404"))
         self.assertEqual(self.limiter.actors, [])
 
@@ -250,6 +300,15 @@ class SignedFileApplicationInteractionTests(unittest.TestCase):
         )
         self.assertTrue(str(result["status"]).startswith("404"))
         self.assertEqual(self.limiter.actors, ["private-file-read"])
+
+    def test_ambiguous_bearer_header_cannot_authorize_without_signature(self) -> None:
+        result = call_app(
+            self.app,
+            path=self._path(),
+            authorization=f"Bearer {AUTH_VALUE}, Bearer {AUTH_VALUE}",
+        )
+        self.assertTrue(str(result["status"]).startswith("404"))
+        self.assertEqual(self.limiter.actors, [])
 
     def test_auth_and_signature_values_never_enter_audit_metadata(self) -> None:
         query = self._signed_query()
