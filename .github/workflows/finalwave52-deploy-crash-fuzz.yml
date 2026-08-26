@@ -1,0 +1,61 @@
+name: FINALWAVE52 Deployment Crash Fuzz
+
+on:
+  pull_request:
+    paths:
+      - 'tools/finalwave52_deploy_crash_fuzz.py'
+      - '.github/workflows/finalwave52-deploy-crash-fuzz.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  role01-exact-falsification:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout FINALWAVE-52 audit branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+          clean: true
+          lfs: false
+          submodules: false
+      - name: Set up Python 3.11
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.11'
+      - name: Scan FINALWAVE-52 tracked tree and history
+        run: |
+          python tools/secret_scan.py --mode current
+          python tools/secret_scan.py --mode history
+      - name: Preserve independent fuzz oracle
+        run: cp tools/finalwave52_deploy_crash_fuzz.py /tmp/finalwave52_deploy_crash_fuzz.py
+      - name: Checkout exact role01 source under test
+        run: |
+          git checkout --detach c4a4f2f050cdab8937db97091844884bd1fb8f3f
+          test "$(git rev-parse HEAD)" = "c4a4f2f050cdab8937db97091844884bd1fb8f3f"
+          cp /tmp/finalwave52_deploy_crash_fuzz.py tools/finalwave52_deploy_crash_fuzz.py
+      - name: Compile exact role01 recovery engine and independent oracle
+        run: >-
+          python -m py_compile
+          ops/deploy_release.py
+          ops/release_guard.py
+          ops/dev08_deploy_recovery.py
+          tests/test_audit_round8.py
+          tools/finalwave52_deploy_crash_fuzz.py
+      - name: Falsify role01 durable boundaries
+        run: python tools/finalwave52_deploy_crash_fuzz.py
+      - name: Role01 exact-head secret scans
+        if: always()
+        run: |
+          rm -f tools/finalwave52_deploy_crash_fuzz.py
+          python tools/secret_scan.py --mode current
+          python tools/secret_scan.py --mode history
+      - name: Recovery and no-autodeploy guards
+        if: always()
+        run: |
+          test -f RECOVERY_BASELINE.md
+          grep -q 'DO NOT MERGE / DO NOT DEPLOY' RECOVERY_BASELINE.md
+          test ! -e .cpanel.yml
+          test ! -e ops/ENABLE_HOSTIQ_AUTO_DEPLOY
