@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, Iterable, Iterator
 
 from .backend import ReadBackend
+from .download_validation import DownloadValidationReceipts
 from .errors import BridgeError
 from .filenames import safe_filename
 from .storage import CheckpointStore, DownloadItem, FileRecord, FileRecordStore
@@ -59,6 +60,8 @@ class DownloadManager:
         "file_too_large",
         "unsafe_backend_path",
         "unsafe_recovered_file",
+        "validation_receipt_corrupt",
+        "validation_receipt_unsafe",
     }
 
     def __init__(
@@ -76,10 +79,14 @@ class DownloadManager:
         self.staging_dir = staging_dir.resolve()
         self.limits = limits or DownloadLimits()
         self.staging_dir.mkdir(parents=True, exist_ok=True)
-        # Persistent lock control belongs beside the private checkpoint DB, not
-        # inside ephemeral staging. This preserves staging-cleanup invariants.
-        self.lock_dir = self.checkpoints.db_path.parent / ".download-locks"
+        # Persistent lock and validation controls belong beside the private
+        # checkpoint DB, not inside ephemeral staging.
+        control_root = self.checkpoints.db_path.parent
+        self.lock_dir = control_root / ".download-locks"
         self.lock_dir.mkdir(parents=True, exist_ok=True)
+        self.validation_receipts = DownloadValidationReceipts(
+            control_root / ".download-validations"
+        )
         for directory in (self.staging_dir, self.lock_dir):
             try:
                 os.chmod(directory, 0o700)
@@ -97,7 +104,11 @@ class DownloadManager:
         try:
             fd = os.open(lock_path, flags, 0o600)
         except OSError as exc:
-            raise BridgeError("Download job lock is unavailable", status=503, code="job_lock_unavailable") from exc
+            raise BridgeError(
+                "Download job lock is unavailable",
+                status=503,
+                code="job_lock_unavailable",
+            ) from exc
         try:
             info = os.fstat(fd)
             if (
@@ -107,7 +118,11 @@ class DownloadManager:
                 or stat.S_IMODE(info.st_mode) != 0o600
                 or info.st_size != 0
             ):
-                raise BridgeError("Unsafe download job lock topology", status=500, code="job_lock_unsafe")
+                raise BridgeError(
+                    "Unsafe download job lock topology",
+                    status=500,
+                    code="job_lock_unsafe",
+                )
             try:
                 fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError as exc:
@@ -137,14 +152,29 @@ class DownloadManager:
         if len(selected) > self.limits.max_bulk_files:
             raise BridgeError("Too many files selected", status=413, code="bulk_file_limit")
         if len({item.item_id for item in selected}) != len(selected):
-            raise BridgeError("Download item identifiers collide", status=400, code="duplicate_item_id")
+            raise BridgeError(
+                "Download item identifiers collide",
+                status=400,
+                code="duplicate_item_id",
+            )
         for item in selected:
             if item.expected_size is not None:
-                if item.expected_size < 0 or item.expected_size > self.limits.max_single_bytes:
-                    raise BridgeError("File exceeds download size limit", status=413, code="file_too_large")
+                if (
+                    item.expected_size < 0
+                    or item.expected_size > self.limits.max_single_bytes
+                ):
+                    raise BridgeError(
+                        "File exceeds download size limit",
+                        status=413,
+                        code="file_too_large",
+                    )
                 total_expected += item.expected_size
         if total_expected > self.limits.max_bulk_bytes:
-            raise BridgeError("Bulk download exceeds total size limit", status=413, code="bulk_size_limit")
+            raise BridgeError(
+                "Bulk download exceeds total size limit",
+                status=413,
+                code="bulk_size_limit",
+            )
         return selected
 
     def start_bulk(self, items: Iterable[DownloadItem]) -> dict[str, Any]:
@@ -163,7 +193,11 @@ class DownloadManager:
                     code=str(failure.get("code") or "media_download_failed"),
                     details={"retryable": bool(failure.get("retryable", False))},
                 )
-            raise BridgeError("File download failed", status=502, code="media_download_failed")
+            raise BridgeError(
+                "File download failed",
+                status=502,
+                code="media_download_failed",
+            )
         return result["files"][0]
 
     @classmethod
@@ -195,7 +229,9 @@ class DownloadManager:
             return False
         token = tail[:24]
         remainder = tail[24:]
-        if len(token) != 24 or any(ch not in "0123456789abcdef" for ch in token):
+        if len(token) != 24 or any(
+            ch not in "0123456789abcdef" for ch in token
+        ):
             return False
         if not remainder.endswith(".part"):
             return False
@@ -243,7 +279,9 @@ class DownloadManager:
                     code="staging_recovery_unavailable",
                     details={"retryable": True},
                 ) from exc
-            if not (stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode)):
+            if not (
+                stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode)
+            ):
                 raise BridgeError(
                     "Unsafe stale download staging topology",
                     status=500,
@@ -294,58 +332,182 @@ class DownloadManager:
         except OSError:
             pass
 
-    def _validate_recovered_record(self, item: DownloadItem, record: FileRecord) -> None:
+    def _validate_recovered_record(
+        self,
+        item: DownloadItem,
+        record: FileRecord,
+    ) -> None:
         if record.size > self.limits.max_single_bytes:
-            raise BridgeError("Recovered file exceeds size limit", status=500, code="checkpoint_result_mismatch")
+            raise BridgeError(
+                "Recovered file exceeds size limit",
+                status=500,
+                code="checkpoint_result_mismatch",
+            )
         if item.expected_size is not None and record.size != item.expected_size:
-            raise BridgeError("Recovered file size does not match checkpoint", status=500, code="checkpoint_result_mismatch")
-        if item.expected_sha256 is not None and not secrets.compare_digest(record.sha256, item.expected_sha256.lower()):
-            raise BridgeError("Recovered file hash does not match checkpoint", status=500, code="checkpoint_result_mismatch")
+            raise BridgeError(
+                "Recovered file size does not match checkpoint",
+                status=500,
+                code="checkpoint_result_mismatch",
+            )
+        if item.expected_sha256 is not None and not secrets.compare_digest(
+            record.sha256,
+            item.expected_sha256.lower(),
+        ):
+            raise BridgeError(
+                "Recovered file hash does not match checkpoint",
+                status=500,
+                code="checkpoint_result_mismatch",
+            )
 
-    def _recover_existing(self, item: DownloadItem, *, job_id: str) -> FileRecord | None:
-        """Recover the two durable crash windows without re-downloading Telegram.
+    def _validation_receipt(
+        self,
+        *,
+        job_id: str,
+        item: DownloadItem,
+    ) -> tuple[int, str] | None:
+        return self.validation_receipts.load(job_id, item.item_id)
 
-        1. Registry commit succeeded but checkpoint result save did not.
-        2. Atomic move into private storage succeeded but registry commit did not.
-        """
+    def _reject_changed_recovery(
+        self,
+        *,
+        job_id: str,
+        item: DownloadItem,
+        final: Path,
+        registered: FileRecord | None = None,
+    ) -> None:
+        if registered is not None:
+            self.files.delete(registered.file_ref)
+        else:
+            self._cleanup_final_leaf(final)
+        self.validation_receipts.clear(job_id, item.item_id)
+        raise BridgeError(
+            "Validated download bytes changed across restart",
+            status=503,
+            code="recovered_validation_mismatch",
+            details={"retryable": True},
+        )
+
+    def _recover_existing(
+        self,
+        item: DownloadItem,
+        *,
+        job_id: str,
+    ) -> FileRecord | None:
+        """Recover durable move/registry crash windows without duplicate I/O."""
         origin = self._origin_key(job_id, item.item_id)
         registered = self.files.get_by_origin(origin)
+        final = self._final_path(item, job_id=job_id)
+        receipt = self._validation_receipt(job_id=job_id, item=item)
         if registered is not None:
             self._validate_recovered_record(item, registered)
+            if receipt is not None and (
+                receipt[0] != registered.size
+                or not secrets.compare_digest(receipt[1], registered.sha256)
+            ):
+                self._reject_changed_recovery(
+                    job_id=job_id,
+                    item=item,
+                    final=final,
+                    registered=registered,
+                )
             return registered
 
-        final = self._final_path(item, job_id=job_id)
         try:
             info = os.lstat(final)
         except FileNotFoundError:
             return None
         except OSError as exc:
-            raise BridgeError("Recovered file is unavailable", status=500, code="unsafe_recovered_file") from exc
-        if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
-            raise BridgeError("Recovered file topology is unsafe", status=500, code="unsafe_recovered_file")
+            raise BridgeError(
+                "Recovered file is unavailable",
+                status=500,
+                code="unsafe_recovered_file",
+            ) from exc
+        if (
+            stat.S_ISLNK(info.st_mode)
+            or not stat.S_ISREG(info.st_mode)
+            or info.st_nlink != 1
+        ):
+            raise BridgeError(
+                "Recovered file topology is unsafe",
+                status=500,
+                code="unsafe_recovered_file",
+            )
         if info.st_size > self.limits.max_single_bytes:
-            raise BridgeError("Recovered file exceeds size limit", status=500, code="checkpoint_result_mismatch")
+            raise BridgeError(
+                "Recovered file exceeds size limit",
+                status=500,
+                code="checkpoint_result_mismatch",
+            )
         if item.expected_size is not None and info.st_size != item.expected_size:
-            raise BridgeError("Recovered file size does not match checkpoint", status=500, code="checkpoint_result_mismatch")
+            raise BridgeError(
+                "Recovered file size does not match checkpoint",
+                status=500,
+                code="checkpoint_result_mismatch",
+            )
         digest = _sha256(final)
-        if item.expected_sha256 is not None and not secrets.compare_digest(digest, item.expected_sha256.lower()):
-            raise BridgeError("Recovered file hash does not match checkpoint", status=500, code="checkpoint_result_mismatch")
+        if item.expected_sha256 is not None and not secrets.compare_digest(
+            digest,
+            item.expected_sha256.lower(),
+        ):
+            raise BridgeError(
+                "Recovered file hash does not match checkpoint",
+                status=500,
+                code="checkpoint_result_mismatch",
+            )
+        # New transfers always persist this receipt before atomic move. The
+        # no-receipt path remains a narrow compatibility fallback for legacy or
+        # synthetic pre-existing finals; actual new move-before-registry crash
+        # recovery is bound to the exact pre-move validated size+digest.
+        if receipt is not None and (
+            receipt[0] != info.st_size
+            or not secrets.compare_digest(receipt[1], digest)
+        ):
+            self._reject_changed_recovery(
+                job_id=job_id,
+                item=item,
+                final=final,
+            )
         try:
             os.chmod(final, 0o600)
         except OSError:
             pass
         name = safe_filename(item.name, f"message-{item.message_id}.bin")
-        mime = item.mime_type or mimetypes.guess_type(name)[0] or "application/octet-stream"
-        record = self.files.add(final, name=name, mime_type=mime, origin_key=origin)
+        mime = (
+            item.mime_type
+            or mimetypes.guess_type(name)[0]
+            or "application/octet-stream"
+        )
+        record = self.files.add(
+            final,
+            name=name,
+            mime_type=mime,
+            origin_key=origin,
+        )
         self._validate_recovered_record(item, record)
+        if receipt is not None and (
+            receipt[0] != record.size
+            or not secrets.compare_digest(receipt[1], record.sha256)
+        ):
+            self._reject_changed_recovery(
+                job_id=job_id,
+                item=item,
+                final=final,
+                registered=record,
+            )
         return record
 
     def _download_one(self, item: DownloadItem, *, job_id: str) -> FileRecord:
         name = safe_filename(item.name, f"message-{item.message_id}.bin")
         suffix = Path(name).suffix[:16]
-        target = self.staging_dir / f"{job_id}_{secrets.token_hex(12)}{suffix}.part"
+        target = self.staging_dir / (
+            f"{job_id}_{secrets.token_hex(12)}{suffix}.part"
+        )
         if target.exists():
-            raise BridgeError("Unsafe staging collision", status=500, code="staging_collision")
+            raise BridgeError(
+                "Unsafe staging collision",
+                status=500,
+                code="staging_collision",
+            )
         returned: Path | None = None
         resolved: Path | None = None
         final = self._final_path(item, job_id=job_id)
@@ -377,7 +539,11 @@ class DownloadManager:
             try:
                 original_info = os.lstat(returned)
             except OSError as exc:
-                raise BridgeError("Downloaded file is unavailable", status=502, code="media_download_failed") from exc
+                raise BridgeError(
+                    "Downloaded file is unavailable",
+                    status=502,
+                    code="media_download_failed",
+                ) from exc
             if (
                 stat.S_ISLNK(original_info.st_mode)
                 or not stat.S_ISREG(original_info.st_mode)
@@ -410,21 +576,46 @@ class DownloadManager:
                 )
             size = resolved_info.st_size
             if size > self.limits.max_single_bytes:
-                raise BridgeError("Downloaded file exceeds size limit", status=413, code="file_too_large")
+                raise BridgeError(
+                    "Downloaded file exceeds size limit",
+                    status=413,
+                    code="file_too_large",
+                )
             if item.expected_size is not None and size != item.expected_size:
-                raise BridgeError("Downloaded file size mismatch", status=502, code="file_size_mismatch")
+                raise BridgeError(
+                    "Downloaded file size mismatch",
+                    status=502,
+                    code="file_size_mismatch",
+                )
             digest = _sha256(resolved)
             if item.expected_sha256 is not None and not secrets.compare_digest(
                 digest,
                 item.expected_sha256.lower(),
             ):
-                raise BridgeError("Downloaded file hash mismatch", status=502, code="file_hash_mismatch")
+                raise BridgeError(
+                    "Downloaded file hash mismatch",
+                    status=502,
+                    code="file_hash_mismatch",
+                )
+            # Persist only non-content validation evidence before the atomic move.
+            # If the process dies after move but before registry/checkpoint, resume
+            # can distinguish exact validated bytes from same-size corruption.
+            self.validation_receipts.persist(
+                job_id,
+                item.item_id,
+                size=size,
+                sha256=digest,
+            )
             resolved.replace(final)
             try:
                 os.chmod(final, 0o600)
             except OSError:
                 pass
-            mime = item.mime_type or mimetypes.guess_type(name)[0] or "application/octet-stream"
+            mime = (
+                item.mime_type
+                or mimetypes.guess_type(name)[0]
+                or "application/octet-stream"
+            )
             record = self.files.add(
                 final,
                 name=name,
@@ -477,7 +668,9 @@ class DownloadManager:
         item: DownloadItem,
         record: FileRecord,
     ) -> None:
-        current_total = sum(existing.size for existing in self._complete_files(payload))
+        current_total = sum(
+            existing.size for existing in self._complete_files(payload)
+        )
         if current_total + record.size > self.limits.max_bulk_bytes:
             self.files.delete(record.file_ref)
             raise BridgeError(
@@ -488,12 +681,28 @@ class DownloadManager:
         payload["results"][item.item_id] = record.file_ref
         payload["failures"].pop(item.item_id, None)
 
+    def _clear_receipt_after_durable_outcome(
+        self,
+        payload: dict[str, Any],
+        item: DownloadItem,
+    ) -> None:
+        if item.item_id in payload["results"]:
+            self.validation_receipts.clear(payload["job_id"], item.item_id)
+            return
+        failure = payload["failures"].get(item.item_id)
+        if failure is not None and failure.get("retryable") is False:
+            self.validation_receipts.clear(payload["job_id"], item.item_id)
+
     def resume(self, job_id: str) -> dict[str, Any]:
         with self._job_lock(job_id):
             payload = self.checkpoints.load(job_id)
             self._reconcile_job_staging(job_id)
+            items = [DownloadItem(**raw) for raw in payload["items"]]
             if payload["status"] == "complete":
                 records = self._complete_files(payload)
+                for item in items:
+                    if item.item_id in payload["results"]:
+                        self.validation_receipts.clear(job_id, item.item_id)
                 return {
                     "job_id": job_id,
                     "status": "complete",
@@ -504,7 +713,6 @@ class DownloadManager:
 
             payload["status"] = "running"
             self.checkpoints.save(payload)
-            items = [DownloadItem(**raw) for raw in payload["items"]]
             for item in items:
                 if item.item_id in payload["results"]:
                     continue
@@ -513,6 +721,7 @@ class DownloadManager:
                     if recovered is not None:
                         self._accept_result(payload, item, recovered)
                         self.checkpoints.save(payload)
+                        self._clear_receipt_after_durable_outcome(payload, item)
                         continue
                 except BridgeError as exc:
                     payload["failures"][item.item_id] = {
@@ -521,6 +730,7 @@ class DownloadManager:
                         "retryable": self._retryable_failure(exc),
                     }
                     self.checkpoints.save(payload)
+                    self._clear_receipt_after_durable_outcome(payload, item)
                     continue
 
                 prior_failure = payload["failures"].get(item.item_id)
@@ -540,9 +750,12 @@ class DownloadManager:
                         "retryable": self._retryable_failure(exc),
                     }
                 self.checkpoints.save(payload)
+                self._clear_receipt_after_durable_outcome(payload, item)
 
             pending_ids = [
-                item.item_id for item in items if item.item_id not in payload["results"]
+                item.item_id
+                for item in items
+                if item.item_id not in payload["results"]
             ]
             if not pending_ids:
                 payload["status"] = "complete"
