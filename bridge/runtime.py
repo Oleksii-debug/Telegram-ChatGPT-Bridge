@@ -139,6 +139,35 @@ def _validate_private_regular(path: Path, *, mode: int = 0o600) -> None:
         raise RuntimeBootstrapError("unsafe_rate_limit_database_mode")
 
 
+def _secure_rate_limit_sidecar(path: Path) -> None:
+    """Pin and tighten an SQLite WAL/SHM inode, tolerating only benign disappearance."""
+
+    flags = os.O_RDONLY | int(getattr(os, "O_NOFOLLOW", 0)) | int(getattr(os, "O_CLOEXEC", 0))
+    try:
+        fd = os.open(path, flags)
+    except FileNotFoundError:
+        # WAL/SHM files are ephemeral: another SQLite connection may remove the
+        # last sidecar after its final close. Absence itself carries no state.
+        return
+    except OSError as exc:
+        raise RuntimeBootstrapError("unsafe_rate_limit_database_sidecar") from exc
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1:
+            raise RuntimeBootstrapError("unsafe_rate_limit_database_sidecar")
+        if hasattr(os, "geteuid") and st.st_uid != os.geteuid():
+            raise RuntimeBootstrapError("unsafe_rate_limit_database_owner")
+        try:
+            os.fchmod(fd, 0o600)
+        except OSError as exc:
+            raise RuntimeBootstrapError("unsafe_rate_limit_database_sidecar") from exc
+        st = os.fstat(fd)
+        if stat.S_IMODE(st.st_mode) != 0o600:
+            raise RuntimeBootstrapError("unsafe_rate_limit_database_mode")
+    finally:
+        os.close(fd)
+
+
 def _prepare_private_database(path: Path) -> None:
     """Create 0600 database inode before SQLite opens it; never normalize unsafe state."""
 
@@ -181,9 +210,7 @@ class _SQLiteFixedWindowStore:
 
     def _validate_sidecars(self) -> None:
         for suffix in ("-wal", "-shm"):
-            path = Path(str(self.database_path) + suffix)
-            if path.exists() or path.is_symlink():
-                _validate_private_regular(path)
+            _secure_rate_limit_sidecar(Path(str(self.database_path) + suffix))
 
     def _connect(self) -> sqlite3.Connection:
         _validate_private_regular(self.database_path)
@@ -193,20 +220,9 @@ class _SQLiteFixedWindowStore:
             connection.execute("PRAGMA journal_mode=WAL")
             connection.execute("PRAGMA synchronous=FULL")
             connection.execute("PRAGMA busy_timeout=5000")
-            # SQLite may have just created WAL/SHM files. Tighten immediately and
-            # reject any topology mismatch before returning the connection.
-            for suffix in ("-wal", "-shm"):
-                sidecar = Path(str(self.database_path) + suffix)
-                if sidecar.exists():
-                    st = os.lstat(sidecar)
-                    if stat.S_ISLNK(st.st_mode) or not stat.S_ISREG(st.st_mode) or st.st_nlink != 1:
-                        connection.close()
-                        raise RuntimeBootstrapError("unsafe_rate_limit_database_sidecar")
-                    if hasattr(os, "geteuid") and st.st_uid != os.geteuid():
-                        connection.close()
-                        raise RuntimeBootstrapError("unsafe_rate_limit_database_owner")
-                    os.chmod(sidecar, 0o600)
-                    _validate_private_regular(sidecar)
+            # SQLite may have just created WAL/SHM files. Pin/tighten each inode
+            # without a path exists()->lstat() race; disappearance is benign.
+            self._validate_sidecars()
             return connection
         except RuntimeBootstrapError:
             raise
