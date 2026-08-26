@@ -24,6 +24,7 @@ _ALLOWED_FIELDS = {
     "error_code",
     "retry_after_seconds",
 }
+_MAX_TORN_TAIL_BYTES = 8192
 
 
 class AuditSecurityError(RuntimeError):
@@ -80,6 +81,44 @@ class AuditLog:
             os.close(fd)
             raise
 
+    @staticmethod
+    def _recover_torn_tail(fd: int) -> None:
+        """Drop only a bounded incomplete JSONL tail left by process loss.
+
+        Complete records end in a newline and are never rewritten. If the file is
+        too large to prove the previous newline within a bounded tail window, fail
+        closed instead of truncating an unknown amount of audit history.
+        """
+        if not hasattr(os, "pread") or not hasattr(os, "ftruncate"):
+            raise AuditSecurityError("platform lacks audit tail recovery primitives")
+        try:
+            size = os.fstat(fd).st_size
+        except OSError as exc:
+            raise AuditSecurityError("audit file state unavailable") from exc
+        if size <= 0:
+            return
+        try:
+            last = os.pread(fd, 1, size - 1)
+        except OSError as exc:
+            raise AuditSecurityError("audit tail cannot be read safely") from exc
+        if last == b"\n":
+            return
+        length = min(size, _MAX_TORN_TAIL_BYTES)
+        start = size - length
+        try:
+            tail = os.pread(fd, length, start)
+        except OSError as exc:
+            raise AuditSecurityError("audit tail cannot be read safely") from exc
+        newline = tail.rfind(b"\n")
+        if newline < 0 and size > _MAX_TORN_TAIL_BYTES:
+            raise AuditSecurityError("audit torn tail exceeds recovery bound")
+        truncate_to = 0 if newline < 0 else start + newline + 1
+        try:
+            os.ftruncate(fd, truncate_to)
+            os.fsync(fd)
+        except OSError as exc:
+            raise AuditSecurityError("audit torn tail recovery failed") from exc
+
     def _append_private_line(self, line: bytes) -> None:
         if self.path is None or self._leaf_name is None or self._parent_identity is None:
             raise AuditSecurityError("audit path state is incomplete")
@@ -87,7 +126,7 @@ class AuditLog:
         fd: int | None = None
         locked = False
         try:
-            flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NONBLOCK
+            flags = os.O_RDWR | os.O_APPEND | os.O_CREAT | os.O_NONBLOCK
             if not hasattr(os, "O_NOFOLLOW"):
                 raise AuditSecurityError("platform lacks O_NOFOLLOW for audit file")
             flags |= os.O_NOFOLLOW
@@ -113,6 +152,7 @@ class AuditLog:
                 locked = True
             except OSError as exc:
                 raise AuditSecurityError("audit file lock failed") from exc
+            self._recover_torn_tail(fd)
             view = memoryview(line)
             while view:
                 try:
