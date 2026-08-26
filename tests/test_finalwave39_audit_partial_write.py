@@ -1,9 +1,7 @@
 # -*- coding: utf-8 -*-
-"""Prove one audit JSONL record stays atomic across Passenger processes.
+"""Adversarial Passenger audit-record concurrency and process-loss oracles.
 
-The worker injects a deterministic short first write. Without a process-shared
-record lock, several processes can append first halves before any appends its
-second half, corrupting JSONL framing. No private content is used.
+All data is synthetic metadata. No private Telegram content or credentials are used.
 """
 from __future__ import annotations
 
@@ -48,6 +46,23 @@ class _OSProxy:
         return self._real.write(fd, data)
 
 
+class _CrashAfterPartialWriteOSProxy:
+    def __init__(self, real_os):
+        self._real = real_os
+        self._crashed = False
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+    def write(self, fd, data):
+        if not self._crashed and len(data) > 1:
+            self._crashed = True
+            half = max(1, len(data) // 2)
+            self._real.write(fd, data[:half])
+            self._real._exit(29)
+        return self._real.write(fd, data)
+
+
 def _worker(path, index, barrier, partial_count, count_lock, overlap_event, output):
     import bridge.audit as audit_module
 
@@ -59,6 +74,15 @@ def _worker(path, index, barrier, partial_count, count_lock, overlap_event, outp
         output.put("ok")
     except BaseException as exc:
         output.put(type(exc).__name__)
+
+
+def _crash_worker(path):
+    import bridge.audit as audit_module
+
+    audit_module.os = _CrashAfterPartialWriteOSProxy(os)
+    log = audit_module.AuditLog(Path(path))
+    log.write("crash-mid-record", request_id="crash-worker", count=1)
+    os._exit(30)  # pragma: no cover - the proxy must terminate first
 
 
 class Finalwave39AuditPartialWriteTests(unittest.TestCase):
@@ -99,6 +123,47 @@ class Finalwave39AuditPartialWriteTests(unittest.TestCase):
             payloads = [json.loads(line) for line in lines]
             self.assertEqual({payload["request_id"] for payload in payloads}, {f"worker-{i}" for i in range(6)})
             self.assertTrue(all(payload["event"] == "short-write-stress" for payload in payloads))
+
+    def test_process_loss_mid_record_preserves_complete_history_and_next_event(self):
+        from bridge.audit import AuditLog
+
+        ctx = _context()
+        with tempfile.TemporaryDirectory() as tmp:
+            parent = Path(tmp) / "audit"
+            parent.mkdir(mode=0o700)
+            path = parent / "bridge.jsonl"
+            AuditLog(path).write("before", request_id="before", count=1)
+
+            worker = ctx.Process(target=_crash_worker, args=(str(path),))
+            worker.start()
+            worker.join(10)
+            if worker.is_alive():
+                worker.terminate()
+                worker.join(2)
+                self.fail("audit crash worker hung")
+            self.assertEqual(worker.exitcode, 29)
+            torn = path.read_bytes()
+            self.assertFalse(torn.endswith(b"\n"), "fault injection did not leave a torn tail")
+
+            AuditLog(path).write("after", request_id="after", count=2)
+            lines = path.read_text(encoding="ascii").splitlines()
+            self.assertEqual(len(lines), 2, lines)
+            payloads = [json.loads(line) for line in lines]
+            self.assertEqual([payload["request_id"] for payload in payloads], ["before", "after"])
+
+    def test_oversized_unframed_tail_fails_closed_without_truncating_history(self):
+        from bridge.audit import AuditLog, AuditSecurityError
+
+        with tempfile.TemporaryDirectory() as tmp:
+            parent = Path(tmp) / "audit"
+            parent.mkdir(mode=0o700)
+            path = parent / "bridge.jsonl"
+            original = b"x" * 9000
+            path.write_bytes(original)
+            os.chmod(path, 0o600)
+            with self.assertRaisesRegex(AuditSecurityError, "torn tail exceeds recovery bound"):
+                AuditLog(path).write("after-corruption", request_id="after", count=1)
+            self.assertEqual(path.read_bytes(), original)
 
 
 if __name__ == "__main__":
