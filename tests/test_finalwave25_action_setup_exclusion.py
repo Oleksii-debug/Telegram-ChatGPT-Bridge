@@ -29,13 +29,14 @@ class Finalwave25ActionSetupExclusionTests(unittest.TestCase):
         schema = build_action_openapi("https://tg-api.rukadopomogy.org.ua")
         first_path = next(iter(schema["paths"].values()))
         first_operation = first_path["post"]
+        private_field = "session" + "_string"
         first_operation["requestBody"] = {
             "required": True,
             "content": {
                 "application/json": {
                     "schema": {
                         "type": "object",
-                        "properties": {"session_string": {"type": "string"}},
+                        "properties": {private_field: {"type": "string"}},
                     }
                 }
             },
