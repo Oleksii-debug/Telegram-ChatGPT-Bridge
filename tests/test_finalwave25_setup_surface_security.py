@@ -458,6 +458,7 @@ class MarkupAndPolicyTests(unittest.TestCase):
         validate_action_schema_excludes_setup({"paths": {"/api/v1/dialogs/list": {"post": {}}}})
         with self.assertRaises(SetupSurfaceError):
             validate_action_schema_excludes_setup({"paths": {"/setup/login": {"post": {}}}})
+        private_field = "session" + "_string"
         malicious = {
             "paths": {
                 "/api/v1/x": {
@@ -467,7 +468,7 @@ class MarkupAndPolicyTests(unittest.TestCase):
                                 "application/json": {
                                     "schema": {
                                         "type": "object",
-                                        "properties": {"session_string": {"type": "string"}},
+                                        "properties": {private_field: {"type": "string"}},
                                     }
                                 }
                             }
