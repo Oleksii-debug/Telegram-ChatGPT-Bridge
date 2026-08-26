@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import unittest
 from datetime import datetime, timedelta, timezone
-from types import SimpleNamespace
 
 from bridge.backend import TelethonReadConfig
 from bridge.errors import BridgeError
@@ -260,15 +259,9 @@ class Final5Task3SearchTests(unittest.TestCase):
         sender = User(1, "one", "One")
         chat = Chat(100)
         client = NoOffsetClient(entities={"room": chat}, messages=[Message(10, 100, sender)])
-        backend = self._backend(client)
-        first = self._search(backend, chat="room", limit=1, scan_limit=1)
-        self.assertIsNotNone(first.next_cursor)
-
-        # The second call stays bounded/compatible rather than fabricating an
-        # unsupported offset argument. This path is for deterministic legacy
-        # fakes only; real Telethon explicitly declares offset_id.
-        second = self._search(backend, chat="room", limit=1, scan_limit=1, cursor=first.next_cursor)
-        self.assertEqual(len(second.items), 0)
+        first = self._search(self._backend(client), chat="room", limit=1, scan_limit=1)
+        self.assertEqual([item.id for item in first.items], [10])
+        self.assertIsNone(first.next_cursor)
 
 
 if __name__ == "__main__":
