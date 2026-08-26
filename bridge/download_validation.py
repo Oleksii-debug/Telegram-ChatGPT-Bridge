@@ -29,11 +29,13 @@ class DownloadValidationReceipts:
                 code="validation_receipt_unavailable",
             ) from exc
         self.root = parent / candidate.name
+        created = False
         try:
             info = os.lstat(self.root)
         except FileNotFoundError:
             try:
                 os.mkdir(self.root, 0o700)
+                created = True
                 info = os.lstat(self.root)
             except OSError as exc:
                 raise BridgeError(
@@ -51,16 +53,18 @@ class DownloadValidationReceipts:
             stat.S_ISLNK(info.st_mode)
             or not stat.S_ISDIR(info.st_mode)
             or info.st_uid != os.getuid()
+            or stat.S_IMODE(info.st_mode) != 0o700
         ):
             raise BridgeError(
                 "Unsafe download validation receipt root",
                 status=500,
                 code="validation_receipt_unsafe",
             )
-        try:
-            os.chmod(self.root, 0o700)
-        except OSError:
-            pass
+        if created:
+            try:
+                os.chmod(self.root, 0o700)
+            except OSError:
+                pass
 
     @staticmethod
     def _identity(job_id: str, item_id: str) -> str:
