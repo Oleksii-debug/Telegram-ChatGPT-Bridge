@@ -18,18 +18,36 @@ ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW_DIR = Path(".github/workflows")
 MAX_WORKFLOW_BYTES = 2_000_000
 
-_SECRET_CONTEXT_RE = re.compile(r"\$\{\{\s*secrets\.[A-Za-z0-9_]+\s*\}\}", re.IGNORECASE)
-_GITHUB_TOKEN_CONTEXT_RE = re.compile(r"\$\{\{\s*github\.token\s*\}\}", re.IGNORECASE)
+_SECRET_CONTEXT_RE = re.compile(
+    r"\$\{\{[^}\r\n]*\bsecrets\s*(?:\.|\[)",
+    re.IGNORECASE,
+)
+_GITHUB_TOKEN_CONTEXT_RE = re.compile(
+    r"\$\{\{[^}\r\n]*\bgithub\s*(?:\.\s*token|\[\s*['\"]token['\"]\s*\])",
+    re.IGNORECASE,
+)
 _DANGEROUS_PIPE_RE = re.compile(
     r"(?im)(?:curl|wget)\b[^\r\n|]*\|\s*(?:sudo\s+)?(?:sh|bash|zsh|python(?:3)?)\b"
 )
 _IMMUTABLE_ACTION_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_./-]+@[0-9a-fA-F]{40}$")
 _DOCKER_DIGEST_RE = re.compile(r"^docker://[^\s@]+@sha256:[0-9a-fA-F]{64}$")
-_HIGH_RISK_TRIGGER_RE = re.compile(
-    r"(?im)^\s*(?:pull_request_target|workflow_run|repository_dispatch|issue_comment|workflow_call)\s*:"
+_HIGH_RISK_TRIGGER_NAMES = (
+    "pull_request_target",
+    "workflow_run",
+    "repository_dispatch",
+    "issue_comment",
+    "workflow_call",
 )
-_SELF_HOSTED_RE = re.compile(r"(?im)^\s*runs-on\s*:\s*(?:\[[^\]]*\bself-hosted\b[^\]]*\]|self-hosted\b)")
+_HIGH_RISK_TRIGGER_TOKEN_RE = re.compile(
+    r"(?<![A-Za-z0-9_-])(?:" + "|".join(map(re.escape, _HIGH_RISK_TRIGGER_NAMES)) + r")(?![A-Za-z0-9_-])",
+    re.IGNORECASE,
+)
+_ON_HEADER_RE = re.compile(r"^(?:on|['\"]on['\"])\s*:\s*(.*)$", re.IGNORECASE)
 _ENVIRONMENT_RE = re.compile(r"(?im)^\s*environment\s*:")
+_GITHUB_HOSTED_RUNNER_RE = re.compile(
+    r"^(?:ubuntu-(?:latest|24\.04|22\.04)|windows-(?:latest|2025|2022)|macos-(?:latest|15|14|13))$",
+    re.IGNORECASE,
+)
 _CACHE_ACTION_PREFIXES = (
     "actions/cache@",
     "actions/cache/save@",
@@ -67,10 +85,57 @@ def _step_block(lines: list[str], index: int) -> str:
     return "".join(lines[start:end])
 
 
+def _trigger_findings(path: str, lines: list[str]) -> list[str]:
+    """Inspect only the top-level ``on`` stanza, including inline/quoted forms."""
+    indexes: list[int] = []
+    inline_values: dict[int, str] = {}
+    for index, line in enumerate(lines):
+        if _indent(line) != 0:
+            continue
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        match = _ON_HEADER_RE.fullmatch(stripped.split("#", 1)[0].rstrip())
+        if match:
+            indexes.append(index)
+            inline_values[index] = match.group(1)
+    if len(indexes) != 1:
+        return [f"workflow: exactly one explicit top-level on stanza is required: {path}"]
+
+    index = indexes[0]
+    fragments = [inline_values[index]]
+    for line in lines[index + 1 :]:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if _indent(line) <= 0:
+            break
+        fragments.append(stripped.split("#", 1)[0].rstrip())
+    trigger_text = " ".join(fragments)
+    findings: list[str] = []
+    if re.search(r"(?:^|\s)[&*][A-Za-z0-9_-]+", trigger_text):
+        findings.append(f"workflow: trigger YAML anchors/aliases are forbidden: {path}")
+    if _HIGH_RISK_TRIGGER_TOKEN_RE.search(trigger_text):
+        findings.append(f"workflow: high-risk trigger requires explicit security review: {path}")
+    return findings
+
+
+def _runner_findings(path: str, lines: list[str]) -> list[str]:
+    findings: list[str] = []
+    for line in lines:
+        match = re.match(r"^\s*runs-on\s*:\s*(.*?)\s*(?:#.*)?$", line)
+        if not match:
+            continue
+        value = match.group(1).strip().strip("'\"")
+        if "${{" in value or not _GITHUB_HOSTED_RUNNER_RE.fullmatch(value):
+            findings.append(f"workflow: runs-on must be an explicit approved GitHub-hosted runner: {path}")
+    return findings
+
+
 def _permissions_findings(path: str, lines: list[str]) -> list[str]:
     """Require one exact repository-level Contents: read permission stanza.
 
-    GitHub allows job-level overrides and compact permission maps.  This project
+    GitHub allows job-level overrides and compact permission maps. This project
     does not need them, so both are rejected rather than partially parsed.
     """
     indexes = [i for i, line in enumerate(lines) if re.match(r"^\s*permissions\s*:", line)]
@@ -121,10 +186,8 @@ def scan_workflow_text(path: str, text: str) -> list[str]:
     findings: list[str] = []
     lines = text.splitlines(keepends=True)
 
-    if _HIGH_RISK_TRIGGER_RE.search(text):
-        findings.append(f"workflow: high-risk trigger requires explicit security review: {path}")
-    if _SELF_HOSTED_RE.search(text):
-        findings.append(f"workflow: self-hosted runner is forbidden for public PR CI: {path}")
+    findings.extend(_trigger_findings(path, lines))
+    findings.extend(_runner_findings(path, lines))
     if _ENVIRONMENT_RE.search(text):
         findings.append(f"workflow: GitHub environment binding requires explicit security review: {path}")
     if _SECRET_CONTEXT_RE.search(text):
