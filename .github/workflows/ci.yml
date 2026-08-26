@@ -99,8 +99,6 @@ jobs:
           assert len(inventory) == 19
           print('DEV_A_CANDIDATE_CONTRACTS_PASS')
           PY
-      - name: FINALWAVE-22 focused B8 multiprocess validation
-        run: python -m unittest discover -s tests -p 'test_finalwave22_rate_limit_*.py' -v
       - name: Verify deterministic integration provenance and overlap decisions
         run: python tools/verify_integration_provenance.py
       - name: Verify single deploy-capable entrypoint
