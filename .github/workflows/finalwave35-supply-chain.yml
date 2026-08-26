@@ -1,0 +1,46 @@
+name: FINALWAVE35 Supply Chain
+
+on:
+  pull_request:
+    branches:
+      - work3/integration-release-candidate
+
+permissions:
+  contents: read
+
+jobs:
+  supply-chain-preflight:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout full public history without credentials or extension fetches
+        uses: actions/checkout@3d3c42c2352eaa16487369c4c9e33f5a8252c5b3 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+          clean: true
+          lfs: false
+          submodules: false
+      - name: Set up Python 3.11
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.11'
+      - name: Compile specialist guard and regressions
+        run: python -m py_compile tools/finalwave35_supply_chain.py tests/test_finalwave35_supply_chain.py
+      - name: Exact-head Git and dependency supply-chain preflight
+        env:
+          CANDIDATE_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: python -m tools.finalwave35_supply_chain --ref "$CANDIDATE_HEAD_SHA"
+      - name: FINALWAVE35 adversarial and inherited release-package tests
+        run: python -m unittest -v tests.test_finalwave35_supply_chain tests.test_release_package
+      - name: Current-tree secret scan
+        if: ${{ always() }}
+        run: python tools/secret_scan.py --mode current
+      - name: Full-history secret scan
+        if: ${{ always() }}
+        run: python tools/secret_scan.py --mode history
+      - name: Assert non-deploy specialist boundary
+        if: ${{ always() }}
+        run: |
+          test ! -e .cpanel.yml
+          test ! -e .github/DEPLOYMENT_AUTOMATION_ENABLED
+          printf '%s\n' 'FINALWAVE35_NONDEPLOY_BOUNDARY_PASS'
