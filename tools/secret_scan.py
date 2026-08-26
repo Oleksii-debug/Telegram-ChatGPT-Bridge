@@ -178,7 +178,11 @@ UNSUPPORTED_SIGNATURES = (
     GZIP_SIGNATURE,
     XZ_SIGNATURE,
 )
-_LFS_VERSION_LINE = "version https://" + "git-lfs.github.com/spec/v1"
+_LFS_VERSION_LINES = {
+    "version https://git-lfs.github.com/spec/v1",
+    "version https://hawser.github.com/spec/v1",
+    "version http://git-media.io/v/2",
+}
 _LFS_OID_RE = re.compile(r"^oid sha256:[0-9a-f]{64}$")
 _LFS_SIZE_RE = re.compile(r"^size [0-9]{1,20}$")
 
@@ -383,6 +387,13 @@ def _read_regular_file(
         return None, "file cannot be opened safely"
     try:
         opened = os.fstat(fd)
+        opened_signature = (
+            opened.st_dev,
+            opened.st_ino,
+            opened.st_size,
+            opened.st_mtime_ns,
+            opened.st_ctime_ns,
+        )
         if (
             not stat.S_ISREG(opened.st_mode)
             or opened.st_nlink != 1
@@ -398,10 +409,14 @@ def _read_regular_file(
             if max_bytes is not None and len(data) > max_bytes:
                 return None, "file exceeds inspection size limit"
         after = os.fstat(fd)
-        if (
-            (after.st_dev, after.st_ino) != (opened.st_dev, opened.st_ino)
-            or after.st_size != opened.st_size
-        ):
+        after_signature = (
+            after.st_dev,
+            after.st_ino,
+            after.st_size,
+            after.st_mtime_ns,
+            after.st_ctime_ns,
+        )
+        if after_signature != opened_signature:
             return None, "file changed during inspection"
         return bytes(data), None
     finally:
@@ -547,18 +562,18 @@ def _scan_archive(
 
 
 def _is_git_lfs_pointer(data: bytes) -> bool:
+    """Recognize canonical/legacy Git LFS v1 pointers, including extension lines."""
     if len(data) > 4096:
         return False
     try:
-        lines = data.decode("ascii").splitlines()
+        lines = [line.strip() for line in data.decode("ascii").splitlines() if line.strip()]
     except UnicodeDecodeError:
         return False
-    if len(lines) < 3:
+    if len(lines) < 3 or lines[0] not in _LFS_VERSION_LINES:
         return False
     return (
-        lines[0].strip() == _LFS_VERSION_LINE
-        and bool(_LFS_OID_RE.fullmatch(lines[1].strip()))
-        and bool(_LFS_SIZE_RE.fullmatch(lines[2].strip()))
+        sum(bool(_LFS_OID_RE.fullmatch(line)) for line in lines[1:]) == 1
+        and sum(bool(_LFS_SIZE_RE.fullmatch(line)) for line in lines[1:]) == 1
     )
 
 
@@ -713,10 +728,45 @@ def _commit_messages(repo: Path) -> list[str]:
     return out
 
 
+def _annotated_tag_messages(repo: Path) -> list[str]:
+    """Scan annotated tag messages, which are public history metadata too."""
+    out: list[str] = []
+    for line in run_git(
+        repo,
+        "for-each-ref",
+        "refs/tags",
+        "--format=%(objecttype) %(objectname)",
+    ).stdout.splitlines():
+        try:
+            object_type, sha = line.split(" ", 1)
+        except ValueError:
+            continue
+        if object_type != "tag" or not re.fullmatch(r"[0-9a-f]{40,64}", sha):
+            continue
+        try:
+            raw = run_git(repo, "cat-file", "-p", sha, text=False).stdout
+        except subprocess.CalledProcessError:
+            out.append(f"history-tag:{sha[:12]}: annotated tag object unreadable")
+            continue
+        marker = raw.find(b"\n\n")
+        if marker < 0:
+            out.append(f"history-tag:{sha[:12]}: annotated tag object malformed")
+            continue
+        out.extend(
+            scan_text(
+                raw[marker + 2 :].decode("utf-8", errors="replace"),
+                "<annotated-tag-message>",
+                f"history-tag:{sha[:12]}",
+            )
+        )
+    return out
+
+
 def scan_history(repo: Path = ROOT) -> list[str]:
     if _is_shallow(repo):
         return ["history: repository checkout is shallow; full-history scan is not proven"]
     out = _commit_messages(repo)
+    out.extend(_annotated_tag_messages(repo))
     allow = _load_allowlist(repo)
     for sha, rel in _history_objects(repo):
         try:

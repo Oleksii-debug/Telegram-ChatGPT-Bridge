@@ -58,6 +58,54 @@ class Finalwave34SecretScannerTests(unittest.TestCase):
         for value in values:
             self.assertNotIn(value, result)
 
+    def test_lfs_extension_pointer_is_rejected(self):
+        tmp, repo = self.make_repo()
+        self.addCleanup(tmp.cleanup)
+        first = "a" * 64
+        second = "b" * 64
+        pointer = (
+            "version https://git-lfs.github.com/spec/v1\n"
+            f"ext-0-filter sha256:{first}\n"
+            f"oid sha256:{second}\n"
+            "size 42\n"
+        )
+        (repo / "extended.bin").write_text(pointer, encoding="ascii")
+        subprocess.run(["git", "add", "extended.bin"], cwd=repo, check=True)
+        result = "\n".join(secret_scan.scan_current_tree(repo))
+        self.assertIn("Git LFS pointer", result)
+        self.assertNotIn(first, result)
+        self.assertNotIn(second, result)
+
+    def test_legacy_lfs_pointer_alias_is_rejected(self):
+        tmp, repo = self.make_repo()
+        self.addCleanup(tmp.cleanup)
+        oid = "c" * 64
+        pointer = (
+            "version http://git-media.io/v/2\n"
+            f"oid sha256:{oid}\n"
+            "size 42\n"
+        )
+        (repo / "legacy.bin").write_text(pointer, encoding="ascii")
+        subprocess.run(["git", "add", "legacy.bin"], cwd=repo, check=True)
+        result = "\n".join(secret_scan.scan_current_tree(repo))
+        self.assertIn("Git LFS pointer", result)
+        self.assertNotIn(oid, result)
+
+    def test_annotated_tag_message_is_scanned_and_redacted(self):
+        tmp, repo = self.make_repo()
+        self.addCleanup(tmp.cleanup)
+        variable = "SETUP_" + "KEY"
+        value = "synthetic-tag-value-1234567890"
+        subprocess.run(
+            ["git", "tag", "-a", "synthetic-tag", "-m", variable + "=" + value],
+            cwd=repo,
+            check=True,
+        )
+        result = "\n".join(secret_scan.scan_history(repo))
+        self.assertIn(variable, result)
+        self.assertIn("<annotated-tag-message>", result)
+        self.assertNotIn(value, result)
+
 
 class Finalwave34WorkflowPolicyTests(unittest.TestCase):
     CHECKOUT_SHA = "3d3c42e5aac5ba805825da76410c181273ba90b1"
