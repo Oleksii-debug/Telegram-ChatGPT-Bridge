@@ -233,7 +233,7 @@ def _validate_immutable_tree_permissions(root: Path, excluded_paths: list[str] |
         st = path.lstat()
         if uid is not None and st.st_uid != uid:
             raise SafetyError("immutable release path owner is unexpected")
-        if not path.is_symlink() and stat.S_IMODE(st.st_mode) & 0o222:
+        if not path.is_symlink() and stat.S_IMODE(path.lstat().st_mode) & 0o222:
             raise SafetyError("immutable release path retains write permission")
 
 
@@ -712,8 +712,14 @@ def _write_transaction_journal(control_root: Path, journal: dict) -> dict:
     updated = _validate_transaction_journal(updated)
     path = _journal_path(control_root)
     temp = path.with_name(path.name + ".tmp")
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd = None
     try:
-        with temp.open("w", encoding="utf-8") as handle:
+        fd = os.open(temp, flags, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            fd = None
             handle.write(json.dumps(updated, indent=2, sort_keys=True) + "\n")
             handle.flush()
             os.fchmod(handle.fileno(), 0o600)
@@ -721,6 +727,8 @@ def _write_transaction_journal(control_root: Path, journal: dict) -> dict:
         os.replace(temp, path)
         _fsync_parent_directory(path)
     except Exception:
+        if fd is not None:
+            os.close(fd)
         temp.unlink(missing_ok=True)
         raise
     return updated
@@ -1024,6 +1032,10 @@ def _reconcile_incomplete_transaction(*, control_root: Path, releases_root: Path
             )
             state = "SWITCHED"
         except Exception as persist_exc:
+            # We observed the switch but cannot make that observation durable. Restore the
+            # previous code first, verify its running lifecycle, then record the legal
+            # BACKED_UP -> PRELIVE_RECOVERED terminal state. Persistent state is shared
+            # external state and is intentionally not restored here.
             try:
                 restore_link(active_link, previous)
                 _recover_previous_release(previous_sha, restart_hook, identity_hook, unauth_hook,
@@ -1416,8 +1428,8 @@ def main(argv=None) -> int:
         validate_private_control_root(control)
         runtime = Path(args.runtime_manifest)
         validate_private_control_file(runtime, control, "runtime manifest")
-        entries = load_runtime_manifest(runtime)
         if args.mode == "prepare":
+            entries = load_runtime_manifest(runtime)
             if not args.sha or not args.python_executable:
                 raise SafetyError("prepare requires sha and python executable")
             path, meta, digest = prepare_versioned_release(
