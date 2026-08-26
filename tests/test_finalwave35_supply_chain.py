@@ -22,6 +22,8 @@ from tools.finalwave35_supply_chain import (
 
 ROOT = Path(__file__).resolve().parents[1]
 OID = "a" * 40
+CHECKOUT_PIN = "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
+SETUP_PYTHON_PIN = "actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97"
 
 
 class FinalWave35GitTopologyTests(unittest.TestCase):
@@ -45,7 +47,10 @@ class FinalWave35GitTopologyTests(unittest.TestCase):
             f"100644 blob {OID}\t../escape.py\0",
             f"100644 blob {OID}\t/pkg.py\0",
             f"100644 blob {OID}\ta\\b.py\0",
-            f"100644 blob {OID}\tName.py\0100644 blob {OID}\tname.py\0",
+            (
+                f"100644 blob {OID}\tName.py\0"
+                f"100644 blob {OID}\tname.py\0"
+            ),
         )
         for raw in cases:
             with self.subTest(raw=raw):
@@ -148,7 +153,7 @@ class FinalWave35CanonicalResidualTests(unittest.TestCase):
         self.assertFalse(result["production_authorized"])
         self.assertFalse(result["private_values_recorded"])
 
-    def test_specialist_workflow_is_read_only_and_action_sha_pinned(self) -> None:
+    def test_specialist_workflow_is_read_only_and_uses_reviewed_action_pins(self) -> None:
         workflow = (ROOT / ".github" / "workflows" / "finalwave35-supply-chain.yml").read_text(encoding="utf-8")
         self.assertIn("permissions:\n  contents: read", workflow)
         self.assertIn("persist-credentials: false", workflow)
@@ -157,9 +162,7 @@ class FinalWave35CanonicalResidualTests(unittest.TestCase):
         self.assertIn("lfs: false", workflow)
         self.assertIn("submodules: false", workflow)
         uses = [line.split("uses:", 1)[1].strip().split("#", 1)[0].strip() for line in workflow.splitlines() if "uses:" in line]
-        self.assertTrue(uses)
-        for target in uses:
-            self.assertRegex(target, r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_./-]+@[0-9a-fA-F]{40}$")
+        self.assertEqual([CHECKOUT_PIN, SETUP_PYTHON_PIN], uses)
         self.assertNotIn("secrets.", workflow)
         self.assertNotIn("github.token", workflow)
         self.assertNotIn("pull_request_target", workflow)
