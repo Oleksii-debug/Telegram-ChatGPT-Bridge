@@ -1,27 +1,23 @@
-"""Metadata-only audit sink with fail-closed private-file topology."""
-
+"""Metadata-only audit sink with descriptor-bound private-file topology."""
 from __future__ import annotations
 
 import json
 import os
-import stat
 import time
 from pathlib import Path
 from typing import Any
 
+from ops.posix_fs import (
+    FilesystemSafetyError,
+    open_directory_fd,
+    open_regular_at,
+    verify_directory_binding,
+    verify_leaf_binding,
+)
 
 _ALLOWED_FIELDS = {
-    "request_id",
-    "status",
-    "count",
-    "scanned",
-    "route",
-    "method",
-    "job_id",
-    "file_count",
-    "byte_count",
-    "error_code",
-    "retry_after_seconds",
+    "request_id", "status", "count", "scanned", "route", "method", "job_id",
+    "file_count", "byte_count", "error_code", "retry_after_seconds",
 }
 
 
@@ -31,76 +27,68 @@ class AuditSecurityError(RuntimeError):
 
 class AuditLog:
     def __init__(self, path: Path | None = None) -> None:
-        self.path = Path(path) if path is not None else None
+        self.path = (
+            Path(os.path.abspath(os.path.expanduser(os.fspath(path))))
+            if path is not None
+            else None
+        )
         self.events: list[dict[str, Any]] = []
-        self._parent_identity: tuple[int, int] | None = None
+        self._parent_identity: os.stat_result | None = None
         self._leaf_name: str | None = None
         if self.path is not None:
-            parent = self.path.parent
-            if not parent.exists():
-                try:
-                    parent.mkdir(mode=0o700, parents=True, exist_ok=False)
-                except FileExistsError:
-                    pass
-                except OSError as exc:
-                    raise AuditSecurityError("audit parent cannot be created safely") from exc
             self._leaf_name = self.path.name
             if not self._leaf_name or self._leaf_name in {".", ".."}:
                 raise AuditSecurityError("audit filename is invalid")
-            fd = self._open_parent(expected=None)
             try:
-                info = os.fstat(fd)
-                self._parent_identity = (info.st_dev, info.st_ino)
+                fd, info = open_directory_fd(
+                    self.path.parent,
+                    create_missing=True,
+                    create_mode=0o700,
+                    final_exact_mode=0o700,
+                )
+            except FilesystemSafetyError as exc:
+                raise AuditSecurityError("audit parent topology/ownership/permissions are unsafe") from exc
+            try:
+                self._parent_identity = info
             finally:
                 os.close(fd)
 
-    def _open_parent(self, expected: tuple[int, int] | None) -> int:
-        assert self.path is not None
-        flags = os.O_RDONLY
-        if not hasattr(os, "O_DIRECTORY") or not hasattr(os, "O_NOFOLLOW"):
-            raise AuditSecurityError("platform lacks safe audit directory primitives")
-        flags |= os.O_DIRECTORY | os.O_NOFOLLOW
+    def _open_parent(self) -> tuple[int, os.stat_result]:
+        if self.path is None or self._parent_identity is None:
+            raise AuditSecurityError("audit path state is incomplete")
         try:
-            fd = os.open(self.path.parent, flags)
-        except OSError as exc:
-            raise AuditSecurityError("audit parent is unavailable") from exc
-        try:
-            info = os.fstat(fd)
-            identity = (info.st_dev, info.st_ino)
+            fd, info = open_directory_fd(
+                self.path.parent,
+                final_exact_mode=0o700,
+            )
             if (
-                not stat.S_ISDIR(info.st_mode)
-                or info.st_uid != os.getuid()
-                or stat.S_IMODE(info.st_mode) != 0o700
-                or (expected is not None and identity != expected)
+                info.st_dev != self._parent_identity.st_dev
+                or info.st_ino != self._parent_identity.st_ino
             ):
-                raise AuditSecurityError("audit parent topology/ownership/permissions are unsafe")
-            return fd
-        except Exception:
-            os.close(fd)
-            raise
+                os.close(fd)
+                raise AuditSecurityError("audit parent pathname binding changed")
+            return fd, info
+        except FilesystemSafetyError as exc:
+            raise AuditSecurityError("audit parent is unavailable or unsafe") from exc
 
     def _append_private_line(self, line: bytes) -> None:
         if self.path is None or self._leaf_name is None or self._parent_identity is None:
             raise AuditSecurityError("audit path state is incomplete")
-        parent_fd = self._open_parent(expected=self._parent_identity)
+        parent_fd, parent_info = self._open_parent()
         fd: int | None = None
         try:
-            flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NONBLOCK
-            if not hasattr(os, "O_NOFOLLOW"):
-                raise AuditSecurityError("platform lacks O_NOFOLLOW for audit file")
-            flags |= os.O_NOFOLLOW
             try:
-                fd = os.open(self._leaf_name, flags, 0o600, dir_fd=parent_fd)
-            except OSError as exc:
+                fd, _ = open_regular_at(
+                    parent_fd,
+                    self._leaf_name,
+                    os.O_WRONLY | os.O_APPEND | os.O_CREAT | getattr(os, "O_NONBLOCK", 0),
+                    mode=0o600,
+                    exact_mode=0o600,
+                    require_single_link=True,
+                )
+            except FilesystemSafetyError as exc:
                 raise AuditSecurityError("audit file cannot be opened safely") from exc
-            info = os.fstat(fd)
-            if (
-                not stat.S_ISREG(info.st_mode)
-                or info.st_uid != os.getuid()
-                or info.st_nlink != 1
-                or stat.S_IMODE(info.st_mode) != 0o600
-            ):
-                raise AuditSecurityError("audit file topology/ownership/permissions are unsafe")
+
             view = memoryview(line)
             while view:
                 try:
@@ -112,8 +100,14 @@ class AuditLog:
                 view = view[written:]
             try:
                 os.fsync(fd)
-            except OSError as exc:
-                raise AuditSecurityError("audit file sync failed") from exc
+                verify_leaf_binding(parent_fd, self._leaf_name, fd)
+                verify_directory_binding(
+                    self.path.parent,
+                    parent_info,
+                    final_exact_mode=0o700,
+                )
+            except (OSError, FilesystemSafetyError) as exc:
+                raise AuditSecurityError("audit filesystem binding changed during append") from exc
         finally:
             if fd is not None:
                 os.close(fd)
@@ -129,13 +123,21 @@ class AuditLog:
                 safe[key] = value
             elif isinstance(value, int) and -(2**31) <= value <= 2**31 - 1:
                 safe[key] = value
-            elif isinstance(value, str) and len(value) <= 128 and value.isascii() and all(ord(ch) >= 32 for ch in value):
+            elif (
+                isinstance(value, str)
+                and len(value) <= 128
+                and value.isascii()
+                and all(ord(ch) >= 32 for ch in value)
+            ):
                 safe[key] = value
         return safe
 
     def write(self, event: str, **fields: Any) -> None:
         safe = self._safe_event(event, fields)
         if self.path is not None:
-            line = (json.dumps(safe, ensure_ascii=True, sort_keys=True, separators=(",", ":")) + "\n").encode("ascii")
+            line = (
+                json.dumps(safe, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+                + "\n"
+            ).encode("ascii")
             self._append_private_line(line)
         self.events.append(dict(safe))
