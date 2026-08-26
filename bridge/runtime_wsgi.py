@@ -2,7 +2,8 @@
 
 Module import itself is network-free and does not import Telethon.  The first
 request constructs the canonical unified application from server-side private
-references. Any construction failure is reduced to a stable non-secret response.
+references, then wraps it with the Action request-contract guard. Any construction
+failure is reduced to a stable non-secret response.
 """
 from __future__ import annotations
 
@@ -16,9 +17,10 @@ def application(environ: dict[str, Any], start_response: Callable) -> Iterable[b
     global _default_application
     if _default_application is None:
         try:
+            from .action_request_guard import ActionRequestGuard
             from .runtime import build_production_application_from_env
 
-            _default_application = build_production_application_from_env()
+            _default_application = ActionRequestGuard(build_production_application_from_env())
         except Exception:
             raw = b'{"ok":false,"error":{"code":"startup_configuration_error","message":"Application configuration is invalid"}}'
             start_response(
