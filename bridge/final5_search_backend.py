@@ -1,10 +1,13 @@
 """FINAL5 Task3 Telethon search correctness overlay.
 
-This isolated backend repairs two source-verifiable seams without changing the
+This isolated backend repairs source-verifiable search seams without changing the
 canonical branch directly:
 
 * real Telethon global search is always given a legal server-side constraint
   (non-empty ``search``, ``from_user``, or an empty messages filter);
+* bounded date searches push their inclusive upper bound to Telethon as an
+  exclusive ``offset_date`` just after the requested endpoint, so old ranges
+  are not hidden behind the newest bounded scan prefix;
 * chat-scoped search cursors use Telethon's exclusive ``offset_id`` when the
   client explicitly supports it, so later pages do not rescan the same newest
   bounded prefix.
@@ -19,7 +22,7 @@ No Telethon import or network activity occurs at module import time.
 from __future__ import annotations
 
 import unicodedata
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
 from .backend import TelethonReadBackend
@@ -125,6 +128,7 @@ class Final5TelethonReadBackend(TelethonReadBackend):
         from_user: Any | None = None,
         empty_filter: Any | None = None,
         offset_id: int | None = None,
+        offset_date: datetime | None = None,
     ) -> list[Any]:
         method = client.iter_messages
         kwargs: dict[str, Any] = {"limit": limit}
@@ -164,6 +168,15 @@ class Final5TelethonReadBackend(TelethonReadBackend):
                     details={"retryable": False},
                 )
             kwargs["offset_id"] = offset_id
+        if offset_date is not None:
+            if not self._supports_named_parameter(method, "offset_date"):
+                raise BridgeError(
+                    "Telegram client does not support date-bounded search",
+                    status=503,
+                    code="telegram_search_date_unsupported",
+                    details={"retryable": False},
+                )
+            kwargs["offset_date"] = offset_date
 
         iterator = method(entity, **kwargs)
         if hasattr(iterator, "__aiter__"):
@@ -260,6 +273,14 @@ class Final5TelethonReadBackend(TelethonReadBackend):
                 elif boundary is not None and scoped_server_continuation:
                     offset_id = boundary[1]
 
+                # Telethon's offset_date is exclusive while the Bridge DateRange
+                # contract is inclusive at both ends. One second is intentionally
+                # added to the requested end; Telegram dates are second-granular and
+                # the local DateRange filter still rejects anything actually > end.
+                server_offset_date = None
+                if boundary is None and dates.end is not None:
+                    server_offset_date = dates.end + timedelta(seconds=1)
+
                 messages = await self._iter_search_messages(
                     client,
                     entity,
@@ -268,6 +289,7 @@ class Final5TelethonReadBackend(TelethonReadBackend):
                     from_user=resolved_global_sender,
                     empty_filter=empty_filter,
                     offset_id=offset_id,
+                    offset_date=server_offset_date,
                 )
                 chat_id = str(getattr(entity, "id", chat or "global"))
                 require_sender_details = bool(
