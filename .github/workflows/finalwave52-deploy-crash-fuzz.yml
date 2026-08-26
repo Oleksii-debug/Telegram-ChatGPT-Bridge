@@ -6,6 +6,7 @@ on:
       - 'tools/finalwave52_deploy_crash_fuzz.py'
       - 'tools/finalwave52_lifecycle_replay_fuzz.py'
       - 'tools/finalwave52_previous_release_fuzz.py'
+      - 'tools/finalwave52_terminal_persistence_fuzz.py'
       - '.github/workflows/finalwave52-deploy-crash-fuzz.yml'
 
 permissions:
@@ -36,6 +37,7 @@ jobs:
           cp tools/finalwave52_deploy_crash_fuzz.py /tmp/finalwave52_deploy_crash_fuzz.py
           cp tools/finalwave52_lifecycle_replay_fuzz.py /tmp/finalwave52_lifecycle_replay_fuzz.py
           cp tools/finalwave52_previous_release_fuzz.py /tmp/finalwave52_previous_release_fuzz.py
+          cp tools/finalwave52_terminal_persistence_fuzz.py /tmp/finalwave52_terminal_persistence_fuzz.py
       - name: Checkout exact role01 source under test
         run: |
           git checkout --detach c4a4f2f050cdab8937db97091844884bd1fb8f3f
@@ -43,6 +45,7 @@ jobs:
           cp /tmp/finalwave52_deploy_crash_fuzz.py tools/finalwave52_deploy_crash_fuzz.py
           cp /tmp/finalwave52_lifecycle_replay_fuzz.py tools/finalwave52_lifecycle_replay_fuzz.py
           cp /tmp/finalwave52_previous_release_fuzz.py tools/finalwave52_previous_release_fuzz.py
+          cp /tmp/finalwave52_terminal_persistence_fuzz.py tools/finalwave52_terminal_persistence_fuzz.py
       - name: Compile exact role01 recovery engine and independent oracles
         run: >-
           python -m py_compile
@@ -53,15 +56,17 @@ jobs:
           tools/finalwave52_deploy_crash_fuzz.py
           tools/finalwave52_lifecycle_replay_fuzz.py
           tools/finalwave52_previous_release_fuzz.py
+          tools/finalwave52_terminal_persistence_fuzz.py
       - name: Falsify role01 durable boundaries
         run: |
           python tools/finalwave52_deploy_crash_fuzz.py
           python tools/finalwave52_lifecycle_replay_fuzz.py
           python tools/finalwave52_previous_release_fuzz.py
+          python tools/finalwave52_terminal_persistence_fuzz.py
       - name: Role01 exact-head secret scans
         if: always()
         run: |
-          rm -f tools/finalwave52_deploy_crash_fuzz.py tools/finalwave52_lifecycle_replay_fuzz.py tools/finalwave52_previous_release_fuzz.py
+          rm -f tools/finalwave52_deploy_crash_fuzz.py tools/finalwave52_lifecycle_replay_fuzz.py tools/finalwave52_previous_release_fuzz.py tools/finalwave52_terminal_persistence_fuzz.py
           python tools/secret_scan.py --mode current
           python tools/secret_scan.py --mode history
       - name: Recovery and no-autodeploy guards
