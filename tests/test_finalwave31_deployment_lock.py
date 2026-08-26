@@ -71,6 +71,36 @@ class FinalWave31DeploymentLockTests(unittest.TestCase):
                 with deploy_release._deployment_lock(alias / "control"):
                     self.fail("ancestor symlink must never reach critical section")
 
+    def test_ancestor_parent_replacement_between_stat_and_open_is_rejected(self):
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            parent = base / "parent"
+            parent.mkdir(mode=0o700)
+            os.chmod(parent, 0o700)
+            root = parent / "control"
+            root.mkdir(mode=0o700)
+            os.chmod(root, 0o700)
+            moved = base / "moved-parent"
+            real_open = deployment_lock_policy.os.open
+            triggered = {"done": False}
+
+            def racing_open(target, flags, *args, **kwargs):
+                if target == "parent" and kwargs.get("dir_fd") is not None and not triggered["done"]:
+                    triggered["done"] = True
+                    parent.rename(moved)
+                    parent.mkdir(mode=0o700)
+                    os.chmod(parent, 0o700)
+                    replacement_root = parent / "control"
+                    replacement_root.mkdir(mode=0o700)
+                    os.chmod(replacement_root, 0o700)
+                return real_open(target, flags, *args, **kwargs)
+
+            with mock.patch.object(deployment_lock_policy.os, "open", side_effect=racing_open):
+                with self.assertRaises(SafetyError):
+                    with deploy_release._deployment_lock(root):
+                        self.fail("replaced ancestor parent must never reach critical section")
+            self.assertTrue(triggered["done"])
+
     def test_control_root_replacement_between_binding_and_leaf_open_is_rejected(self):
         with tempfile.TemporaryDirectory() as td:
             root = self.root(td)
@@ -123,6 +153,30 @@ class FinalWave31DeploymentLockTests(unittest.TestCase):
                 with self.assertRaises(SafetyError):
                     with deploy_release._deployment_lock(root):
                         self.fail("replaced leaf must never reach critical section")
+            self.assertTrue(triggered["done"])
+
+    def test_absent_leaf_insertion_between_stat_and_open_is_rejected(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = self.root(td)
+            lock = self.lock_path(root)
+            real_open = deployment_lock_policy.os.open
+            triggered = {"done": False}
+
+            def racing_open(target, flags, *args, **kwargs):
+                if (
+                    target == deploy_release.TRANSACTION_LOCK
+                    and kwargs.get("dir_fd") is not None
+                    and not triggered["done"]
+                ):
+                    triggered["done"] = True
+                    lock.write_bytes(b"")
+                    os.chmod(lock, 0o600)
+                return real_open(target, flags, *args, **kwargs)
+
+            with mock.patch.object(deployment_lock_policy.os, "open", side_effect=racing_open):
+                with self.assertRaises(SafetyError):
+                    with deploy_release._deployment_lock(root):
+                        self.fail("inserted leaf must never reach critical section")
             self.assertTrue(triggered["done"])
 
     def test_leaf_replacement_after_flock_is_rejected_by_inode_rebinding(self):
@@ -186,11 +240,13 @@ class FinalWave31DeploymentLockTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as td:
             root = self.root(td)
-            self.make_lock(root)
+            lock = self.make_lock(root)
+            with self.assertRaises(deployment_lock_policy.LockPolicyError):
+                deployment_lock_policy.validate_preexisting_lock(lock, owner_uid=os.geteuid() + 1)
             with mock.patch.object(deployment_lock_policy.os, "geteuid", return_value=os.geteuid() + 1):
                 with self.assertRaises(SafetyError):
                     with deploy_release._deployment_lock(root):
-                        self.fail("wrong-owner policy must never reach critical section")
+                        self.fail("wrong-owner control root must never reach critical section")
 
     def test_broad_control_root_fails_closed(self):
         with tempfile.TemporaryDirectory() as td:
