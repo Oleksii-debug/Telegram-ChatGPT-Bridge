@@ -215,7 +215,7 @@
         "bridge/validation.py",
         "docs/DEV03_SWARM_READ_HARDENING.md",
         "tests/test_dev03_history_offset.py",
-        "tests/test_dev03_swARM_READ_HARDENING.md"
+        "tests/test_dev03_swarm_read.py"
       ],
       "excluded_specialist_paths": [".github/workflows/dev03-read.yml"],
       "auditor_findings": ["A01-08", "A01-09"],
