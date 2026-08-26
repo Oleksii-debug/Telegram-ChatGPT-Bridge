@@ -78,6 +78,34 @@ class FinalWave26A011RecoveryTests(unittest.TestCase):
             self.assertEqual("CRITICAL_TRANSACTION_AMBIGUOUS", journal["state"])
             self.assertEqual("runtime_manifest_changed", journal["reason_code"])
 
+    def test_missing_runtime_manifest_durably_terminalizes_before_any_redeploy(self):
+        with tempfile.TemporaryDirectory() as td:
+            layout = self._layout(Path(td))
+            self._create_backed_up_candidate_active(layout)
+            layout["runtime"].unlink()
+
+            with mock.patch.object(deploy_release, "atomic_switch_link") as switch:
+                self._reconcile_once(layout)
+                switch.assert_not_called()
+
+            journal = self._journal(layout)
+            self.assertEqual("CRITICAL_TRANSACTION_AMBIGUOUS", journal["state"])
+            self.assertEqual("runtime_manifest_changed", journal["reason_code"])
+
+    def test_missing_recovery_hook_terminalizes_control_plane_before_any_redeploy(self):
+        with tempfile.TemporaryDirectory() as td:
+            layout = self._layout(Path(td))
+            self._create_backed_up_candidate_active(layout)
+            (layout["control"] / "restart").unlink()
+
+            with mock.patch.object(deploy_release, "atomic_switch_link") as switch:
+                self._reconcile_once(layout)
+                switch.assert_not_called()
+
+            journal = self._journal(layout)
+            self.assertEqual("CRITICAL_TRANSACTION_AMBIGUOUS", journal["state"])
+            self.assertEqual("control_plane_changed", journal["reason_code"])
+
     def test_critical_terminal_writer_failure_is_not_swallowed_and_retry_never_switches(self):
         with tempfile.TemporaryDirectory() as td:
             layout = self._layout(Path(td))
@@ -170,6 +198,21 @@ class FinalWave26A011RecoveryTests(unittest.TestCase):
                     reason_code="synthetic_fsync_evidence",
                 )
             self.assertGreaterEqual(fsync.call_count, 2)
+            self.assertEqual("CRITICAL_TRANSACTION_AMBIGUOUS", self._journal(layout)["state"])
+
+    def test_stale_journal_temp_from_prior_process_does_not_block_retry(self):
+        with tempfile.TemporaryDirectory() as td:
+            layout = self._layout(Path(td))
+            self._create_backed_up_candidate_active(layout)
+            stale = layout["control"] / (deploy_release.TRANSACTION_JOURNAL + ".tmp.stale")
+            stale.write_text("stale synthetic temp\n", encoding="utf-8")
+            stale.chmod(0o600)
+            journal = self._journal(layout)
+            deploy_release._transition_transaction(
+                layout["control"], journal, "CRITICAL_TRANSACTION_AMBIGUOUS",
+                reason_code="synthetic_stale_temp_evidence",
+            )
+            self.assertTrue(stale.exists())
             self.assertEqual("CRITICAL_TRANSACTION_AMBIGUOUS", self._journal(layout)["state"])
 
     @unittest.skipIf(deploy_release.fcntl is None, "POSIX flock required")
