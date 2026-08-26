@@ -1,0 +1,83 @@
+name: FINALWAVE43 Resource Bounds
+
+on:
+  pull_request:
+    branches: [work3/integration-release-candidate]
+    paths:
+      - 'bridge/audit.py'
+      - 'bridge/downloads.py'
+      - 'tests/test_burst01_15_scale_bounds.py'
+      - 'tests/test_finalwave43_resource_bounds.py'
+      - 'tools/profile_finalwave43_resource_bounds.py'
+      - 'docs/FINALWAVE43_RESOURCE_BOUNDS.md'
+      - '.github/workflows/finalwave43-resource-bounds.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  resource-bounds:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout exact specialist head
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Set up Python 3.11
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.11'
+      - name: Compile changed runtime tests and profiler
+        run: >-
+          python -m py_compile
+          bridge/audit.py
+          bridge/downloads.py
+          tests/test_burst01_15_scale_bounds.py
+          tests/test_finalwave43_resource_bounds.py
+          tools/profile_finalwave43_resource_bounds.py
+      - name: Focused and inherited resource regressions
+        run: |
+          python -m unittest -v \
+            tests.test_burst01_15_scale_bounds \
+            tests.test_finalwave43_resource_bounds \
+            tests.test_dev07_audit_security \
+            tests.test_storage_downloads \
+            tests.test_archive_security \
+            tests.test_backend_read \
+            tests.test_dev03_history_offset \
+            tests.test_dev03_swarm_read
+      - name: Run 1k 5k 10k synthetic resource profiler
+        run: |
+          python tools/profile_finalwave43_resource_bounds.py > /tmp/finalwave43-profile.json
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          data = json.loads(Path('/tmp/finalwave43-profile.json').read_text(encoding='utf-8'))
+          assert data['schema'] == 'finalwave43-resource-profile-v1'
+          assert data['synthetic_only'] is True
+          assert [row['count'] for row in data['workloads']] == [1000, 5000, 10000]
+          for row in data['workloads']:
+              assert row['audit']['retained_events'] == 256
+              assert row['bulk_accept']['prior_file_get_calls_during_accept'] == 0
+              print(
+                  'FINALWAVE43_PROFILE',
+                  row['count'],
+                  'audit_peak_bytes=', row['audit']['tracemalloc_peak_bytes'],
+                  'audit_seconds=', round(row['audit']['elapsed_seconds'], 6),
+                  'bulk_peak_bytes=', row['bulk_accept']['tracemalloc_peak_bytes'],
+                  'bulk_seconds=', round(row['bulk_accept']['elapsed_seconds'], 6),
+                  'cursor_bytes=', row['cursor']['cursor_bytes'],
+                  'dialog_scan=', row['bounded_surfaces']['dialog_scan_per_page'],
+                  'search_scan=', row['bounded_surfaces']['search_scan_per_page'],
+              )
+          PY
+      - name: Current-tree secret scan
+        if: always()
+        run: python tools/secret_scan.py --mode current
+      - name: Full-history secret scan
+        if: always()
+        run: python tools/secret_scan.py --mode history
+      - name: No deployment arming
+        if: always()
+        run: test ! -e .cpanel.yml && test ! -e ops/ENABLE_HOSTIQ_AUTO_DEPLOY
