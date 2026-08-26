@@ -1,0 +1,36 @@
+name: FINALWAVE-30 PREPARE Integrity
+
+on:
+  pull_request:
+    branches:
+      - work3/integration-release-candidate
+
+permissions:
+  contents: read
+
+jobs:
+  prepare-integrity:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout full history
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Set up Python 3.11
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.11'
+      - name: Compile PREPARE verifier and adversarial tests
+        run: python -m py_compile tools/verify_release_prepare.py tests/test_finalwave30_prepare_integrity.py
+      - name: Run focused PREPARE integrity regressions
+        run: python -m unittest tests.test_finalwave30_prepare_integrity tests.test_release_package -v
+      - name: Current-tree secret scan
+        if: always()
+        run: python tools/secret_scan.py --mode current
+      - name: Full-history secret scan
+        if: always()
+        run: python tools/secret_scan.py --mode history
+      - name: Verify no deployment arming marker
+        if: always()
+        run: test ! -e .cpanel.yml && test ! -e ops/ENABLE_HOSTIQ_AUTO_DEPLOY
