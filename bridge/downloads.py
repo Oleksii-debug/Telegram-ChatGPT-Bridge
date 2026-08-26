@@ -50,9 +50,11 @@ class DownloadManager:
         "bulk_file_limit",
         "bulk_size_limit",
         "checkpoint_result_mismatch",
+        "download_result_changed",
         "download_result_collision",
         "duplicate_item_id",
         "file_hash_mismatch",
+        "file_registry_collision",
         "file_size_mismatch",
         "file_too_large",
         "unsafe_backend_path",
@@ -177,6 +179,39 @@ class DownloadManager:
         origin = self._origin_key(job_id, item.item_id)
         return self.files.root / f".{origin}{suffix}"
 
+    def _cleanup_staging_leaf(self, candidate: Path) -> None:
+        """Remove only a staging-owned regular/symlink leaf; never arbitrary backend paths."""
+        try:
+            parent = candidate.parent.resolve(strict=True)
+            parent.relative_to(self.staging_dir)
+        except (OSError, ValueError):
+            return
+        try:
+            info = os.lstat(candidate)
+        except (FileNotFoundError, OSError):
+            return
+        if not (stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode)):
+            return
+        try:
+            candidate.unlink()
+        except OSError:
+            pass
+
+    def _cleanup_final_leaf(self, final: Path) -> None:
+        """Remove only the deterministic private result leaf without following it."""
+        try:
+            if final.parent.resolve(strict=True) != self.files.root:
+                return
+            info = os.lstat(final)
+        except (FileNotFoundError, OSError):
+            return
+        if not (stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode)):
+            return
+        try:
+            final.unlink()
+        except OSError:
+            pass
+
     def _validate_recovered_record(self, item: DownloadItem, record: FileRecord) -> None:
         if record.size > self.limits.max_single_bytes:
             raise BridgeError("Recovered file exceeds size limit", status=500, code="checkpoint_result_mismatch")
@@ -198,10 +233,10 @@ class DownloadManager:
             return registered
 
         final = self._final_path(item, job_id=job_id)
-        if not final.exists():
-            return None
         try:
             info = os.lstat(final)
+        except FileNotFoundError:
+            return None
         except OSError as exc:
             raise BridgeError("Recovered file is unavailable", status=500, code="unsafe_recovered_file") from exc
         if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
@@ -234,7 +269,13 @@ class DownloadManager:
         final = self._final_path(item, job_id=job_id)
         registered = False
         try:
-            if final.exists():
+            try:
+                os.lstat(final)
+            except FileNotFoundError:
+                pass
+            except OSError as exc:
+                raise BridgeError("Private download result state is unavailable", status=500, code="unsafe_recovered_file") from exc
+            else:
                 raise BridgeError("Private download result already exists", status=500, code="download_result_collision")
             result = self.backend.download_media(
                 chat=item.chat,
@@ -277,24 +318,29 @@ class DownloadManager:
                 mime_type=mime,
                 origin_key=self._origin_key(job_id, item.item_id),
             )
+            verified = self.files.get(record.file_ref)
+            if (
+                verified is None
+                or verified.size != size
+                or not secrets.compare_digest(verified.sha256, digest)
+            ):
+                self.files.delete(record.file_ref)
+                raise BridgeError(
+                    "Private download result changed before registration completed",
+                    status=500,
+                    code="download_result_changed",
+                )
+            record = verified
             registered = True
             return record
         finally:
             for candidate in {path for path in (target, returned, resolved) if path is not None}:
-                try:
-                    if candidate.exists() and candidate.is_file():
-                        candidate.unlink()
-                except OSError:
-                    pass
+                self._cleanup_staging_leaf(candidate)
             if not registered:
                 # Normal Python exceptions clean the unregistered file. A hard
                 # process loss cannot run this finally block; the deterministic
                 # private path is then adopted by _recover_existing on resume.
-                try:
-                    if final.exists() and final.is_file():
-                        final.unlink()
-                except OSError:
-                    pass
+                self._cleanup_final_leaf(final)
 
     def _complete_files(self, payload: dict[str, Any]) -> list[FileRecord]:
         records: list[FileRecord] = []

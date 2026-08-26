@@ -12,7 +12,7 @@ import stat
 import time
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Iterator
 
 from .errors import BridgeError
@@ -102,6 +102,81 @@ class FileRecordStore:
             raise BridgeError("Invalid private file origin key", status=500, code="invalid_origin_key")
         return origin_key
 
+    @staticmethod
+    def _origin_leaf(rel_path: Any) -> str | None:
+        """Return a safe root-level leaf for deterministic download origins.
+
+        Download-origin records are deliberately stored directly under the
+        private file root.  Refuse to self-heal nested/absolute/traversal-shaped
+        registry paths so database corruption or topology surprises remain
+        fail-closed instead of becoming deletion authority.
+        """
+        if not isinstance(rel_path, str) or not rel_path or "\\" in rel_path:
+            return None
+        path = PurePosixPath(rel_path)
+        if path.is_absolute() or len(path.parts) != 1:
+            return None
+        leaf = path.parts[0]
+        if leaf in {"", ".", ".."}:
+            return None
+        return leaf
+
+    def _prune_missing_origin_row(
+        self,
+        origin: str,
+        *,
+        file_ref: str,
+        rel_path: str,
+    ) -> bool:
+        """Forget one stale origin row only when its root-level leaf is absent.
+
+        Existing objects, including dangling symlinks, are never removed or
+        converted into a self-heal signal.  The second lstat occurs under an
+        immediate SQLite transaction so concurrent registry writers cannot
+        change the row while the stale-row decision is committed.
+        """
+        leaf = self._origin_leaf(rel_path)
+        if leaf is None:
+            return False
+        candidate = self.root / leaf
+        try:
+            os.lstat(candidate)
+        except FileNotFoundError:
+            pass
+        except OSError:
+            return False
+        else:
+            return False
+
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            current = connection.execute(
+                "SELECT file_ref,rel_path FROM files WHERE origin_key=?",
+                (origin,),
+            ).fetchone()
+            if not current or str(current[0]) != file_ref or str(current[1]) != rel_path:
+                connection.rollback()
+                return False
+            leaf = self._origin_leaf(current[1])
+            if leaf is None:
+                connection.rollback()
+                return False
+            try:
+                os.lstat(self.root / leaf)
+            except FileNotFoundError:
+                cursor = connection.execute(
+                    "DELETE FROM files WHERE origin_key=? AND file_ref=? AND rel_path=?",
+                    (origin, file_ref, rel_path),
+                )
+                connection.commit()
+                return cursor.rowcount == 1
+            except OSError:
+                connection.rollback()
+                return False
+            else:
+                connection.rollback()
+                return False
+
     def _relative_path(self, path: Path) -> str:
         try:
             original_stat = os.lstat(path)
@@ -187,7 +262,7 @@ class FileRecordStore:
         return FileRecord(safe_ref, str(candidate), row[1], row[2], int(row[3]), row[4], int(row[5]), origin)
 
     def get_by_origin(self, origin_key: str) -> FileRecord | None:
-        """Resolve a private download-origin marker without exposing it publicly."""
+        """Resolve a private download origin and self-heal only a missing leaf."""
         try:
             origin = self._validate_origin_key(origin_key)
         except BridgeError:
@@ -195,10 +270,25 @@ class FileRecordStore:
         if origin is None:
             return None
         with self._connect() as connection:
-            row = connection.execute("SELECT file_ref FROM files WHERE origin_key=?", (origin,)).fetchone()
+            row = connection.execute(
+                "SELECT file_ref,rel_path FROM files WHERE origin_key=?",
+                (origin,),
+            ).fetchone()
         if not row:
             return None
-        return self.get(str(row[0]))
+        file_ref = str(row[0])
+        record = self.get(file_ref)
+        if record is not None:
+            return record
+        # A hard loss/manual cleanup can leave the unique origin row durable
+        # after its private root-level file disappeared.  Without pruning that
+        # exact stale row, resume redownloads collide forever on origin_key.
+        self._prune_missing_origin_row(
+            origin,
+            file_ref=file_ref,
+            rel_path=str(row[1]),
+        )
+        return None
 
     def delete(self, file_ref: str) -> bool:
         """Remove a registered private file and its registry row safely."""

@@ -1,58 +1,84 @@
 # DEV04 media / downloads / storage / ZIP hardening
 
-This document describes the isolated DEV04 swarm slice. It is source/synthetic hardening only and is not production, Telegram, deployment, or acceptance PASS evidence.
+This document describes DEV04 source/synthetic hardening only. It is not production, Telegram, deployment, or acceptance PASS evidence.
 
 ## Exact ownership
 
-DEV04 owns media/download/storage/archive mechanics. This slice deliberately does not change Telegram read search semantics, Telegram write preview/commit logic, deployment tooling, OpenAPI authority, or production runtime state.
+DEV04 owns media/download/storage/archive mechanics and private-file byte identity. It does not own Telegram read/search semantics, write preview/commit/idempotency/effect classification, deployment tooling, OpenAPI authority, or production runtime state.
 
-## Hardened invariants
+## Canonical baseline already integrated
 
-- Telegram/user supplied filenames are normalized to Unicode NFC before use as display/archive metadata.
-- Traversal components, ASCII control/Windows-invalid characters and bidi override/isolate controls are neutralized.
-- Windows device names such as CON/PRN/AUX/NUL/COM1..9/LPT1..9 are not emitted as raw archive/display names.
-- Public `file_ref` values remain opaque and never expose server paths; private recovery-origin markers are derived from the random job identity plus item identity and are never returned in public metadata.
-- Integrity/size/topology/limit failures are non-retryable for an immutable download checkpoint item, preventing repeated redownload loops. Availability/FloodWait/RPC-style failures remain retryable.
-- Normal registry failures clean unregistered completed downloads/ZIPs instead of leaking ordinary exception-path orphans.
-- Hard process loss after a download has been moved into private storage, or after registry commit but before checkpoint result save, can be recovered on resume without a second Telegram download. Legacy file registries are migrated in place with a private unique origin marker.
-- Legacy `origin_key` schema migration is serialized with `BEGIN IMMEDIATE` before schema inspection. Two Passenger/process workers cannot both observe the old schema and race the same `ALTER TABLE`; a deterministic two-process regression covers this interleaving.
-- ZIP source data is opened with `O_NOFOLLOW` where supported and validated by descriptor topology/size.
-- ZIP generation streams from that descriptor and recomputes SHA-256/size while writing. A source swap or same-size content mutation after registry lookup fails closed.
-- ZIP member collisions are resolved under Unicode NFC + casefold and the finished archive is still checked for member count, traversal, collision and CRC integrity.
-- Private file serving is descriptor-bound. After opaque-ref registry validation, the file is opened beneath owner-private directory descriptors with `O_NOFOLLOW` where available, topology/owner/size/SHA-256 are independently revalidated on that exact descriptor, and WSGI streams from the pinned handle rather than reopening the pathname.
-- Replacing the registered leaf path after verified open cannot redirect the current bearer/signed response to the replacement inode. Symlink/hardlink or broad-permission private-root/nested-directory topology fails closed.
-- The verified serving descriptor is closed on normal iterator completion and on `start_response` failure.
+DEV01 has already semantically integrated the prior DEV04 package into canonical ancestry. That baseline includes durable download crash recovery, serialized `origin_key` migration, Unicode/filename/ZIP hardening, descriptor-verified ZIP input and descriptor-bound private serving. The old specialist PR #37 is historical evidence for that accepted package and is not the merge vehicle for this new delta.
 
-## Existing limits preserved
+## New snapshot-safe SEND_FILES seam
+
+Current DEV05 preflight validates a private file record and then carries an ordinary filesystem pathname toward `client.send_file`. A pathname can be replaced after validation, and even a pinned descriptor alone does not prevent another process from modifying the same inode in place. For a consequential SEND_FILES commit, the exact bytes approved before the Telegram effect must remain stable.
+
+DEV04 therefore adds a media-owned pre-effect snapshot interface in `bridge.file_access`:
+
+- `UploadFileIdentity(file_ref, sha256, size)` binds an opaque private ref to the exact approved hash and positive byte size.
+- `open_verified_upload_batch(...)` defaults to the canonical private send bounds: at most 10 files, 100 MiB per file and 250 MiB total.
+- Every source is first opened through canonical `open_verified_file`, preserving owner-private directory, no-follow, regular-file, single-link, size and SHA-256 checks.
+- Before any Telegram effect, source bytes are copied into an owner-private unnamed `TemporaryFile` while SHA-256 and size are recomputed again. The verified source descriptor is then closed.
+- A completed `VerifiedUploadFile` is a read-only `io.BufferedIOBase` snapshot. Later pathname replacement or later in-place mutation of the registered source cannot change the bytes consumed by the external uploader.
+- Snapshot fds are reduced to owner-only mode where POSIX permissions are available.
+- The upload object exposes safe `name`, opaque `file_ref`, SHA-256, size and MIME type, but no filesystem path and no `FileRecord` object.
+- Duplicate refs, invalid shape and byte-limit violations fail before any file open.
+- If any member fails open, topology, snapshot copy or exact identity checks, all source/snapshot handles created so far are closed before control returns.
+- `VerifiedUploadBatch` owns snapshot lifetime and closes every member on normal exit and consumer exceptions.
+
+## Stale download-origin recovery closure
+
+The integrated origin-key crash recovery had one further durability edge case. A registry commit can survive while its private file later disappears before the checkpoint acquires the registered `file_ref`. In that state `get_by_origin()` could not return a valid record, but the unique `origin_key` row remained. A later resume then downloaded the file again, collided with the stale unique origin row, removed the new unregistered file and could repeat that redownload/collision cycle.
+
+DEV04 now makes `FileRecordStore.get_by_origin()` self-heal only this narrowly proven stale state:
+
+- origin-key records are eligible for pruning only when their stored path is a single root-level POSIX leaf, matching the deterministic download layout;
+- a missing leaf is checked with `lstat`, not `exists`, so dangling symlinks are treated as existing topology and are never mistaken for absence;
+- the same row identity and file absence are rechecked after `BEGIN IMMEDIATE` before deletion;
+- any existing object, symlink, I/O uncertainty, absolute/nested/traversal-shaped path or changed registry row remains fail-closed and is not deleted;
+- after a genuinely stale row is pruned, normal resume may redownload once and register the same deterministic origin again;
+- regression coverage requires the following resume to remain complete without a second backend download and requires exactly one current origin row.
+
+This is registry self-heal, not a general retention/cleanup mechanism and not permission to delete suspicious private files.
+
+## DEV05 / DEV01 composition contract
+
+The write owner remains authoritative for preview/commit/idempotency, target/reply preflight, the precise external-effect boundary and AMBIGUOUS/no-blind-resend behavior.
+
+The intended integration is:
+
+1. After the commit payload is approved but still before the Telegram effect boundary, convert its already-bound private file entries to `UploadFileIdentity` values.
+2. Call `open_verified_upload_batch` while failure is still provably pre-effect.
+3. A `None` result means private bytes/topology could not be proven and must fail before `client.send_file`. Invalid shape/size policy raises before file opening.
+4. Pass `batch.files` directly as file-like inputs. Do not recover or reconstruct `record.path`.
+5. Keep the batch alive through DEV05 target/reply preflight and the actual `client.send_file` call.
+6. Close the batch in `finally`. Any uncertain exception after DEV05 crosses the mutating boundary remains AMBIGUOUS and must never cause a blind resend.
+
+DEV04 does not modify or activate the DEV05 write state machine in this branch.
+
+## Telethon compatibility boundary
+
+Telethon 1.44 documents `send_file` as accepting file-like objects or sequences and uses file-like `.name`. Its upload path consumes streams; image handling also recognizes standard `io.IOBase` objects for stream-position preservation. `VerifiedUploadFile` deliberately subclasses `io.BufferedIOBase` for this compatibility. This is source-contract compatibility only, not live Telegram evidence.
+
+## Existing bounded-operation limits
 
 - single download: 100 MiB default;
 - bulk download: 100 files / 500 MiB default;
-- ZIP: 200 members / 750 MiB uncompressed default;
-- private staging and lock directories remain owner-only where POSIX permissions are available.
+- verified SEND_FILES snapshot: 10 files / 100 MiB each / 250 MiB total by default;
+- ZIP: 200 members / 750 MiB uncompressed default.
 
-These are bounded-operation limits, not a global retention quota. A global multi-process retention/quota policy should be coordinated with DEV08 because it needs atomic shared-state reservation/cleanup semantics rather than a racy directory-size check.
+These are per-operation bounds, not a global multi-process retention/storage quota. Global reservation, retention and cleanup remain a DEV08 coordination topic; DEV04 does not add a racy directory-size quota.
 
-## Cross-lane interfaces
+## Cross-lane boundaries
 
-- DEV03/read supplies `(chat, message_id, Telegram file_ref)` and media metadata. DEV04 continues to verify that the opaque ref matches the exact message before Telegram download through the existing backend contract.
-- DEV05/send-files consumes registered private `file_ref` values. DEV04 preserves that contract and the inherited 53 send-files/file-policy regressions. DEV04 does not redefine preview/commit or Telegram effect-boundary semantics; any future descriptor/snapshot transport into SEND_FILES must compose with DEV05's pre-effect validation and no-blind-resend rules rather than bypass them.
-- DEV07 should adversarially re-audit filename/path/archive/private-serving topology boundaries and public/private metadata separation.
-- DEV08 identified the concurrent legacy `origin_key` migration race; DEV04 closes it with an immediate SQLite migration transaction and a two-process regression. DEV08 retains broader shared-state/concurrency/retention stress ownership.
-- DEV09 should include the DEV04 regressions in exact-head E1-E6/G4-G5 QA after DEV01 canonical integration. Synthetic tests are not product PASS.
-
-## Current source/synthetic evidence
-
-On DEV04 head `294ed43bcb74f9255dce8aa83801ecf98730d7bd`, GitHub tested the PR merge ref `c445f63adbb015fcf212a0e40f75a9cc375c94ed` against canonical DEV01 `c609adfc9a1116aae635a0b14d632a5e59b6c2af`.
-
-- DEV04 media/storage/private-serving/migration plus inherited read-app regressions: 97/97 PASS.
-- Existing send-files/private-file policy compatibility: 53/53 PASS.
-- Targeted total: 150/150 PASS.
-- Offline OpenAPI validation: PASS.
-- Current-tree and full-history secret scans: PASS.
-- No-deploy safety markers: PASS.
-
-The ordinary canonical Recovery Guard remains intentionally fail-closed at deterministic integration provenance because this is a specialist post-import overlay. On this merge ref the first failure is `unexpected post-import mutation: DEV3:bridge/app.py`; downstream broad regression/PREPARE is therefore not claimed.
+- DEV03 owns dialogs/history/search/read semantics; DEV04 preserves the existing opaque media/file-ref boundary.
+- DEV05 owns write safety and must integrate snapshot inputs without weakening its effect-boundary or no-blind-resend invariants.
+- DEV07 should adversarially re-audit snapshot/file topology, metadata privacy and path-free boundaries.
+- DEV08 retains global shared-state/concurrency/recovery/retention stress ownership. DEV04's stale-origin pruning is deliberately limited to deterministic missing download leaves and does not become a general quota/retention engine.
+- DEV09 should absorb the new snapshot and stale-origin regressions into exact-canonical E/G/K QA after canonical integration.
+- DEV01 owns semantic import and deterministic canonical provenance.
 
 ## Remaining evidence boundary
 
-Real Telegram media download, real interrupted-job recovery under the production runtime, authenticated/signed private serving on HOSTiQ, storage persistence across Passenger restart, live ZIP delivery, and final K3 remain external/live evidence. Canonical DEV01 semantic integration/provenance registration and exact integrated regression/PREPARE are still required. No live Telegram action is performed by this slice.
+This new seam is not yet canonical write-path integration and is not product PASS. Still unproven are the exact combined DEV04+DEV05 canonical implementation, real Telegram media/download/SEND_FILES behavior, HOSTiQ private serving, Passenger restart persistence, live ZIP delivery and final K3/K5 scenarios. No live Telegram action is performed by this slice.
