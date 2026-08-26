@@ -11,6 +11,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 
+from ops.state_retention import StagingLease, create_staging_lease
+
 from .errors import BridgeError
 from .filenames import filename_collision_key, safe_filename
 from .storage import FileRecord, FileRecordStore
@@ -136,8 +138,17 @@ class ArchiveBuilder:
         final = self.files.root / f"{secrets.token_hex(20)}.zip"
         used: set[str] = set()
         registered = False
+        lease: StagingLease | None = None
         try:
+            # The held descriptor lock distinguishes a live writer from a stale
+            # crash artifact. Retention may reclaim only lease-managed staging;
+            # legacy/unmarked .part files remain protected as ambiguous.
+            lease = create_staging_lease(target)
             with zipfile.ZipFile(target, "w", compression=self.limits.compression, allowZip64=False) as zf:
+                try:
+                    os.chmod(target, 0o600)
+                except OSError:
+                    pass
                 for record in records:
                     arcname = unique_name(record.name, used)
                     self._write_record(zf, record, arcname=arcname)
@@ -170,6 +181,13 @@ class ArchiveBuilder:
                     target.unlink()
             except OSError:
                 pass
+            if lease is not None:
+                # Normal completion/failure removes the marker. Hard process loss
+                # cannot run this block, leaving an unlocked marker for aged cleanup.
+                try:
+                    lease.close(remove_marker=True)
+                except OSError:
+                    pass
             if not registered:
                 try:
                     if final.exists() and final.is_file():
