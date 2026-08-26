@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """Fail-closed cleanup for private Telegram Bridge state.
 
-Retention is deliberately narrower than "delete old files".  A destructive
+Retention is deliberately narrower than "delete old files". A destructive
 operation is allowed only when age, terminality, references, topology and the
 live serialization boundary can all be proven at deletion time.
 
@@ -17,6 +17,7 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import sqlite3
 import stat
 import time
@@ -29,6 +30,23 @@ _RETENTION_TABLE = "retention_high_water"
 _LEASE_SCHEMA = 1
 _MAX_RETENTION_SECONDS = 10 * 365 * 24 * 60 * 60
 _MAX_BATCH = 10_000
+_JOB_ID_RE = re.compile(r"^[A-Za-z0-9_-]{16,128}$")
+_ITEM_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
+_CODE_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
+_FILE_REF_RE = re.compile(r"^[A-Za-z0-9_-]{16,128}$")
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+_CHECKPOINT_KEYS = {"schema", "job_id", "status", "items", "results", "failures"}
+_ITEM_KEYS = {
+    "item_id",
+    "chat",
+    "message_id",
+    "source_file_ref",
+    "name",
+    "mime_type",
+    "expected_size",
+    "expected_sha256",
+}
+_FAILURE_KEYS = {"code", "status", "retryable"}
 
 
 class RetentionSafetyError(RuntimeError):
@@ -177,40 +195,63 @@ def _private_dir(path: Path, *, create: bool) -> Path:
     return lexical
 
 
+def _validate_database_leaf(path: Path) -> None:
+    if not (path.exists() or path.is_symlink()):
+        return
+    info = os.lstat(path)
+    if (
+        stat.S_ISLNK(info.st_mode)
+        or not stat.S_ISREG(info.st_mode)
+        or info.st_nlink != 1
+        or (hasattr(os, "geteuid") and info.st_uid != os.geteuid())
+    ):
+        raise RetentionSafetyError("unsafe_retention_database")
+
+
 def _prepare_sqlite_path(path: Path) -> Path:
     lexical = Path(os.path.abspath(os.path.expanduser(str(path))))
     parent = _private_dir(lexical.parent, create=True)
     if lexical.parent != parent:
         raise RetentionSafetyError("unsafe_retention_database_path")
     if lexical.exists() or lexical.is_symlink():
-        info = os.lstat(lexical)
-        if (
-            stat.S_ISLNK(info.st_mode)
-            or not stat.S_ISREG(info.st_mode)
-            or info.st_nlink != 1
-            or (hasattr(os, "geteuid") and info.st_uid != os.geteuid())
-        ):
-            raise RetentionSafetyError("unsafe_retention_database")
+        _validate_database_leaf(lexical)
         return lexical
-    flags = os.O_CREAT | os.O_EXCL | os.O_RDWR | int(getattr(os, "O_NOFOLLOW", 0)) | int(getattr(os, "O_CLOEXEC", 0))
+    flags = (
+        os.O_CREAT
+        | os.O_EXCL
+        | os.O_RDWR
+        | int(getattr(os, "O_NOFOLLOW", 0))
+        | int(getattr(os, "O_CLOEXEC", 0))
+    )
     try:
         fd = os.open(lexical, flags, 0o600)
     except FileExistsError:
-        return _prepare_sqlite_path(lexical)
+        _validate_database_leaf(lexical)
+        return lexical
     except OSError as exc:
         raise RetentionSafetyError("retention_database_create_failed") from exc
     try:
         info = os.fstat(fd)
-        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or info.st_nlink != 1
+            or (hasattr(os, "geteuid") and info.st_uid != os.geteuid())
+        ):
             raise RetentionSafetyError("unsafe_retention_database")
     finally:
         os.close(fd)
     return lexical
 
 
+def _validate_sqlite_sidecars(database: Path) -> None:
+    for suffix in ("-wal", "-shm"):
+        _validate_database_leaf(Path(str(database) + suffix))
+
+
 @contextmanager
 def _sqlite(path: str | Path) -> Iterator[sqlite3.Connection]:
     database = _prepare_sqlite_path(Path(path))
+    _validate_sqlite_sidecars(database)
     try:
         con = sqlite3.connect(str(database), timeout=8.0, isolation_level=None)
     except sqlite3.Error as exc:
@@ -220,11 +261,13 @@ def _sqlite(path: str | Path) -> Iterator[sqlite3.Connection]:
         con.execute("PRAGMA journal_mode=WAL")
         con.execute("PRAGMA synchronous=FULL")
         con.execute("PRAGMA busy_timeout=8000")
+        _validate_sqlite_sidecars(database)
         yield con
     except sqlite3.Error as exc:
         raise RetentionSafetyError("retention_database_unavailable") from exc
     finally:
         con.close()
+        _validate_sqlite_sidecars(database)
 
 
 def _require_tables(con: sqlite3.Connection, *names: str) -> None:
@@ -311,34 +354,93 @@ def _decode_checkpoint(raw_text: str, stored_digest: str) -> dict[str, Any]:
     return payload
 
 
+def _valid_file_ref(value: Any) -> bool:
+    return isinstance(value, str) and _FILE_REF_RE.fullmatch(value) is not None
+
+
 def _checkpoint_terminal(payload: dict[str, Any]) -> bool:
-    required = {"job_id", "status", "items", "results", "failures"}
-    if not required.issubset(payload):
+    """Mirror CheckpointStore validation before evaluating retention terminality."""
+    if set(payload) != _CHECKPOINT_KEYS or payload.get("schema") != 1:
         raise RetentionSafetyError("checkpoint_shape_corrupt")
-    items = payload["items"]
-    results = payload["results"]
-    failures = payload["failures"]
-    if not isinstance(items, list) or not isinstance(results, dict) or not isinstance(failures, dict):
+    job_id = payload.get("job_id")
+    status_value = payload.get("status")
+    items = payload.get("items")
+    results = payload.get("results")
+    failures = payload.get("failures")
+    if not isinstance(job_id, str) or _JOB_ID_RE.fullmatch(job_id) is None:
         raise RetentionSafetyError("checkpoint_shape_corrupt")
+    if status_value not in {"pending", "running", "partial", "complete", "failed"}:
+        raise RetentionSafetyError("checkpoint_shape_corrupt")
+    if not isinstance(items, list) or not 1 <= len(items) <= 500:
+        raise RetentionSafetyError("checkpoint_shape_corrupt")
+    if not isinstance(results, dict) or not isinstance(failures, dict):
+        raise RetentionSafetyError("checkpoint_shape_corrupt")
+
     item_ids: set[str] = set()
     for raw in items:
-        if not isinstance(raw, dict):
+        if not isinstance(raw, dict) or set(raw) != _ITEM_KEYS:
             raise RetentionSafetyError("checkpoint_shape_corrupt")
         item_id = raw.get("item_id")
-        if not isinstance(item_id, str) or not item_id or item_id in item_ids:
+        message_id = raw.get("message_id")
+        expected_size = raw.get("expected_size")
+        expected_sha = raw.get("expected_sha256")
+        if (
+            not isinstance(item_id, str)
+            or _ITEM_ID_RE.fullmatch(item_id) is None
+            or item_id in item_ids
+            or not isinstance(raw.get("chat"), str)
+            or not raw.get("chat")
+            or isinstance(message_id, bool)
+            or not isinstance(message_id, int)
+            or message_id <= 0
+            or not _valid_file_ref(raw.get("source_file_ref"))
+            or not isinstance(raw.get("name"), str)
+            or not isinstance(raw.get("mime_type"), str)
+            or (
+                expected_size is not None
+                and (
+                    isinstance(expected_size, bool)
+                    or not isinstance(expected_size, int)
+                    or expected_size < 0
+                )
+            )
+            or (
+                expected_sha is not None
+                and (not isinstance(expected_sha, str) or _SHA256_RE.fullmatch(expected_sha) is None)
+            )
+        ):
             raise RetentionSafetyError("checkpoint_shape_corrupt")
         item_ids.add(item_id)
+
     if (
-        not item_ids
-        or not set(results).issubset(item_ids)
+        not set(results).issubset(item_ids)
         or not set(failures).issubset(item_ids)
         or set(results).intersection(failures)
     ):
         raise RetentionSafetyError("checkpoint_shape_corrupt")
-    status = payload["status"]
-    if status == "complete":
-        return set(results) == item_ids and not failures
-    if status not in {"partial", "failed"}:
+    if any(not _valid_file_ref(value) for value in results.values()):
+        raise RetentionSafetyError("checkpoint_shape_corrupt")
+    for info in failures.values():
+        if not isinstance(info, dict) or set(info) != _FAILURE_KEYS:
+            raise RetentionSafetyError("checkpoint_shape_corrupt")
+        code = info.get("code")
+        status_code = info.get("status")
+        retryable = info.get("retryable")
+        if (
+            not isinstance(code, str)
+            or _CODE_RE.fullmatch(code) is None
+            or isinstance(status_code, bool)
+            or not isinstance(status_code, int)
+            or not 400 <= status_code <= 599
+            or not isinstance(retryable, bool)
+        ):
+            raise RetentionSafetyError("checkpoint_shape_corrupt")
+
+    if status_value == "complete":
+        if set(results) != item_ids or failures:
+            raise RetentionSafetyError("checkpoint_shape_corrupt")
+        return True
+    if status_value not in {"partial", "failed"}:
         return False
     unresolved = item_ids - set(results)
     if not unresolved:
@@ -404,7 +506,11 @@ def _cleanup_job_lock(lock_dir: Path, job_id: str) -> Iterator[tuple[int, Path, 
     cloexec = int(getattr(os, "O_CLOEXEC", 0))
     created = False
     try:
-        fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_RDWR | nofollow | cloexec, 0o600)
+        fd = os.open(
+            lock_path,
+            os.O_CREAT | os.O_EXCL | os.O_RDWR | nofollow | cloexec,
+            0o600,
+        )
         created = True
     except FileExistsError:
         try:
@@ -500,7 +606,10 @@ def cleanup_download_checkpoints(
     limit = _validate_batch(max_jobs)
     directory = _safe_lock_dir(lock_dir)
     candidates, protected, corrupt = _checkpoint_candidates(
-        checkpoint_db_path, now=ts, min_age_seconds=age, limit=limit
+        checkpoint_db_path,
+        now=ts,
+        min_age_seconds=age,
+        limit=limit,
     )
     deleted = busy = 0
     for job_id in candidates:
@@ -559,7 +668,13 @@ def create_staging_lease(part_path: str | Path, *, now: int | None = None) -> St
     if part.parent != parent:
         raise RetentionSafetyError("unsafe_staging_path")
     marker = part.with_name(part.name + ".lease")
-    flags = os.O_CREAT | os.O_EXCL | os.O_RDWR | int(getattr(os, "O_NOFOLLOW", 0)) | int(getattr(os, "O_CLOEXEC", 0))
+    flags = (
+        os.O_CREAT
+        | os.O_EXCL
+        | os.O_RDWR
+        | int(getattr(os, "O_NOFOLLOW", 0))
+        | int(getattr(os, "O_CLOEXEC", 0))
+    )
     try:
         fd = os.open(marker, flags, 0o600)
     except OSError as exc:
@@ -619,7 +734,11 @@ def _read_lease(fd: int, marker: Path) -> tuple[Path, int]:
 
 
 def _unlink_stage_part(path: Path) -> None:
-    flags = os.O_RDONLY | int(getattr(os, "O_NOFOLLOW", 0)) | int(getattr(os, "O_CLOEXEC", 0))
+    flags = (
+        os.O_RDONLY
+        | int(getattr(os, "O_NOFOLLOW", 0))
+        | int(getattr(os, "O_CLOEXEC", 0))
+    )
     try:
         fd = os.open(path, flags)
     except FileNotFoundError:
@@ -733,7 +852,9 @@ def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     if args.command == "writes":
         result: Any = cleanup_write_previews(
-            args.db, now=args.now, expired_grace_seconds=args.grace
+            args.db,
+            now=args.now,
+            expired_grace_seconds=args.grace,
         ).as_dict()
     elif args.command == "downloads":
         result = cleanup_download_checkpoints(
