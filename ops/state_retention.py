@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Any, Iterator
 
 _RETENTION_TABLE = "retention_high_water"
+_LOCK_QUEUE_TABLE = "retention_download_lock_cleanup"
 _LEASE_SCHEMA = 1
 _MAX_RETENTION_SECONDS = 10 * 365 * 24 * 60 * 60
 _MAX_BATCH = 10_000
@@ -35,6 +36,7 @@ _ITEM_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 _CODE_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 _FILE_REF_RE = re.compile(r"^[A-Za-z0-9_-]{16,128}$")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+_LOCK_NAME_RE = re.compile(r"^[0-9a-f]{64}\.lock$")
 _CHECKPOINT_KEYS = {"schema", "job_id", "status", "items", "results", "failures"}
 _ITEM_KEYS = {
     "item_id",
@@ -63,6 +65,7 @@ class CleanupResult:
     busy: int = 0
     protected: int = 0
     corrupt: int = 0
+    lock_files_deleted: int = 0
 
     def as_dict(self) -> dict[str, int]:
         return {
@@ -70,6 +73,7 @@ class CleanupResult:
             "busy": self.busy,
             "protected": self.protected,
             "corrupt": self.corrupt,
+            "lock_files_deleted": self.lock_files_deleted,
         }
 
 
@@ -98,6 +102,7 @@ def retention_policy() -> dict[str, str]:
         "download_checkpoint_terminal_aged": "EPHEMERAL_AFTER_LOCK_AND_RECHECK",
         "download_job_lock_active": "EPHEMERAL_PROTECTED_WHILE_LOCKED",
         "download_job_lock_terminal_deleted": "EPHEMERAL_RECLAIMABLE",
+        "download_lock_cleanup_queue": "RECOVERY_PROTECTED_UNTIL_ACK",
         "archive_staging_leased_aged": "EPHEMERAL_AFTER_LEASE_LOCK",
         "archive_staging_unleased": "AMBIGUOUS_PROTECTED",
         "write_preview_unreferenced_expired": "EPHEMERAL_AFTER_DB_RECHECK",
@@ -286,6 +291,15 @@ def _ensure_retention_table(con: sqlite3.Connection) -> None:
     )
 
 
+def _ensure_lock_queue(con: sqlite3.Connection) -> None:
+    con.execute(
+        f"CREATE TABLE IF NOT EXISTS {_LOCK_QUEUE_TABLE}("
+        "job_id TEXT PRIMARY KEY,"
+        "lock_name TEXT NOT NULL UNIQUE,"
+        "queued_at INTEGER NOT NULL CHECK(queued_at>=0))"
+    )
+
+
 def _advance_high_water(con: sqlite3.Connection, *, namespace: str, now: int) -> None:
     _ensure_retention_table(con)
     row = con.execute(
@@ -466,6 +480,7 @@ def _checkpoint_candidates(
         con.execute("BEGIN IMMEDIATE")
         try:
             _require_tables(con, "download_jobs")
+            _ensure_lock_queue(con)
             _advance_high_water(con, namespace="download_checkpoint_cleanup", now=now)
             rows = con.execute(
                 "SELECT job_id,payload_json,payload_sha256 FROM download_jobs "
@@ -499,6 +514,15 @@ def _job_lock_name(job_id: str) -> str:
     return hashlib.sha256(job_id.encode("utf-8", "strict")).hexdigest() + ".lock"
 
 
+def _validate_lock_identity(job_id: str, lock_name: str) -> None:
+    if (
+        _JOB_ID_RE.fullmatch(job_id) is None
+        or _LOCK_NAME_RE.fullmatch(lock_name) is None
+        or not hmac.compare_digest(_job_lock_name(job_id), lock_name)
+    ):
+        raise RetentionSafetyError("lock_cleanup_queue_corrupt")
+
+
 @contextmanager
 def _cleanup_job_lock(lock_dir: Path, job_id: str) -> Iterator[tuple[int, Path, bool]]:
     lock_path = lock_dir / _job_lock_name(job_id)
@@ -521,15 +545,7 @@ def _cleanup_job_lock(lock_dir: Path, job_id: str) -> Iterator[tuple[int, Path, 
         raise RetentionSafetyError("job_lock_unavailable") from exc
     acquired = False
     try:
-        info = os.fstat(fd)
-        if (
-            not stat.S_ISREG(info.st_mode)
-            or info.st_nlink != 1
-            or info.st_size != 0
-            or stat.S_IMODE(info.st_mode) != 0o600
-            or (hasattr(os, "geteuid") and info.st_uid != os.geteuid())
-        ):
-            raise RetentionSafetyError("unsafe_job_lock_topology")
+        _validate_lock_fd(fd)
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
             acquired = True
@@ -545,6 +561,18 @@ def _cleanup_job_lock(lock_dir: Path, job_id: str) -> Iterator[tuple[int, Path, 
         os.close(fd)
 
 
+def _validate_lock_fd(fd: int) -> None:
+    info = os.fstat(fd)
+    if (
+        not stat.S_ISREG(info.st_mode)
+        or info.st_nlink != 1
+        or info.st_size != 0
+        or stat.S_IMODE(info.st_mode) != 0o600
+        or (hasattr(os, "geteuid") and info.st_uid != os.geteuid())
+    ):
+        raise RetentionSafetyError("unsafe_job_lock_topology")
+
+
 def _delete_checkpoint_if_terminal(
     db_path: str | Path,
     *,
@@ -558,6 +586,7 @@ def _delete_checkpoint_if_terminal(
         con.execute("BEGIN IMMEDIATE")
         try:
             _require_tables(con, "download_jobs")
+            _ensure_lock_queue(con)
             _advance_high_water(con, namespace="download_checkpoint_cleanup", now=now)
             row = con.execute(
                 "SELECT payload_json,payload_sha256,updated_at FROM download_jobs WHERE job_id=?",
@@ -571,6 +600,12 @@ def _delete_checkpoint_if_terminal(
                 con.execute("COMMIT")
                 return False
             cur = con.execute("DELETE FROM download_jobs WHERE job_id=?", (job_id,))
+            if int(cur.rowcount) == 1:
+                con.execute(
+                    f"INSERT INTO {_LOCK_QUEUE_TABLE}(job_id,lock_name,queued_at) VALUES(?,?,?) "
+                    "ON CONFLICT(job_id) DO UPDATE SET lock_name=excluded.lock_name,queued_at=excluded.queued_at",
+                    (job_id, _job_lock_name(job_id), now),
+                )
             con.execute("COMMIT")
             return int(cur.rowcount) == 1
         except Exception:
@@ -592,6 +627,136 @@ def _unlink_if_same_inode(path: Path, fd: int) -> None:
     os.unlink(path)
 
 
+def _ack_lock_cleanup(db_path: str | Path, *, job_id: str, lock_name: str) -> bool:
+    """Acknowledge only when the deleted job has not reappeared."""
+    with _sqlite(db_path) as con:
+        con.execute("BEGIN IMMEDIATE")
+        try:
+            _require_tables(con, "download_jobs")
+            _ensure_lock_queue(con)
+            live = con.execute("SELECT 1 FROM download_jobs WHERE job_id=?", (job_id,)).fetchone()
+            queued = con.execute(
+                f"SELECT lock_name FROM {_LOCK_QUEUE_TABLE} WHERE job_id=?", (job_id,)
+            ).fetchone()
+            if live is not None:
+                con.execute(f"DELETE FROM {_LOCK_QUEUE_TABLE} WHERE job_id=?", (job_id,))
+                con.execute("COMMIT")
+                return False
+            if queued is None:
+                con.execute("COMMIT")
+                return True
+            if str(queued[0]) != lock_name:
+                raise RetentionSafetyError("lock_cleanup_queue_corrupt")
+            con.execute(f"DELETE FROM {_LOCK_QUEUE_TABLE} WHERE job_id=?", (job_id,))
+            con.execute("COMMIT")
+            return True
+        except Exception:
+            if con.in_transaction:
+                con.execute("ROLLBACK")
+            raise
+
+
+def _lock_queue_rows(db_path: str | Path, *, limit: int) -> list[tuple[str, str]]:
+    with _sqlite(db_path) as con:
+        con.execute("BEGIN IMMEDIATE")
+        try:
+            _require_tables(con, "download_jobs")
+            _ensure_lock_queue(con)
+            rows = con.execute(
+                f"SELECT job_id,lock_name FROM {_LOCK_QUEUE_TABLE} ORDER BY queued_at,job_id LIMIT ?",
+                (limit,),
+            ).fetchall()
+            con.execute("COMMIT")
+            return [(str(job_id), str(lock_name)) for job_id, lock_name in rows]
+        except Exception:
+            if con.in_transaction:
+                con.execute("ROLLBACK")
+            raise
+
+
+def _drain_lock_cleanup_queue(
+    db_path: str | Path,
+    lock_dir: Path,
+    *,
+    limit: int,
+) -> CleanupResult:
+    """Finish lock unlink after a crash between checkpoint commit and unlink."""
+    deleted = busy = protected = corrupt = locks_deleted = 0
+    for job_id, lock_name in _lock_queue_rows(db_path, limit=limit):
+        try:
+            _validate_lock_identity(job_id, lock_name)
+        except RetentionSafetyError:
+            corrupt += 1
+            continue
+        lock_path = lock_dir / lock_name
+        flags = os.O_RDWR | int(getattr(os, "O_NOFOLLOW", 0)) | int(getattr(os, "O_CLOEXEC", 0))
+        try:
+            fd = os.open(lock_path, flags)
+        except FileNotFoundError:
+            if _ack_lock_cleanup(db_path, job_id=job_id, lock_name=lock_name):
+                deleted += 0
+            else:
+                protected += 1
+            continue
+        except OSError:
+            corrupt += 1
+            continue
+        acquired = False
+        try:
+            try:
+                _validate_lock_fd(fd)
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                acquired = True
+            except BlockingIOError:
+                busy += 1
+                continue
+            except RetentionSafetyError:
+                corrupt += 1
+                continue
+
+            with _sqlite(db_path) as con:
+                con.execute("BEGIN IMMEDIATE")
+                try:
+                    _require_tables(con, "download_jobs")
+                    _ensure_lock_queue(con)
+                    live = con.execute("SELECT 1 FROM download_jobs WHERE job_id=?", (job_id,)).fetchone()
+                    queued = con.execute(
+                        f"SELECT lock_name FROM {_LOCK_QUEUE_TABLE} WHERE job_id=?", (job_id,)
+                    ).fetchone()
+                    if live is not None:
+                        con.execute(f"DELETE FROM {_LOCK_QUEUE_TABLE} WHERE job_id=?", (job_id,))
+                        con.execute("COMMIT")
+                        protected += 1
+                        continue
+                    if queued is None:
+                        con.execute("COMMIT")
+                        continue
+                    if str(queued[0]) != lock_name:
+                        raise RetentionSafetyError("lock_cleanup_queue_corrupt")
+                    _unlink_if_same_inode(lock_path, fd)
+                    con.execute(f"DELETE FROM {_LOCK_QUEUE_TABLE} WHERE job_id=?", (job_id,))
+                    con.execute("COMMIT")
+                    locks_deleted += 1
+                except Exception:
+                    if con.in_transaction:
+                        con.execute("ROLLBACK")
+                    raise
+        finally:
+            if acquired:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+                except OSError:
+                    pass
+            os.close(fd)
+    return CleanupResult(
+        deleted=deleted,
+        busy=busy,
+        protected=protected,
+        corrupt=corrupt,
+        lock_files_deleted=locks_deleted,
+    )
+
+
 def cleanup_download_checkpoints(
     checkpoint_db_path: str | Path,
     lock_dir: str | Path,
@@ -600,18 +765,23 @@ def cleanup_download_checkpoints(
     min_age_seconds: int = 7 * 24 * 60 * 60,
     max_jobs: int = 256,
 ) -> CleanupResult:
-    """Delete aged terminal jobs only while holding their live resume lock."""
+    """Delete aged terminal jobs and crash-resumably reclaim their lock leaves."""
     ts = _validate_now(now)
     age = _validate_age(min_age_seconds)
     limit = _validate_batch(max_jobs)
     directory = _safe_lock_dir(lock_dir)
+    drained = _drain_lock_cleanup_queue(checkpoint_db_path, directory, limit=limit)
     candidates, protected, corrupt = _checkpoint_candidates(
         checkpoint_db_path,
         now=ts,
         min_age_seconds=age,
         limit=limit,
     )
-    deleted = busy = 0
+    deleted = 0
+    busy = drained.busy
+    protected += drained.protected
+    corrupt += drained.corrupt
+    lock_files_deleted = drained.lock_files_deleted
     for job_id in candidates:
         try:
             with _cleanup_job_lock(directory, job_id) as (fd, lock_path, created):
@@ -633,13 +803,25 @@ def cleanup_download_checkpoints(
                         _unlink_if_same_inode(lock_path, fd)
                     continue
                 _unlink_if_same_inode(lock_path, fd)
+                lock_files_deleted += 1
+                _ack_lock_cleanup(
+                    checkpoint_db_path,
+                    job_id=job_id,
+                    lock_name=_job_lock_name(job_id),
+                )
                 deleted += 1
         except RetentionSafetyError as exc:
             if exc.code == "job_lock_busy":
                 busy += 1
                 continue
             raise
-    return CleanupResult(deleted=deleted, busy=busy, protected=protected, corrupt=corrupt)
+    return CleanupResult(
+        deleted=deleted,
+        busy=busy,
+        protected=protected,
+        corrupt=corrupt,
+        lock_files_deleted=lock_files_deleted,
+    )
 
 
 def _safe_stage_name(name: str) -> bool:
