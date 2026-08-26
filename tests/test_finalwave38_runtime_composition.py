@@ -1,12 +1,11 @@
 """FINALWAVE-38 credential-free runtime composition regressions.
 
-These tests perform no network calls, import no real Telegram credentials, and
+These tests perform no network calls, use no real Telegram credentials, and
 exercise only synthetic/private temporary state.
 """
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import io
 import json
 import multiprocessing
@@ -28,9 +27,11 @@ from bridge.storage import FileRecordStore
 from bridge.upload_snapshot import UploadFileIdentity, open_verified_upload_batch
 from ops.phase_aware_write_adapter import PhaseAwareTelegramWriteAdapter
 from ops.runtime_write_reliability import RollbackSafeReliableWriteStoreProxy
+from ops.secure_write_store import WriteStateSecurityError
 from ops.structured_safe_write import SafeWriteMetadataFailure, StructuredSafePersistentWriteStore
-from ops.telegram_write_adapter import TelegramRuntimeConfig
+from ops.telegram_write_adapter import TelegramContractError, TelegramRuntimeConfig
 from ops.write_endpoint_policy import EndpointContext
+from ops.write_safety import WriteSafetyError
 
 
 def _schema_bootstrap_worker(db_path: str, result_queue) -> None:
@@ -39,6 +40,105 @@ def _schema_bootstrap_worker(db_path: str, result_queue) -> None:
         result_queue.put("ok")
     except BaseException as exc:
         result_queue.put(type(exc).__name__)
+
+
+def _commit_race_worker(db_path: str, preview_token: str, idempotency_key: str,
+                        effect_path: str, barrier, result_queue) -> None:
+    try:
+        store = StructuredSafePersistentWriteStore(Path(db_path), preview_ttl_seconds=300)
+        proxy = RollbackSafeReliableWriteStoreProxy(store, clock=lambda: 101.0)
+        barrier.wait(10)
+
+        def external_write(_payload):
+            fd = os.open(effect_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+            try:
+                os.write(fd, b"effect\n")
+            finally:
+                os.close(fd)
+            return {"operation": "SEND", "message_ids": [101], "chat_id": 100, "count": 1}
+
+        result = proxy.commit(
+            preview_token,
+            expected_action="SEND",
+            idempotency_key=idempotency_key,
+            external_write=external_write,
+            now=101,
+        )
+        result_queue.put(("ok", bool(result.idempotent_replay)))
+    except BaseException as exc:
+        result_queue.put(("error", str(getattr(exc, "code", type(exc).__name__))))
+
+
+def _crash_inside_calling_worker(db_path: str, preview_token: str, idempotency_key: str) -> None:
+    store = StructuredSafePersistentWriteStore(Path(db_path), preview_ttl_seconds=300)
+    proxy = RollbackSafeReliableWriteStoreProxy(store, clock=lambda: 101.0)
+
+    def crash_after_calling(_payload):
+        os._exit(23)
+
+    proxy.commit(
+        preview_token,
+        expected_action="SEND",
+        idempotency_key=idempotency_key,
+        external_write=crash_after_calling,
+        now=101,
+    )
+    os._exit(91)
+
+
+class _SyntheticEntity:
+    id = 100
+
+
+class _SyntheticMessage:
+    id = 101
+    chat_id = 100
+
+
+class _SyntheticRpcError(Exception):
+    pass
+
+
+class _PreEffectFailureClient:
+    def __init__(self):
+        self.mutations = 0
+
+    async def connect(self):
+        return None
+
+    async def disconnect(self):
+        return None
+
+    async def is_user_authorized(self):
+        return True
+
+    async def get_entity(self, _ref):
+        raise _SyntheticRpcError("private-text-must-not-escape")
+
+    async def get_me(self):
+        return _SyntheticEntity()
+
+    async def send_message(self, *_args, **_kwargs):
+        self.mutations += 1
+        return _SyntheticMessage()
+
+
+class _PostEffectFailureClient(_PreEffectFailureClient):
+    async def get_me(self):
+        return _SyntheticEntity()
+
+    async def send_message(self, *_args, **_kwargs):
+        self.mutations += 1
+        raise RuntimeError("post-effect-private-detail")
+
+
+class _SuccessfulWriteClient(_PreEffectFailureClient):
+    async def get_me(self):
+        return _SyntheticEntity()
+
+    async def send_message(self, *_args, **_kwargs):
+        self.mutations += 1
+        return _SyntheticMessage()
 
 
 class RuntimeCompositionTests(unittest.TestCase):
@@ -56,6 +156,15 @@ class RuntimeCompositionTests(unittest.TestCase):
             application_id_ref=100_023,
             application_hash_ref="a" * 32,
             session_reference="synthetic-reference-material-" + ("x" * 24),
+        )
+
+    @staticmethod
+    def _synthetic_writer_config() -> TelegramRuntimeConfig:
+        return TelegramRuntimeConfig(
+            application_id_ref=100_023,
+            application_hash_ref="a" * 32,
+            session_reference="synthetic-reference-material-" + ("x" * 24),
+            synthetic_test_mode=True,
         )
 
     @staticmethod
@@ -111,8 +220,10 @@ class RuntimeCompositionTests(unittest.TestCase):
             self.assertEqual(private_root / "state" / "audit.jsonl", app.read_app.audit.path)
 
             captured: dict[str, object] = {}
-            def start_response(status, headers):
+
+            def start_response(status, _headers):
                 captured["status"] = status
+
             body = b"".join(app({"REQUEST_METHOD": "GET", "PATH_INFO": "/health"}, start_response))
             payload = json.loads(body.decode("utf-8"))
             self.assertEqual("200 OK", captured["status"])
@@ -155,7 +266,7 @@ class RuntimeCompositionTests(unittest.TestCase):
             preview = app.write_coordinator.preview(
                 "previewTelegramSend",
                 EndpointContext(authenticated=True, actor_sha256="a" * 64),
-                {"target": "saved-messages", "text": "synthetic preview text"},
+                {"target": "saved", "text": "synthetic preview text"},
             )
             status, body = self._call(
                 app,
@@ -183,11 +294,22 @@ class RuntimeCompositionTests(unittest.TestCase):
             app.read_app.audit.write("runtime_test", status=200, count=1)
             path = app.read_app.audit.path
             self.assertIsNotNone(path)
-            mode = stat.S_IMODE(path.stat().st_mode)
-            self.assertEqual(0o600, mode)
+            self.assertEqual(0o600, stat.S_IMODE(path.stat().st_mode))
             line = path.read_text("ascii")
             self.assertIn('"status":200', line)
             self.assertNotIn("synthetic preview text", line)
+
+    def test_secure_write_store_rejects_broad_mode_existing_database_before_sqlite_open(self):
+        with tempfile.TemporaryDirectory() as td:
+            state = Path(td) / "state"
+            state.mkdir(mode=0o700)
+            os.chmod(state, 0o700)
+            db_path = state / "writes.sqlite3"
+            db_path.write_bytes(b"not-a-database")
+            os.chmod(db_path, 0o644)
+            with self.assertRaises(WriteStateSecurityError) as ctx:
+                StructuredSafePersistentWriteStore(db_path)
+            self.assertEqual("write_state_database_mode_unsafe", ctx.exception.code)
 
     def test_fresh_write_schema_bootstrap_is_serialized_across_eight_processes(self):
         with tempfile.TemporaryDirectory() as td:
@@ -209,35 +331,79 @@ class RuntimeCompositionTests(unittest.TestCase):
                 rows = con.execute("SELECT value FROM meta WHERE key='schema_version'").fetchall()
             self.assertEqual([("1",)], rows)
 
-    def test_startup_recovery_terminalizes_guarded_orphan_calling_without_callback(self):
+    def test_process_shared_commit_race_performs_exactly_one_synthetic_external_effect(self):
         with tempfile.TemporaryDirectory() as td:
             state = Path(td) / "state"
             state.mkdir(mode=0o700)
             os.chmod(state, 0o700)
-            store = StructuredSafePersistentWriteStore(state / "writes.sqlite3")
-            proxy = RollbackSafeReliableWriteStoreProxy(store, clock=lambda: 100.0)
-            preview = store.create_preview("SEND", {"target": "saved", "text": "synthetic"}, now=100)
-            idem = "synthetic-idempotency-recovery"
-            _mode, row, _cached = store._begin_commit(
-                preview.token,
-                expected_action="SEND",
-                idempotency_key=idem,
-                now=100,
-            )
-            store._transition_to_calling(idem, row["request_fingerprint"], now=100)
-            key_hash = store._idempotency_hash(idem)
-            with store._connect() as con:
-                con.execute(
-                    "INSERT INTO runtime_commit_guard(key_hash,protocol,armed_at) VALUES(?,?,?)",
-                    (key_hash, 1, 100),
+            db_path = state / "writes.sqlite3"
+            store = StructuredSafePersistentWriteStore(db_path)
+            parent_proxy = RollbackSafeReliableWriteStoreProxy(store, clock=lambda: 100.0)
+            preview = parent_proxy.create_preview("SEND", {"target": "saved", "text": "synthetic"}, now=100)
+            idem = "synthetic-idempotency-race"
+            effect_path = str(Path(td) / "effect.log")
+
+            ctx = multiprocessing.get_context("spawn")
+            barrier = ctx.Barrier(2)
+            queue = ctx.Queue()
+            workers = [
+                ctx.Process(
+                    target=_commit_race_worker,
+                    args=(str(db_path), preview.token, idem, effect_path, barrier, queue),
                 )
-            report = proxy.recover_on_startup(now=101)
-            self.assertEqual(1, report.calling_recovered)
+                for _ in range(2)
+            ]
+            for worker in workers:
+                worker.start()
+            for worker in workers:
+                worker.join(20)
+            results = [queue.get(timeout=5) for _ in workers]
+            self.assertEqual([0, 0], [worker.exitcode for worker in workers])
+            self.assertTrue(all(result[0] in {"ok", "error"} for result in results), results)
+            self.assertTrue(all(result[0] == "ok" or result[1] == "write_in_progress" for result in results), results)
+            lines = Path(effect_path).read_bytes().splitlines()
+            self.assertEqual([b"effect"], lines)
             with store._connect() as con:
-                state_row = con.execute("SELECT state FROM idempotency WHERE key_hash=?", (key_hash,)).fetchone()
+                key_hash = store._idempotency_hash(idem)
+                row = con.execute("SELECT state FROM idempotency WHERE key_hash=?", (key_hash,)).fetchone()
+            self.assertEqual("COMMITTED", row["state"])
+
+    def test_real_process_death_inside_calling_recovers_to_ambiguous_without_replay(self):
+        with tempfile.TemporaryDirectory() as td:
+            state = Path(td) / "state"
+            state.mkdir(mode=0o700)
+            os.chmod(state, 0o700)
+            db_path = state / "writes.sqlite3"
+            store = StructuredSafePersistentWriteStore(db_path)
+            parent_proxy = RollbackSafeReliableWriteStoreProxy(store, clock=lambda: 100.0)
+            preview = parent_proxy.create_preview("SEND", {"target": "saved", "text": "synthetic"}, now=100)
+            idem = "synthetic-idempotency-crash"
+
+            ctx = multiprocessing.get_context("spawn")
+            worker = ctx.Process(target=_crash_inside_calling_worker, args=(str(db_path), preview.token, idem))
+            worker.start()
+            worker.join(20)
+            self.assertEqual(23, worker.exitcode)
+
+            restarted_store = StructuredSafePersistentWriteStore(db_path)
+            restarted = RollbackSafeReliableWriteStoreProxy(restarted_store, clock=lambda: 102.0)
+            report = restarted.recover_on_startup(now=102)
+            self.assertEqual(1, report.calling_recovered)
+            key_hash = restarted_store._idempotency_hash(idem)
+            with restarted_store._connect() as con:
+                row = con.execute("SELECT state FROM idempotency WHERE key_hash=?", (key_hash,)).fetchone()
                 marker_count = con.execute("SELECT COUNT(*) FROM runtime_commit_guard").fetchone()[0]
-            self.assertEqual("AMBIGUOUS", state_row["state"])
+            self.assertEqual("AMBIGUOUS", row["state"])
             self.assertEqual(0, marker_count)
+            with self.assertRaises(WriteSafetyError) as ctx_error:
+                restarted.commit(
+                    preview.token,
+                    expected_action="SEND",
+                    idempotency_key=idem,
+                    external_write=lambda _payload: {"unexpected": True},
+                    now=103,
+                )
+            self.assertEqual("reconciliation_required", ctx_error.exception.code)
 
     def test_snapshot_factory_pins_exact_bytes_and_exposes_no_writable_descriptor(self):
         with tempfile.TemporaryDirectory() as td:
@@ -268,25 +434,49 @@ class RuntimeCompositionTests(unittest.TestCase):
 
     def test_phase_aware_writer_rejects_pathname_fallback_before_client_creation(self):
         calls = []
-        config = TelegramRuntimeConfig(
-            application_id_ref=100_023,
-            application_hash_ref="a" * 32,
-            session_reference="synthetic-reference-material-" + ("x" * 24),
+        adapter = PhaseAwareTelegramWriteAdapter(
+            self._synthetic_writer_config(),
+            lambda: calls.append("client") or object(),
         )
-        adapter = PhaseAwareTelegramWriteAdapter(config, lambda: calls.append("client") or object())
         with self.assertRaises(SafeWriteMetadataFailure) as ctx:
             asyncio.run(adapter.send_files_async("saved", ["/tmp/legacy-path.bin"]))
         self.assertEqual("invalid_file_reference", ctx.exception.code)
         self.assertEqual([], calls)
+
+    def test_phase_aware_writer_classifies_read_preflight_failure_safe_but_not_post_effect_failure(self):
+        pre_client = _PreEffectFailureClient()
+        pre_adapter = PhaseAwareTelegramWriteAdapter(self._synthetic_writer_config(), lambda: pre_client)
+        with self.assertRaises(SafeWriteMetadataFailure) as pre_ctx:
+            asyncio.run(pre_adapter.send_async("@validname", "synthetic"))
+        self.assertEqual("telegram_rpc_error", pre_ctx.exception.code)
+        self.assertEqual(0, pre_client.mutations)
+
+        post_client = _PostEffectFailureClient()
+        post_adapter = PhaseAwareTelegramWriteAdapter(self._synthetic_writer_config(), lambda: post_client)
+        with self.assertRaises(TelegramContractError) as post_ctx:
+            asyncio.run(post_adapter.send_async("saved", "synthetic"))
+        self.assertNotIsInstance(post_ctx.exception, SafeWriteMetadataFailure)
+        self.assertEqual("telegram_operation_failed", post_ctx.exception.code)
+        self.assertEqual(1, post_client.mutations)
+
+    def test_phase_aware_writer_success_returns_valid_receipt(self):
+        client = _SuccessfulWriteClient()
+        adapter = PhaseAwareTelegramWriteAdapter(self._synthetic_writer_config(), lambda: client)
+        receipt = asyncio.run(adapter.send_async("saved", "synthetic"))
+        self.assertEqual("SEND", receipt.operation)
+        self.assertEqual((101,), receipt.message_ids)
+        self.assertEqual(1, client.mutations)
 
     def test_runtime_wsgi_redacts_strong_builder_failure_and_does_not_cache_failure(self):
         from bridge import runtime_wsgi
 
         runtime_wsgi.reset_runtime_application_for_tests()
         captured: dict[str, object] = {}
+
         def start_response(status, headers):
             captured["status"] = status
             captured["headers"] = dict(headers)
+
         with mock.patch(
             "bridge.runtime_composition.build_production_application_from_env",
             side_effect=RuntimeError("private-startup-detail"),
