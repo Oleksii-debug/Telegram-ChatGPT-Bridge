@@ -250,7 +250,10 @@ class Final5TelethonReadBackend(TelethonReadBackend):
                 )
 
                 if entity is None:
-                    if sender_raw and not server_search:
+                    if sender_raw:
+                        # Bind every global sender query at the Telethon request boundary,
+                        # including text+sender. Local filtering after a bounded text scan
+                        # can otherwise miss a valid sender match beyond the scan budget.
                         resolved_global_sender = await self._resolve_global_sender(client, sender_raw)
                     elif not server_search:
                         empty_filter = self._global_empty_filter()
