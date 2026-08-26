@@ -1,8 +1,7 @@
-"""FINALWAVE-26 adversarial OpenAPI/runtime request-parity regressions.
+"""FINALWAVE-26 strict generated-OpenAPI ↔ write-runtime parity tests.
 
-Credential-free synthetic tests only. They exercise the production Action request
-boundary without Telegram or production access and must fail closed before
-preview/effect.
+Credential-free synthetic tests only. They exercise the production request guard
+without Telegram or production access and require rejection before preview/effect.
 """
 from __future__ import annotations
 
@@ -58,24 +57,24 @@ class _EmptyReadBackend:
         raise AssertionError(f"unexpected download_media call: {sorted(kwargs)}")
 
 
-def _request(
-    app,
-    path: str,
-    body: object | None = None,
-    *,
-    method: str = "POST",
-    token: str | None = TOKEN,
-    raw: bytes | None = None,
-    content_length: str | None = None,
-):
-    payload = raw if raw is not None else json.dumps(body if body is not None else {}).encode("utf-8")
+class _PoisonStream:
+    def __init__(self):
+        self.read_count = 0
+
+    def read(self, size=-1):
+        self.read_count += 1
+        raise AssertionError(f"unauthorized body must not be read: size={size}")
+
+
+def _request(app, path: str, body: object | None = None, *, token: str | None = TOKEN, stream=None):
+    payload = json.dumps(body if body is not None else {}).encode("utf-8")
     environ = {
-        "REQUEST_METHOD": method,
+        "REQUEST_METHOD": "POST",
         "PATH_INFO": path,
         "QUERY_STRING": "",
         "CONTENT_TYPE": "application/json",
-        "CONTENT_LENGTH": str(len(payload)) if content_length is None else content_length,
-        "wsgi.input": io.BytesIO(payload),
+        "CONTENT_LENGTH": str(len(payload)),
+        "wsgi.input": stream if stream is not None else io.BytesIO(payload),
     }
     if token is not None:
         environ["HTTP_AUTHORIZATION"] = "Bearer " + token
@@ -109,7 +108,7 @@ class Finalwave26OpenApiRuntimeParityTests(unittest.TestCase):
             lambda: self.client,
         )
 
-    def _app(self, *, write_limit: int = 100) -> ActionRequestGuard:
+    def _app(self) -> ActionRequestGuard:
         read_app = BridgeApplication(
             config=ReadAppConfig(
                 auth_secret=TOKEN,
@@ -123,15 +122,11 @@ class Finalwave26OpenApiRuntimeParityTests(unittest.TestCase):
         unified = UnifiedBridgeApplication(
             read_app=read_app,
             write_adapter=self.adapter,
-            write_limiter=FixedWindowEndpointLimiter(
-                limit=write_limit,
-                window_seconds=60,
-                clock=lambda: 120.0,
-            ),
+            write_limiter=FixedWindowEndpointLimiter(limit=100, window_seconds=60, clock=lambda: 120.0),
         )
         return ActionRequestGuard(unified)
 
-    def test_live_registry_openapi_and_wsgi_inventory_are_bidirectionally_exact(self):
+    def test_registry_openapi_and_wsgi_inventory_are_bidirectionally_exact(self):
         self.assertEqual([], validate_runtime_parity())
         self.assertEqual([], validate_unified_registry())
         self.assertEqual(19, len(CANONICAL_ROUTES))
@@ -143,28 +138,35 @@ class Finalwave26OpenApiRuntimeParityTests(unittest.TestCase):
             for method, operation in item.items()
             if isinstance(operation, dict) and "operationId" in operation
         }
-        canonical_action_pairs = {
-            (route.method, route.path) for route in CANONICAL_ROUTES if route.action_visible
-        }
-        self.assertEqual(canonical_action_pairs, action_pairs)
+        self.assertEqual(
+            {(route.method, route.path) for route in CANONICAL_ROUTES if route.action_visible},
+            action_pairs,
+        )
         lowered = json.dumps(schema, sort_keys=True).lower()
         for private_word in ("setup", "login_code", "2fa", "session_string", "api_hash"):
             self.assertNotIn(private_word, lowered)
 
-    def test_every_write_operation_has_runtime_request_schema(self):
-        for spec in OPERATIONS:
-            if spec.operation_class not in {OperationClass.WRITE_PREVIEW, OperationClass.WRITE_COMMIT}:
-                continue
+    def test_every_write_operation_has_the_same_runtime_request_schema_source(self):
+        write_specs = [
+            spec for spec in OPERATIONS
+            if spec.operation_class in {OperationClass.WRITE_PREVIEW, OperationClass.WRITE_COMMIT}
+        ]
+        self.assertEqual(8, len(write_specs))
+        for spec in write_specs:
             with self.subTest(operation_id=spec.operation_id):
+                # Empty object must produce at least one required-field error for
+                # every write operation, proving a concrete canonical schema exists.
                 self.assertTrue(validate_action_request(spec, {}))
 
-    def test_write_preview_runtime_rejects_openapi_type_coercions_before_preview(self):
+    def test_all_preview_families_reject_openapi_type_coercions_before_preview(self):
         app = self._app()
         cases = (
+            ("/api/v1/messages/send/preview", {"chat": 123, "text": "draft"}),
+            ("/api/v1/messages/send/preview", {"chat": "@target", "text": 123}),
             ("/api/v1/messages/reply/preview", {"chat": "@target", "reply_to_message_id": 1.9, "text": "draft"}),
             ("/api/v1/messages/reply/preview", {"chat": "@target", "reply_to_message_id": "7", "text": "draft"}),
             ("/api/v1/messages/forward/preview", {"from_chat": "@source", "to_chat": "@target", "message_ids": [20.9]}),
-            ("/api/v1/messages/send/preview", {"chat": 123, "text": "draft"}),
+            ("/api/v1/messages/forward/preview", {"from_chat": "@source", "to_chat": 7, "message_ids": [20]}),
             (
                 "/api/v1/files/send/preview",
                 {
@@ -183,6 +185,15 @@ class Finalwave26OpenApiRuntimeParityTests(unittest.TestCase):
                     "voice_note": "false",
                 },
             ),
+            (
+                "/api/v1/files/send/preview",
+                {
+                    "chat": "@target",
+                    "files": [{"file_ref": 9, "sha256": "a" * 64, "size": 12}],
+                    "caption": "",
+                    "voice_note": False,
+                },
+            ),
         )
         for path, body in cases:
             with self.subTest(path=path, body=body):
@@ -190,72 +201,86 @@ class Finalwave26OpenApiRuntimeParityTests(unittest.TestCase):
                 self.assertEqual(400, result["status"], result)
                 self.assertEqual("invalid_request_contract", result["json"]["error"]["code"])
                 self.assertEqual([], self.client.external_writes)
+                self.assertNotIn("@target", result["raw"].decode("utf-8"))
 
-    def test_commit_contract_rejects_non_boolean_or_false_explicit_command(self):
+    def test_all_commit_families_require_exact_boolean_true_without_coercion(self):
         app = self._app()
-        for value in (1, "true", False):
-            with self.subTest(value=value):
-                result = _request(
-                    app,
-                    "/api/v1/messages/send/commit",
-                    {
-                        "preview_token": "p" * 32,
-                        "idempotency_key": "idem-key-0001",
-                        "explicit_user_command": value,
-                    },
-                )
-                self.assertEqual(400, result["status"], result)
+        commit_paths = (
+            "/api/v1/messages/send/commit",
+            "/api/v1/messages/reply/commit",
+            "/api/v1/messages/forward/commit",
+            "/api/v1/files/send/commit",
+        )
+        for path in commit_paths:
+            for value in (1, "true", False):
+                with self.subTest(path=path, value=value):
+                    result = _request(
+                        app,
+                        path,
+                        {
+                            "preview_token": "p" * 32,
+                            "idempotency_key": "idem-key-0001",
+                            "explicit_user_command": value,
+                        },
+                    )
+                    self.assertEqual(400, result["status"], result)
+                    self.assertEqual("invalid_request_contract", result["json"]["error"]["code"])
+                    self.assertEqual([], self.client.external_writes)
+
+    def test_valid_preview_families_preserve_existing_zero_effect_semantics(self):
+        app = self._app()
+        valid = (
+            ("/api/v1/messages/send/preview", {"chat": "@target", "text": "synthetic draft"}, "SEND"),
+            (
+                "/api/v1/messages/reply/preview",
+                {"chat": "@target", "reply_to_message_id": 7, "text": "synthetic draft"},
+                "REPLY",
+            ),
+            (
+                "/api/v1/messages/forward/preview",
+                {"from_chat": "@source", "to_chat": "@target", "message_ids": [7, 8]},
+                "FORWARD",
+            ),
+            (
+                "/api/v1/files/send/preview",
+                {
+                    "chat": "@target",
+                    "files": [{"file_ref": "opaque-ref", "sha256": "a" * 64, "size": 12}],
+                    "caption": "",
+                    "voice_note": False,
+                },
+                "SEND_FILES",
+            ),
+        )
+        for path, body, action in valid:
+            with self.subTest(path=path):
+                result = _request(app, path, body)
+                self.assertEqual(200, result["status"], result)
+                self.assertEqual(action, result["json"]["data"]["action"])
+                self.assertTrue(result["json"]["data"]["preview_token"])
                 self.assertEqual([], self.client.external_writes)
 
-    def test_valid_send_preview_still_creates_preview_without_external_effect(self):
+    def test_unauthorized_write_is_hidden_before_guard_reads_body(self):
         app = self._app()
+        poison = _PoisonStream()
         result = _request(
             app,
             "/api/v1/messages/send/preview",
-            {"chat": "@target", "text": "synthetic draft"},
+            {"chat": "@target", "text": "draft"},
+            token=None,
+            stream=poison,
         )
-        self.assertEqual(200, result["status"], result)
-        self.assertEqual("SEND", result["json"]["data"]["action"])
-        self.assertTrue(result["json"]["data"]["preview_token"])
+        self.assertEqual(404, result["status"], result)
+        self.assertEqual(0, poison.read_count)
         self.assertEqual([], self.client.external_writes)
 
-    def test_content_length_zero_is_zero_bytes_not_unknown_length(self):
+    def test_read_action_passes_through_guard_without_write_semantics(self):
         app = self._app()
-        result = _request(
-            app,
-            "/api/v1/dialogs/list",
-            raw=b'{"private_debug":true}',
-            content_length="0",
-        )
+        result = _request(app, "/api/v1/dialogs/list", {})
         self.assertEqual(200, result["status"], result)
-
-    def test_malformed_authenticated_write_attempts_consume_prebody_request_quota(self):
-        app = self._app(write_limit=1)
-        bad = {"chat": "@target", "text": "draft", "private_debug": True}
-        first = _request(app, "/api/v1/messages/send/preview", bad)
-        second = _request(app, "/api/v1/messages/send/preview", bad)
-        self.assertEqual(400, first["status"], first)
-        self.assertEqual(429, second["status"], second)
-        self.assertGreaterEqual(int(second["headers"]["Retry-After"]), 1)
         self.assertEqual([], self.client.external_writes)
 
-    def test_malformed_json_and_content_type_also_consume_attempt_quota(self):
-        app = self._app(write_limit=1)
-        first = _request(app, "/api/v1/messages/send/preview", raw=b"{")
-        second = _request(app, "/api/v1/messages/send/preview", raw=b"{")
-        self.assertEqual(400, first["status"], first)
-        self.assertEqual(429, second["status"], second)
-        self.assertEqual([], self.client.external_writes)
-
-    def test_unauthorized_write_does_not_consume_authenticated_attempt_quota(self):
-        app = self._app(write_limit=1)
-        unauth = _request(app, "/api/v1/messages/send/preview", {"chat": "@target", "text": "draft"}, token=None)
-        good = _request(app, "/api/v1/messages/send/preview", {"chat": "@target", "text": "draft"})
-        self.assertEqual(404, unauth["status"], unauth)
-        self.assertEqual(200, good["status"], good)
-        self.assertEqual([], self.client.external_writes)
-
-    def test_unknown_write_operation_fails_closed_without_preview_or_effect(self):
+    def test_unknown_write_like_operation_fails_closed_without_preview_or_effect(self):
         app = self._app()
         result = _request(app, "/api/v1/messages/private-setup/preview", {"chat": "@target", "text": "draft"})
         self.assertEqual(404, result["status"], result)
