@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import json
 import sqlite3
 import tempfile
@@ -10,16 +11,67 @@ from pathlib import Path
 from bridge.app import BridgeApplication, ReadAppConfig
 from bridge.errors import BridgeError
 from bridge.integrated_app import UnifiedBridgeApplication
+from bridge.security import RateLimitDecision
 from ops.openapi_registry import OPERATIONS
-from tests.test_finalwave46_request_parser_fuzz import (
-    _AllowReadLimiter,
-    _AllowWriteLimiter,
-    _ExplodingCoordinator,
-    _SpyBackend,
-    _TEST_AUTH,
-    _invoke,
-    _parser_environ,
-)
+
+
+_TEST_AUTH = "dummy-test-bearer-value-000000000046"
+
+
+class _AllowReadLimiter:
+    def check(self, actor: str) -> RateLimitDecision:
+        del actor
+        return RateLimitDecision(True, remaining=9)
+
+
+class _AllowWriteLimiter:
+    def consume(self, actor_sha256: str, operation_id: str) -> tuple[int, int]:
+        del actor_sha256, operation_id
+        return (1, 0)
+
+
+class _SpyBackend:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def _called(self):
+        self.calls += 1
+        raise AssertionError("backend must not be reached by rejected request")
+
+    def list_dialogs(self, **kwargs):
+        del kwargs
+        return self._called()
+
+    def history(self, **kwargs):
+        del kwargs
+        return self._called()
+
+    def search(self, **kwargs):
+        del kwargs
+        return self._called()
+
+    def get_message(self, **kwargs):
+        del kwargs
+        return self._called()
+
+    def download_media(self, **kwargs):
+        del kwargs
+        return self._called()
+
+
+class _ExplodingCoordinator:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def preview(self, *args, **kwargs):
+        del args, kwargs
+        self.calls += 1
+        raise AssertionError("write preview state must not be reached by rejected request")
+
+    def commit(self, *args, **kwargs):
+        del args, kwargs
+        self.calls += 1
+        raise AssertionError("write commit state must not be reached by rejected request")
 
 
 class _OversupplyingStream:
@@ -38,6 +90,38 @@ class _BrokenStream:
     def read(self, size: int = -1):
         del size
         raise RuntimeError("PRIVATE_STREAM_FAILURE_SENTINEL_FINALWAVE46")
+
+
+def _invoke(app, *, path: str, raw: bytes = b"{}", content_length: str | None = None,
+            stream=None) -> dict[str, object]:
+    environ: dict[str, object] = {
+        "REQUEST_METHOD": "POST",
+        "PATH_INFO": path,
+        "QUERY_STRING": "",
+        "CONTENT_TYPE": "application/json",
+        "CONTENT_LENGTH": str(len(raw)) if content_length is None else content_length,
+        "HTTP_AUTHORIZATION": "Bearer " + _TEST_AUTH,
+        "wsgi.input": stream if stream is not None else io.BytesIO(raw),
+    }
+    captured: dict[str, object] = {}
+
+    def start_response(status, headers):
+        captured["status"] = status
+        captured["headers"] = dict(headers)
+
+    response = b"".join(app(environ, start_response))
+    captured["raw"] = response
+    captured["json"] = json.loads(response.decode("utf-8"))
+    return captured
+
+
+def _parser_environ(raw: bytes, *, content_length: str | None = None,
+                    content_type: str = "application/json", stream=None) -> dict[str, object]:
+    return {
+        "CONTENT_TYPE": content_type,
+        "CONTENT_LENGTH": str(len(raw)) if content_length is None else content_length,
+        "wsgi.input": stream if stream is not None else io.BytesIO(raw),
+    }
 
 
 class Finalwave46ParserResilienceTests(unittest.TestCase):
