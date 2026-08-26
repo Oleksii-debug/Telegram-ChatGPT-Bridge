@@ -5,6 +5,7 @@ on:
     paths:
       - 'ops/write_fault_hardening.py'
       - 'tests/test_finalwave50_write_crash_fuzz.py'
+      - 'tests/test_finalwave50_process_death_matrix.py'
       - '.github/workflows/finalwave-write-crash-fuzz.yml'
 
 permissions:
@@ -31,6 +32,7 @@ jobs:
           ops/telegram_write_adapter.py
           ops/write_fault_hardening.py
           tests/test_finalwave50_write_crash_fuzz.py
+          tests/test_finalwave50_process_death_matrix.py
           tests/test_dev4_write_core.py
           tests/test_dev4_endpoint_policy.py
           tests/test_dev_a_integration.py
@@ -38,6 +40,7 @@ jobs:
         run: |
           python -m unittest -v \
             tests.test_finalwave50_write_crash_fuzz \
+            tests.test_finalwave50_process_death_matrix \
             tests.test_dev4_write_core \
             tests.test_dev4_endpoint_policy \
             tests.test_dev_a_integration
