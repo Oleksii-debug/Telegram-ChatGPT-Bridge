@@ -72,6 +72,7 @@ jobs:
           tests/test_dev_a_integration.py
           tests/test_dev_a_provenance.py
           tests/test_dev_a_candidate_contracts.py
+          tests/test_finalwave24_session_serialization.py
       - name: Validate canonical release startup and dependency envelope
         run: |
           python - <<'PY'
@@ -99,6 +100,11 @@ jobs:
           assert len(inventory) == 19
           print('DEV_A_CANDIDATE_CONTRACTS_PASS')
           PY
+      - name: FINALWAVE-24 Telegram session serialization regression
+        run: >-
+          python -m unittest -v
+          tests.test_dev4_session_lock
+          tests.test_finalwave24_session_serialization
       - name: Verify deterministic integration provenance and overlap decisions
         run: python tools/verify_integration_provenance.py
       - name: Verify single deploy-capable entrypoint
