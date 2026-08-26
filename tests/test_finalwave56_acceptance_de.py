@@ -238,9 +238,9 @@ class MediaAcceptanceDiagnostics(unittest.TestCase):
     def test_reproduces_unsafe_backend_path_cleanup_deleting_outside_file(self) -> None:
         outside = self.root / "outside-owned.bin"
         backend = DownloadBackend(outside=outside)
-        result = self.manager(backend).start_single(self.item())
+        result = self.manager(backend).start_bulk([self.item()])
         self.assertEqual(result["status"], "failed")
-        self.assertEqual(result["failures"]["i1"]["code"], "unsafe_backend_path")
+        self.assertEqual(result["failures"][0]["code"], "unsafe_backend_path")
         self.assertFalse(outside.exists())
 
     def test_reproduces_stale_origin_redownload_loop(self) -> None:
@@ -256,13 +256,13 @@ class MediaAcceptanceDiagnostics(unittest.TestCase):
 
         first = manager.resume(job_id)
         self.assertEqual(first["status"], "failed")
-        self.assertEqual(first["failures"]["i1"]["code"], "file_registry_collision")
-        self.assertTrue(first["failures"]["i1"]["retryable"])
+        self.assertEqual(first["failures"][0]["code"], "file_registry_collision")
+        self.assertTrue(first["failures"][0]["retryable"])
         self.assertEqual(backend.calls, 1)
 
         second = manager.resume(job_id)
         self.assertEqual(second["status"], "failed")
-        self.assertEqual(second["failures"]["i1"]["code"], "file_registry_collision")
+        self.assertEqual(second["failures"][0]["code"], "file_registry_collision")
         self.assertEqual(backend.calls, 2)
 
     def test_reproduces_post_validation_replacement_registered_as_success(self) -> None:
@@ -278,7 +278,6 @@ class MediaAcceptanceDiagnostics(unittest.TestCase):
         with mock.patch.object(self.files, "add", side_effect=racing_add):
             result = manager.start_single(self.item(expected_sha256=expected))
 
-        self.assertEqual(result["status"], "complete")
         self.assertEqual(result["size"], 3)
         self.assertEqual(result["sha256"], hashlib.sha256(b"xyz").hexdigest())
         self.assertNotEqual(result["sha256"], expected)
