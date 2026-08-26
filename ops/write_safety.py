@@ -251,11 +251,24 @@ class PersistentWriteStore:
                 CREATE INDEX IF NOT EXISTS idx_idempotency_state ON idempotency(state);
                 """
             )
-            existing = con.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()
-            if existing is None:
-                con.execute("INSERT INTO meta(key,value) VALUES('schema_version',?)", (str(self.SCHEMA_VERSION),))
-            elif existing["value"] != str(self.SCHEMA_VERSION):
-                raise RuntimeError("unsupported write-store schema")
+            # Passenger may construct several application workers against the same
+            # fresh private database at once.  The schema-version decision must be
+            # serialized: a process-local RLock cannot protect this SELECT -> INSERT
+            # boundary.  BEGIN IMMEDIATE acquires the SQLite writer reservation with
+            # the already configured bounded busy timeout, while preserving the
+            # fail-closed mismatch check for an existing/unsupported schema.
+            con.execute("BEGIN IMMEDIATE")
+            try:
+                existing = con.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()
+                if existing is None:
+                    con.execute("INSERT INTO meta(key,value) VALUES('schema_version',?)", (str(self.SCHEMA_VERSION),))
+                elif existing["value"] != str(self.SCHEMA_VERSION):
+                    raise RuntimeError("unsupported write-store schema")
+                con.commit()
+            except Exception:
+                if con.in_transaction:
+                    con.rollback()
+                raise
 
     @staticmethod
     def _token_hash(token: str) -> str:
