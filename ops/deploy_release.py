@@ -229,7 +229,7 @@ def _validate_immutable_tree_permissions(root: Path, excluded_paths: list[str] |
         st = path.lstat()
         if uid is not None and st.st_uid != uid:
             raise SafetyError("immutable release path owner is unexpected")
-        if not path.is_symlink() and stat.S_IMODE(path.lstat().st_mode) & 0o222:
+        if not path.is_symlink() and stat.S_IMODE(st.st_mode) & 0o222:
             raise SafetyError("immutable release path retains write permission")
 
 
