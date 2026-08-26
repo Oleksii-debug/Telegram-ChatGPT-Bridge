@@ -74,15 +74,20 @@ class BearerParsingFuzzTests(unittest.TestCase):
         with self.assertRaises(HiddenNotFound):
             self.guard.require(environ)
 
-    def test_auth_scheme_is_case_insensitive(self) -> None:
-        for scheme in ("Bearer", "bearer", "BEARER", "BeArEr"):
-            with self.subTest(scheme=scheme):
-                self.assert_allowed(f"{scheme} {AUTH_VALUE}")
+    def test_exact_canonical_bearer_serialization_is_accepted(self) -> None:
+        self.assert_allowed(f"Bearer {AUTH_VALUE}")
 
-    def test_rfc_one_or_more_ascii_spaces_are_accepted(self) -> None:
-        for spaces in (" ", "  ", "     "):
-            with self.subTest(count=len(spaces)):
-                self.assert_allowed(f"Bearer{spaces}{AUTH_VALUE}")
+    def test_case_and_extra_space_variants_fail_closed_by_contract(self) -> None:
+        variants = (
+            f"bearer {AUTH_VALUE}",
+            f"BEARER {AUTH_VALUE}",
+            f"BeArEr {AUTH_VALUE}",
+            f"Bearer  {AUTH_VALUE}",
+            f"Bearer     {AUTH_VALUE}",
+        )
+        for header in variants:
+            with self.subTest(header=header[:20]):
+                self.assert_hidden(header)
 
     def test_ambiguous_or_non_space_separators_fail_closed(self) -> None:
         variants = (
