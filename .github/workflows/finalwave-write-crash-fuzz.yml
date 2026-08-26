@@ -6,6 +6,7 @@ on:
       - 'ops/write_fault_hardening.py'
       - 'tests/test_finalwave50_write_crash_fuzz.py'
       - 'tests/test_finalwave50_process_death_matrix.py'
+      - 'tests/test_finalwave50_canonical_reproducers.py'
       - '.github/workflows/finalwave-write-crash-fuzz.yml'
 
 permissions:
@@ -33,14 +34,16 @@ jobs:
           ops/write_fault_hardening.py
           tests/test_finalwave50_write_crash_fuzz.py
           tests/test_finalwave50_process_death_matrix.py
+          tests/test_finalwave50_canonical_reproducers.py
           tests/test_dev4_write_core.py
           tests/test_dev4_endpoint_policy.py
           tests/test_dev_a_integration.py
-      - name: Run FINALWAVE fault matrix and canonical write regressions
+      - name: Run FINALWAVE fault matrix, red oracle and canonical write regressions
         run: |
           python -m unittest -v \
             tests.test_finalwave50_write_crash_fuzz \
             tests.test_finalwave50_process_death_matrix \
+            tests.test_finalwave50_canonical_reproducers \
             tests.test_dev4_write_core \
             tests.test_dev4_endpoint_policy \
             tests.test_dev_a_integration
