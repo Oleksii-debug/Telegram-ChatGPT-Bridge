@@ -35,7 +35,7 @@ def _insert_job(path: Path, job_id: str, *, status: str, retryable: bool | None 
         "item_id": "i1",
         "chat": "synthetic",
         "message_id": 1,
-        "source_file_ref": "synthetic",
+        "source_file_ref": "synthetic_file_ref_123456",
         "name": "synthetic.bin",
         "mime_type": "application/octet-stream",
         "expected_size": None,
@@ -44,9 +44,13 @@ def _insert_job(path: Path, job_id: str, *, status: str, retryable: bool | None 
     results: dict[str, str] = {}
     failures: dict[str, object] = {}
     if status == "complete":
-        results["i1"] = "synthetic_file_ref"
+        results["i1"] = "synthetic_file_ref_654321"
     elif retryable is not None:
-        failures["i1"] = {"code": "synthetic", "status": 503 if retryable else 400, "retryable": retryable}
+        failures["i1"] = {
+            "code": "synthetic",
+            "status": 503 if retryable else 400,
+            "retryable": retryable,
+        }
     payload = {
         "schema": 1,
         "job_id": job_id,
@@ -122,6 +126,36 @@ class Finalwave44RetentionTopologyTests(unittest.TestCase):
             self.assertEqual(result.protected, 1)
             self.assertFalse((locks / (hashlib.sha256(job_id.encode()).hexdigest() + ".lock")).exists())
 
+    def test_rehashed_but_semantically_corrupt_terminal_checkpoint_is_preserved(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            os.chmod(root, 0o700)
+            db = root / "checkpoints.sqlite3"
+            locks = root / ".download-locks"
+            locks.mkdir(mode=0o700)
+            _download_schema(db)
+            job_id = "corrupt_job_synthetic_123456"
+            _insert_job(db, job_id, status="complete")
+            with sqlite3.connect(db) as con:
+                raw = con.execute(
+                    "SELECT payload_json FROM download_jobs WHERE job_id=?", (job_id,)
+                ).fetchone()[0]
+                payload = json.loads(raw)
+                payload["items"][0]["source_file_ref"] = "too-short"
+                altered = _canonical(payload)
+                con.execute(
+                    "UPDATE download_jobs SET payload_json=?,payload_sha256=? WHERE job_id=?",
+                    (altered, hashlib.sha256(altered.encode()).hexdigest(), job_id),
+                )
+            result = cleanup_download_checkpoints(db, locks, now=1000, min_age_seconds=100)
+            self.assertEqual(result.deleted, 0)
+            self.assertEqual(result.corrupt, 1)
+            with sqlite3.connect(db) as con:
+                self.assertEqual(
+                    con.execute("SELECT COUNT(*) FROM download_jobs WHERE job_id=?", (job_id,)).fetchone()[0],
+                    1,
+                )
+
     def test_mismatched_lease_marker_cannot_delete_other_part(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
@@ -161,7 +195,10 @@ class Finalwave44RetentionTopologyTests(unittest.TestCase):
             except OSError:
                 self.skipTest("hardlinks unavailable")
             marker = staging / (part.name + ".lease")
-            marker.write_text(_canonical({"schema": 1, "part": part.name, "created_at": 1}), encoding="ascii")
+            marker.write_text(
+                _canonical({"schema": 1, "part": part.name, "created_at": 1}),
+                encoding="ascii",
+            )
             os.chmod(marker, 0o600)
             result = cleanup_leased_archive_staging(
                 staging,
