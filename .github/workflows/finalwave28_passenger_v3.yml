@@ -20,6 +20,12 @@ jobs:
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: '3.11'
+      - name: Verify immutable DEV_B boundary blob identity
+        run: |
+          test "$(git rev-parse HEAD:ops/passenger_probe.py)" = "4c83c3f4970c297fa0d41e242109e084b805061e"
+          test "$(git rev-parse HEAD:tools/run_passenger_evidence_probe.py)" = "948acce9891ed96f272b0712d7428fb1d0d0596c"
+          test "$(git rev-parse HEAD:tests/test_run_passenger_evidence_probe.py)" = "f666434e9b817c64d1d81055da2201d7b84e6a0b"
+          test "$(git rev-parse HEAD:docs/DEV_B_HOSTIQ_PRODUCTION_READINESS.md)" = "8d8cebefe1fea0d873563a64c651f63780d8ac06"
       - name: Compile Passenger V3 boundary
         run: >-
           python -m py_compile
@@ -33,5 +39,6 @@ jobs:
           tests/test_passenger_evidence_hook.py
           tests/test_arm_passenger_evidence.py
           tests/test_run_passenger_evidence_probe.py
+          tests/test_finalwave28_passenger_v3.py
       - name: Run focused Passenger V3 adversarial tests
         run: python -m unittest discover -s tests -p 'test_*passenger*.py' -v
