@@ -82,6 +82,18 @@ The one-time Passenger serving challenge is bound to the exact production HTTPS 
 
 The challenge remains in caller memory and the initial request header only. Public results contain only bounded status, HTTP status and reason code. Redirect `Location`, response bodies, exception text and the challenge itself are never returned as evidence. This is a source-level safety contract only; it does not claim that a real Passenger request has been executed.
 
+## Passenger one-shot failure recovery
+
+The one-shot orchestrator must distinguish deterministic local failure from an ambiguous post-dispatch outcome.
+
+Before creating `collect_passenger_runtime_evidence.once`, it validates the exact production endpoint, timeout bounds and attempt count. A malformed endpoint or timeout therefore fails before any persistent one-shot state exists and cannot strand the private marker.
+
+After an HTTPS request may have been dispatched, the safety rule reverses: the marker is never automatically deleted or replaced. A timeout, connection reset, HTTP rejection, malformed health body, or redirect response can coexist with a request that reached the Passenger application process. Blind cleanup followed by a fresh challenge would lose exactly-once provenance and can race an in-flight finalization. Post-dispatch failure therefore returns `PASSENGER_EVIDENCE_ONE_SHOT_AMBIGUOUS_RETAINED` when no terminal bundle is visible.
+
+If the runtime report, binding report and consumed receipt all exist, they are accepted only as one exact bundle: candidate SHA, armed challenge digest, expected/actual WSGI hash, strong application-process runtime payload, binding payload, serving-probe hash, marker payload digest and the actual private marker inode identity must all agree. A valid bundle after an unconfirmed HTTP response is reported as `PASSENGER_EVIDENCE_TERMINAL_CONFIRMED_HTTP_NOT_CONFIRMED`; this remains non-authorizing because meaningful HTTP health was not confirmed by the caller. Partial, orphaned, tampered, symlinked, hardlinked or cross-bound terminal state fails closed.
+
+`tools/run_passenger_evidence_probe.py --inspect-existing` is read-only recovery inspection. It does not need the raw challenge because the private marker contains only its digest. It reports `PASSENGER_EVIDENCE_EXISTING_NOT_ARMED`, `PASSENGER_EVIDENCE_EXISTING_ARMED_AMBIGUOUS`, or `PASSENGER_EVIDENCE_EXISTING_TERMINAL_VALID_NONAUTHORIZING`; it does not delete state, re-arm evidence, restart Passenger, authorize deployment or upgrade missing HTTP health evidence.
+
 ## Current boundary
 
 No authorized HOSTiQ/SSH/cPanel execution connector is available in this Developer environment. Therefore exact live manifest reconciliation, actual Passenger Python 3.11 application-context identity, deployed/running audited SHA, restart/health/unauth/auth/resume and rollback remain external facts until the one-time server-side action is legitimately executed. No duplicate support request is needed while no newer HOSTiQ reply exists.
