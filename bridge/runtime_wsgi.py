@@ -1,7 +1,7 @@
 """Lazy WSGI wrapper for private production dependency construction.
 
-Module import itself is network-free and does not import Telethon.  The first
-request constructs the canonical unified application from server-side private
+Module import itself is network-free and does not import Telethon. The first
+request constructs the hardened production application from server-side private
 references, then wraps it with the Action request-contract guard. Any construction
 failure is reduced to a stable non-secret response.
 """
@@ -18,7 +18,7 @@ def application(environ: dict[str, Any], start_response: Callable) -> Iterable[b
     if _default_application is None:
         try:
             from .action_request_guard import ActionRequestGuard
-            from .runtime import build_production_application_from_env
+            from .runtime_composition import build_production_application_from_env
 
             _default_application = ActionRequestGuard(build_production_application_from_env())
         except Exception:
