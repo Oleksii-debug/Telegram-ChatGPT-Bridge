@@ -6,6 +6,7 @@ import json
 import os
 import stat
 import time
+from collections import deque
 from pathlib import Path
 from typing import Any
 
@@ -42,7 +43,7 @@ class AuditLog:
             raise ValueError("memory_event_limit is outside the safe range")
         self.path = Path(path) if path is not None else None
         self.memory_event_limit = memory_event_limit
-        self.events: list[dict[str, Any]] = []
+        self._events: deque[dict[str, Any]] = deque(maxlen=memory_event_limit)
         self._parent_identity: tuple[int, int] | None = None
         self._leaf_name: str | None = None
         if self.path is not None:
@@ -63,6 +64,18 @@ class AuditLog:
                 self._parent_identity = (info.st_dev, info.st_ino)
             finally:
                 os.close(fd)
+
+    @property
+    def events(self) -> list[dict[str, Any]]:
+        """Return a chronological snapshot of the bounded observation cache.
+
+        Historically ``events`` was a mutable list.  Callers in the application and
+        tests only consume it as an observation surface.  Returning a list snapshot
+        preserves those read semantics (including JSON serializability and indexing)
+        while the internal deque keeps append/eviction O(1) instead of shifting a
+        full bounded list after every write once the cache is full.
+        """
+        return list(self._events)
 
     def _open_parent(self, expected: tuple[int, int] | None) -> int:
         assert self.path is not None
@@ -148,7 +161,4 @@ class AuditLog:
         if self.path is not None:
             line = (json.dumps(safe, ensure_ascii=True, sort_keys=True, separators=(",", ":")) + "\n").encode("ascii")
             self._append_private_line(line)
-        self.events.append(dict(safe))
-        overflow = len(self.events) - self.memory_event_limit
-        if overflow > 0:
-            del self.events[:overflow]
+        self._events.append(dict(safe))
