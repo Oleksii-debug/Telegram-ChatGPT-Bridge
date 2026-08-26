@@ -7,6 +7,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from ops.dev06_action_e2e_evidence import (
     ActionE2EEvidenceError,
@@ -15,6 +16,7 @@ from ops.dev06_action_e2e_evidence import (
     load_h2_capture,
     summarize_h2_candidate,
     validate_h2_summary,
+    validate_read_capture,
 )
 from ops.dev06_deployed_action_evidence import (
     PRODUCTION_BASE_URL,
@@ -76,6 +78,34 @@ class ActionE2EEvidenceTests(unittest.TestCase):
         self.assertNotIn("items", rendered)
         self.assertFalse(capture["private_values_recorded"])
 
+    def test_sensitive_headers_token_cookie_and_payload_never_enter_public_capture(self):
+        payload = safe_dialog_response()
+        payload["data"]["items"] = [{
+            "id": "private-opaque-id",
+            "kind": "user",
+            "title": "Private Person Label",
+            "username": "private_user_label",
+            "unread_count": 0,
+            "pinned": False,
+            "last_message_at": None,
+        }]
+        headers = {
+            "Content-Type": "application/json; charset=utf-8",
+            "Authorization": "Bearer REDACTED_TEST_SENTINEL",
+            "Cookie": "private_cookie=REDACTED_TEST_SENTINEL",
+            "Set-Cookie": "private_cookie=REDACTED_TEST_SENTINEL",
+            "X-Private-Diagnostic": "REDACTED_TEST_SENTINEL",
+        }
+        capture = self.capture(headers=headers, payload=payload)
+        rendered = json.dumps(capture, sort_keys=True)
+        for forbidden in (
+            "Authorization", "Bearer", "Cookie", "Set-Cookie", "REDACTED_TEST_SENTINEL",
+            "Private Person Label", "private_user_label", "private-opaque-id",
+        ):
+            self.assertNotIn(forbidden, rendered)
+        self.assertTrue(capture["response_schema_valid"])
+        self.assertFalse(capture["private_values_recorded"])
+
     def test_response_schema_drift_is_bounded_to_boolean_and_count(self):
         bad = safe_dialog_response()
         bad["unexpected"] = "sensitive text that must not be exported"
@@ -86,8 +116,13 @@ class ActionE2EEvidenceTests(unittest.TestCase):
         self.assertNotIn("sensitive text", rendered)
         self.assertNotIn("unexpected", rendered)
 
-    def test_write_preview_and_commit_are_rejected_for_h2(self):
-        for operation_id in ("previewTelegramSend", "commitTelegramSend", "previewTelegramFiles", "commitTelegramFiles"):
+    def test_every_write_preview_and_commit_family_is_rejected_for_h2(self):
+        for operation_id in (
+            "previewTelegramSend", "commitTelegramSend",
+            "previewTelegramReply", "commitTelegramReply",
+            "previewTelegramForward", "commitTelegramForward",
+            "previewTelegramFiles", "commitTelegramFiles",
+        ):
             with self.subTest(operation_id=operation_id):
                 with self.assertRaisesRegex(ActionE2EEvidenceError, "H2_OPERATION_NOT_READ_ONLY"):
                     self.capture(operation_id=operation_id)
@@ -126,6 +161,19 @@ class ActionE2EEvidenceTests(unittest.TestCase):
         self.assertFalse(summary["private_values_recorded"])
         validate_h2_summary(summary)
 
+    def test_self_declared_live_labels_remain_non_authorizing_even_when_all_attestations_true(self):
+        capture = self.capture(
+            source_classification="PRIVATE_LIVE_ACTION_CAPTURE",
+            bearer_configured_privately=True,
+            chatgpt_action_observed=True,
+        )
+        summary = summarize_h2_candidate(CANDIDATE_SHA, self.h1_deployed, capture)
+        self.assertTrue(summary["live_evidence_candidate"])
+        self.assertFalse(summary["product_h2_pass"])
+        self.assertTrue(summary["auditor_adjudication_required"])
+        self.assertFalse(summary["deployment_authorized"])
+        self.assertFalse(summary["production_mutated"])
+
     def test_h1_source_mock_cannot_support_live_h2_candidate(self):
         h1_mock = compare_deployed_action_schema(
             CANDIDATE_SHA,
@@ -141,31 +189,25 @@ class ActionE2EEvidenceTests(unittest.TestCase):
         self.assertFalse(summary["h1_deployed_schema_match"])
         self.assertFalse(summary["live_evidence_candidate"])
 
-    def test_non_200_or_invalid_response_cannot_support_live_candidate(self):
-        capture = self.capture(
-            status=429,
-            headers={
-                "Content-Type": "application/json",
-                "Retry-After": "1",
-            },
-            payload={
-                "ok": False,
-                "request_id": "0123456789abcdef",
-                "error": {
-                    "code": "rate_limited",
-                    "message": "Rate limited",
-                    "retry_after_seconds": 1,
-                    "details": {},
-                },
-            },
-            source_classification="PRIVATE_LIVE_ACTION_CAPTURE",
-            bearer_configured_privately=True,
-            chatgpt_action_observed=True,
-        )
-        self.assertTrue(capture["response_schema_valid"])
-        summary = summarize_h2_candidate(CANDIDATE_SHA, self.h1_deployed, capture)
-        self.assertFalse(summary["response_200_schema_valid"])
-        self.assertFalse(summary["live_evidence_candidate"])
+    def test_non_200_status_matrix_cannot_support_live_candidate(self):
+        for status in (201, 204, 400, 401, 403, 404, 409, 429, 500, 502, 503, 504):
+            with self.subTest(status=status):
+                capture = self.capture(
+                    status=status,
+                    source_classification="PRIVATE_LIVE_ACTION_CAPTURE",
+                    bearer_configured_privately=True,
+                    chatgpt_action_observed=True,
+                )
+                summary = summarize_h2_candidate(CANDIDATE_SHA, self.h1_deployed, capture)
+                self.assertFalse(summary["response_200_schema_valid"])
+                self.assertFalse(summary["live_evidence_candidate"])
+                self.assertFalse(summary["product_h2_pass"])
+
+    def test_invalid_status_types_and_ranges_fail_closed(self):
+        for status in (True, False, 99, 600, -1, "200", None):
+            with self.subTest(status=status):
+                with self.assertRaisesRegex(ActionE2EEvidenceError, "H2_RESPONSE_STATUS_INVALID"):
+                    self.capture(status=status)
 
     def test_candidate_and_deployed_schema_binding_fail_closed(self):
         capture = self.capture(
@@ -179,8 +221,37 @@ class ActionE2EEvidenceTests(unittest.TestCase):
         bad_h1 = copy.deepcopy(self.h1_deployed)
         bad_h1["observed_schema_sha256"] = "f" * 64
         bad_h1["expected_schema_sha256"] = "f" * 64
-        with self.assertRaisesRegex(ActionE2EEvidenceError, "H2_DEPLOYED_SCHEMA_BINDING_MISMATCH"):
+        with self.assertRaisesRegex(ActionE2EEvidenceError, "H2_H1_SUMMARY_INVALID"):
             summarize_h2_candidate(CANDIDATE_SHA, bad_h1, capture)
+
+    def test_forged_h1_origin_is_rejected_before_h2_candidate_binding(self):
+        capture = self.capture(
+            source_classification="PRIVATE_LIVE_ACTION_CAPTURE",
+            bearer_configured_privately=True,
+            chatgpt_action_observed=True,
+        )
+        bad_h1 = copy.deepcopy(self.h1_deployed)
+        bad_h1["server_origin_sha256"] = "f" * 64
+        with self.assertRaisesRegex(ActionE2EEvidenceError, "H2_H1_SUMMARY_INVALID"):
+            summarize_h2_candidate(CANDIDATE_SHA, bad_h1, capture)
+
+    def test_forged_capture_and_summary_schema_digest_are_rejected(self):
+        capture = self.capture()
+        bad_capture = copy.deepcopy(capture)
+        bad_capture["action_schema_sha256"] = "f" * 64
+        with self.assertRaisesRegex(ActionE2EEvidenceError, "H2_CAPTURE_SCHEMA_BINDING_INVALID"):
+            validate_read_capture(bad_capture)
+
+        live_capture = self.capture(
+            source_classification="PRIVATE_LIVE_ACTION_CAPTURE",
+            bearer_configured_privately=True,
+            chatgpt_action_observed=True,
+        )
+        summary = summarize_h2_candidate(CANDIDATE_SHA, self.h1_deployed, live_capture)
+        bad_summary = copy.deepcopy(summary)
+        bad_summary["action_schema_sha256"] = "f" * 64
+        with self.assertRaisesRegex(ActionE2EEvidenceError, "H2_SUMMARY_SCHEMA_BINDING_INVALID"):
+            validate_h2_summary(bad_summary)
 
     def test_summary_mutation_cannot_claim_product_h2_or_deployment(self):
         capture = self.capture(
@@ -212,6 +283,30 @@ class ActionE2EEvidenceTests(unittest.TestCase):
             h1_path = root / "h1.json"
             h1_path.write_text(json.dumps(self.h1_deployed), encoding="utf-8")
             self.assertEqual(load_h1_summary(h1_path)["candidate_sha"], CANDIDATE_SHA)
+
+    def test_h2_evidence_in_place_mutation_during_read_is_rejected(self):
+        capture = self.capture()
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "capture.json"
+            path.write_text(json.dumps(capture), encoding="utf-8")
+            real_read = os.read
+            mutated = False
+
+            def mutating_read(fd, amount):
+                nonlocal mutated
+                chunk = real_read(fd, amount)
+                if chunk and not mutated:
+                    mutated = True
+                    with path.open("ab") as stream:
+                        stream.write(b" ")
+                return chunk
+
+            with mock.patch("ops.dev06_action_e2e_evidence.os.read", side_effect=mutating_read):
+                with self.assertRaisesRegex(
+                    ActionE2EEvidenceError,
+                    "H2_EVIDENCE_FILE_CHANGED_DURING_READ",
+                ):
+                    load_h2_capture(path)
 
     @unittest.skipUnless(hasattr(os, "symlink"), "symlink unavailable")
     def test_h2_evidence_symlink_is_rejected(self):
