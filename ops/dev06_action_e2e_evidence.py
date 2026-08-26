@@ -1,15 +1,15 @@
 # -*- coding: utf-8 -*-
-"""Privacy-safe H2 read-only ChatGPT Action E2E evidence protocol.
+"""Privacy-safe, source-bound H2 read-only ChatGPT Action evidence protocol.
 
 This module performs no network, Telegram, HOSTiQ, ChatGPT, credential, or
 production mutation. A future private live runner may pass one already-observed
 read-only Action response through :func:`build_read_capture` while the private
 payload exists only in process memory. The returned capture contains bounded
-booleans/status identifiers only.
+booleans/status identifiers and an exact Git-checkout source binding only.
 
 Neither a caller label nor a structurally valid capture proves that ChatGPT was
-the caller. Consequently every public summary keeps ``product_h2_pass`` false
-and requires independent Auditor adjudication of the private live provenance.
+the caller. Every public summary keeps ``product_h2_pass`` false and requires
+independent Auditor adjudication of private live provenance and deployed SHA.
 """
 from __future__ import annotations
 
@@ -25,6 +25,7 @@ from ops.dev06_api_contracts import ApiOperationClass, canonical_action
 from ops.dev06_deployed_action_evidence import (
     PRODUCTION_BASE_URL,
     DeployedActionEvidenceError,
+    derive_source_binding,
     schema_sha256,
     validate_evidence_summary as validate_h1_summary,
 )
@@ -86,6 +87,13 @@ def _expected_schema_digest() -> str:
     return schema_sha256(build_compatible_chatgpt_action_openapi(PRODUCTION_BASE_URL))
 
 
+def _source_identity(source_checkout: str | os.PathLike[str] | Path) -> dict[str, Any]:
+    try:
+        return derive_source_binding(source_checkout)
+    except DeployedActionEvidenceError as exc:
+        raise ActionE2EEvidenceError(str(exc)) from None
+
+
 def _bounded_private_json(value: Any) -> None:
     """Bound private response work without retaining or exporting response values."""
     state = {"nodes": 0, "chars": 0}
@@ -129,13 +137,7 @@ def _bounded_private_json(value: Any) -> None:
 
 
 def _validation_headers(headers: Mapping[str, Any]) -> dict[str, str]:
-    """Copy only non-secret headers required by the response contract validator.
-
-    Unknown headers are deliberately ignored without coercing their values. This
-    prevents Authorization/Cookie/private diagnostic material from being touched
-    by the public-evidence layer merely because it was present on the live HTTP
-    response.
-    """
+    """Copy only non-secret headers required by the response contract validator."""
     if not isinstance(headers, Mapping) or len(headers) > MAX_H2_RESPONSE_HEADERS:
         raise ActionE2EEvidenceError("H2_RESPONSE_HEADERS_INVALID")
     selected: dict[str, str] = {}
@@ -154,7 +156,7 @@ def _validation_headers(headers: Mapping[str, Any]) -> dict[str, str]:
 
 
 def build_read_capture(
-    candidate_sha: str,
+    source_checkout: str | os.PathLike[str] | Path,
     operation_id: str,
     status: int,
     headers: Mapping[str, Any],
@@ -164,14 +166,8 @@ def build_read_capture(
     bearer_configured_privately: bool = False,
     chatgpt_action_observed: bool = False,
 ) -> dict[str, Any]:
-    """Validate one already-observed read response and emit no response content.
-
-    ``payload`` and the two response-contract headers are used only for bounded
-    in-memory conformance checking. Payload/header values are never copied to the
-    returned capture. Unknown headers, including Authorization/Cookie values,
-    are not coerced or passed to the schema validator at all.
-    """
-    sha = _require_sha40(candidate_sha)
+    """Validate one observed read response and bind it to exact checkout identity."""
+    binding = _source_identity(source_checkout)
     route = _read_action(operation_id)
     if source_classification not in _ALLOWED_CAPTURE_SOURCES:
         raise ActionE2EEvidenceError("H2_SOURCE_CLASSIFICATION_INVALID")
@@ -189,8 +185,9 @@ def build_read_capture(
         document, route.action_operation_id or "", status, safe_headers, payload
     )
     capture = {
-        "schema_version": 1,
-        "candidate_sha": sha,
+        "schema_version": 2,
+        "candidate_sha": binding["candidate_sha"],
+        "source_binding_sha256": binding["source_binding_sha256"],
         "source_classification": source_classification,
         "operation_id": route.action_operation_id,
         "action_schema_sha256": schema_sha256(document),
@@ -201,14 +198,17 @@ def build_read_capture(
         "chatgpt_action_observed": chatgpt_action_observed,
         "private_values_recorded": False,
     }
-    validate_read_capture(capture)
+    validate_read_capture(capture, source_checkout)
     return capture
 
 
-def validate_read_capture(capture: Mapping[str, Any]) -> None:
+def validate_read_capture(
+    capture: Mapping[str, Any], source_checkout: str | os.PathLike[str] | Path
+) -> None:
     required = {
         "schema_version",
         "candidate_sha",
+        "source_binding_sha256",
         "source_classification",
         "operation_id",
         "action_schema_sha256",
@@ -221,9 +221,16 @@ def validate_read_capture(capture: Mapping[str, Any]) -> None:
     }
     if not isinstance(capture, Mapping) or set(capture) != required:
         raise ActionE2EEvidenceError("H2_CAPTURE_SHAPE_INVALID")
-    if capture.get("schema_version") != 1:
+    if capture.get("schema_version") != 2:
         raise ActionE2EEvidenceError("H2_CAPTURE_SCHEMA_VERSION_INVALID")
+    binding = _source_identity(source_checkout)
+    if (
+        capture.get("candidate_sha") != binding["candidate_sha"]
+        or capture.get("source_binding_sha256") != binding["source_binding_sha256"]
+    ):
+        raise ActionE2EEvidenceError("H2_CAPTURE_SOURCE_BINDING_INVALID")
     _require_sha40(capture.get("candidate_sha"))
+    _require_sha256(capture.get("source_binding_sha256"))
     capture_digest = _require_sha256(capture.get("action_schema_sha256"))
     if capture_digest != _expected_schema_digest():
         raise ActionE2EEvidenceError("H2_CAPTURE_SCHEMA_BINDING_INVALID")
@@ -247,24 +254,29 @@ def validate_read_capture(capture: Mapping[str, Any]) -> None:
 
 
 def summarize_h2_candidate(
-    candidate_sha: str,
+    source_checkout: str | os.PathLike[str] | Path,
     h1_summary: Mapping[str, Any],
     capture: Mapping[str, Any],
 ) -> dict[str, Any]:
-    """Bind H2 candidate evidence to the exact H1-compatible deployed schema."""
-    sha = _require_sha40(candidate_sha)
+    """Bind H2 candidate evidence to exact source-bound H1 and capture evidence."""
+    binding = _source_identity(source_checkout)
     try:
-        validate_h1_summary(h1_summary)
+        validate_h1_summary(h1_summary, source_checkout)
     except Exception:
         raise ActionE2EEvidenceError("H2_H1_SUMMARY_INVALID") from None
-    validate_read_capture(capture)
+    validate_read_capture(capture, source_checkout)
 
-    if h1_summary.get("candidate_sha") != sha or capture.get("candidate_sha") != sha:
+    if (
+        h1_summary.get("candidate_sha") != binding["candidate_sha"]
+        or capture.get("candidate_sha") != binding["candidate_sha"]
+        or h1_summary.get("source_binding_sha256") != binding["source_binding_sha256"]
+        or capture.get("source_binding_sha256") != binding["source_binding_sha256"]
+    ):
         raise ActionE2EEvidenceError("H2_CANDIDATE_BINDING_MISMATCH")
-    if h1_summary.get("source_classification") != "DEPLOYED_CAPTURE":
-        h1_deployed_match = False
-    else:
-        h1_deployed_match = bool(h1_summary.get("schema_match"))
+    h1_deployed_match = bool(
+        h1_summary.get("source_classification") == "DEPLOYED_CAPTURE"
+        and h1_summary.get("schema_match") is True
+    )
 
     expected_schema_digest = _expected_schema_digest()
     h1_expected = _require_sha256(h1_summary.get("expected_schema_sha256"))
@@ -294,8 +306,9 @@ def summarize_h2_candidate(
     )
 
     summary = {
-        "schema_version": 1,
-        "candidate_sha": sha,
+        "schema_version": 2,
+        "candidate_sha": binding["candidate_sha"],
+        "source_binding_sha256": binding["source_binding_sha256"],
         "operation_id": capture.get("operation_id"),
         "action_schema_sha256": expected_schema_digest,
         "h1_deployed_schema_match": h1_deployed_match,
@@ -312,14 +325,17 @@ def summarize_h2_candidate(
         "production_mutated": False,
         "private_values_recorded": False,
     }
-    validate_h2_summary(summary)
+    validate_h2_summary(summary, source_checkout)
     return summary
 
 
-def validate_h2_summary(summary: Mapping[str, Any]) -> None:
+def validate_h2_summary(
+    summary: Mapping[str, Any], source_checkout: str | os.PathLike[str] | Path
+) -> None:
     required = {
         "schema_version",
         "candidate_sha",
+        "source_binding_sha256",
         "operation_id",
         "action_schema_sha256",
         "h1_deployed_schema_match",
@@ -338,15 +354,22 @@ def validate_h2_summary(summary: Mapping[str, Any]) -> None:
     }
     if not isinstance(summary, Mapping) or set(summary) != required:
         raise ActionE2EEvidenceError("H2_SUMMARY_SHAPE_INVALID")
-    if summary.get("schema_version") != 1:
+    if summary.get("schema_version") != 2:
         raise ActionE2EEvidenceError("H2_SUMMARY_SCHEMA_VERSION_INVALID")
+    binding = _source_identity(source_checkout)
+    if (
+        summary.get("candidate_sha") != binding["candidate_sha"]
+        or summary.get("source_binding_sha256") != binding["source_binding_sha256"]
+    ):
+        raise ActionE2EEvidenceError("H2_SUMMARY_SOURCE_BINDING_INVALID")
     _require_sha40(summary.get("candidate_sha"))
+    _require_sha256(summary.get("source_binding_sha256"))
     summary_digest = _require_sha256(summary.get("action_schema_sha256"))
     if summary_digest != _expected_schema_digest():
         raise ActionE2EEvidenceError("H2_SUMMARY_SCHEMA_BINDING_INVALID")
     _read_action(summary.get("operation_id"))
     for key in required - {
-        "schema_version", "candidate_sha", "operation_id", "action_schema_sha256"
+        "schema_version", "candidate_sha", "source_binding_sha256", "operation_id", "action_schema_sha256"
     }:
         _require_bool(summary.get(key), "H2_SUMMARY_BOOLEAN_INVALID")
     if summary.get("read_only_operation") is not True:
@@ -436,16 +459,20 @@ def _load_bounded_json(path: str | Path) -> Mapping[str, Any]:
     return parsed
 
 
-def load_h1_summary(path: str | Path) -> Mapping[str, Any]:
+def load_h1_summary(
+    path: str | Path, source_checkout: str | os.PathLike[str] | Path
+) -> Mapping[str, Any]:
     parsed = _load_bounded_json(path)
     try:
-        validate_h1_summary(parsed)
+        validate_h1_summary(parsed, source_checkout)
     except Exception:
         raise ActionE2EEvidenceError("H2_H1_SUMMARY_INVALID") from None
     return parsed
 
 
-def load_h2_capture(path: str | Path) -> Mapping[str, Any]:
+def load_h2_capture(
+    path: str | Path, source_checkout: str | os.PathLike[str] | Path
+) -> Mapping[str, Any]:
     parsed = _load_bounded_json(path)
-    validate_read_capture(parsed)
+    validate_read_capture(parsed, source_checkout)
     return parsed
