@@ -52,7 +52,7 @@ Production actor/operation cardinality is bounded by fixed service actors and th
 
 ## Failure policy
 
-Database busy beyond the bounded SQLite timeout, corruption, malformed schema access, or SQLite errors fail closed as `rate_limiter_unavailable` / HTTP 503 through the read or write adapter. Quota is never bypassed because the state database is unavailable.
+Database busy beyond the bounded SQLite timeout, corruption, malformed schema access, or SQLite errors always fail closed; quota is never bypassed because state is unavailable. Once the application is built, read/write adapters reduce store failures to stable `rate_limiter_unavailable` HTTP 503 errors. If corruption or unsafe topology is discovered while the production application itself is being constructed after a restart, bootstrap aborts and the lazy WSGI wrapper returns its generic non-secret startup-configuration failure instead of serving an application with a disabled limiter.
 
 Unsafe database or sidecar topology also fails closed during bootstrap/use. No fallback in-memory production limiter is used when private runtime state exists.
 
@@ -75,7 +75,7 @@ Unsafe database or sidecar topology also fails closed during bootstrap/use. No f
 
 `tests/test_finalwave22_rate_limit_auth_failclosed.py` covers:
 
-- read/write adapter mapping of store failure to stable fail-closed HTTP 503 policy errors;
+- read/write adapter mapping of active store failure to stable fail-closed HTTP 503 policy errors;
 - missing/wrong bearer rejection before quota consumption;
 - exact shared store identity for production read/write limiters;
 - authenticated malformed write requests consuming pre-parse quota before JSON failure;
