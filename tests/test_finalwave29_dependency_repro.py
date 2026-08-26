@@ -4,6 +4,7 @@ from __future__ import annotations
 import shutil
 import tempfile
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest import mock
 
@@ -32,6 +33,14 @@ class DependencyReproContractTests(unittest.TestCase):
         shutil.copy2(ROOT / "requirements.txt", root / "requirements.txt")
         shutil.copy2(ROOT / "requirements.lock", root / "requirements.lock")
         return temp, root
+
+    def _fake_artifact_directory(self, root: Path) -> dict[str, str]:
+        mapping: dict[str, str] = {}
+        for name, facts in ARTIFACT_POLICY.items():
+            filename = str(facts["filename"])
+            (root / filename).write_bytes(filename.encode("ascii"))
+            mapping[filename] = EXPECTED_RUNTIME_LOCK[name][1]
+        return mapping
 
     def test_truth_model_never_claims_bit_reproducible_build(self):
         result = validate_artifact_policy()
@@ -127,31 +136,62 @@ class DependencyReproContractTests(unittest.TestCase):
                     paths=("passenger_wsgi.py", "requirements.txt", "requirements.lock", path),
                 )
 
-    def test_artifact_set_rejects_missing_extra_or_wrong_hash(self):
+    def test_artifact_set_rejects_missing_extra_and_wrong_hash(self):
         with tempfile.TemporaryDirectory() as td:
             directory = Path(td)
-            names = [facts["filename"] for facts in ARTIFACT_POLICY.values()]
-            for name in names:
-                (directory / name).write_bytes(name.encode("ascii"))
-            digests = iter(expected_artifact_hashes())
-            with mock.patch("ops.dependency_repro.sha256_file", side_effect=lambda _path: next(digests)):
+            mapping = self._fake_artifact_directory(directory)
+            with mock.patch("ops.dependency_repro.sha256_file", side_effect=lambda path: mapping[path.name]):
                 result = verify_downloaded_artifacts(directory)
             self.assertEqual(4, result["artifact_count"])
+
+            missing = directory / ARTIFACT_POLICY["rsa"]["filename"]
+            missing.unlink()
+            with self.assertRaises(SafetyError):
+                verify_downloaded_artifacts(directory)
+            missing.write_bytes(missing.name.encode("ascii"))
 
             (directory / "unexpected.whl").write_bytes(b"x")
             with self.assertRaises(SafetyError):
                 verify_downloaded_artifacts(directory)
+            (directory / "unexpected.whl").unlink()
+
+            wrong_mapping = dict(mapping)
+            wrong_mapping[ARTIFACT_POLICY["rsa"]["filename"]] = "0" * 64
+            with mock.patch("ops.dependency_repro.sha256_file", side_effect=lambda path: wrong_mapping[path.name]):
+                with self.assertRaises(SafetyError):
+                    verify_downloaded_artifacts(directory)
+
+    def test_interrupted_download_state_fails_closed_then_clean_restart_passes(self):
+        with tempfile.TemporaryDirectory() as td:
+            directory = Path(td)
+            mapping = self._fake_artifact_directory(directory)
+            partial = directory / "pyaes-1.6.1.tar.gz.part"
+            partial.write_bytes(b"partial")
+            with self.assertRaises(SafetyError):
+                verify_downloaded_artifacts(directory)
+            partial.unlink()
+            with mock.patch("ops.dependency_repro.sha256_file", side_effect=lambda path: mapping[path.name]):
+                self.assertTrue(verify_downloaded_artifacts(directory)["all_hashes_match_lock"])
+
+    def test_concurrent_read_only_artifact_validation_has_no_shared_state(self):
+        with tempfile.TemporaryDirectory() as td:
+            directory = Path(td)
+            mapping = self._fake_artifact_directory(directory)
+            with mock.patch("ops.dependency_repro.sha256_file", side_effect=lambda path: mapping[path.name]):
+                with ThreadPoolExecutor(max_workers=8) as pool:
+                    futures = [pool.submit(verify_downloaded_artifacts, directory) for _ in range(32)]
+                    results = [future.result(timeout=10) for future in futures]
+            self.assertTrue(all(result["all_hashes_match_lock"] for result in results))
 
     def test_artifact_set_requires_pyaes_source_distribution_filename(self):
         with tempfile.TemporaryDirectory() as td:
             directory = Path(td)
-            names = [facts["filename"] for facts in ARTIFACT_POLICY.values()]
-            for name in names:
-                if name == "pyaes-1.6.1.tar.gz":
-                    name = "pyaes-1.6.1-py3-none-any.whl"
-                (directory / name).write_bytes(name.encode("ascii"))
-            digest_values = list(expected_artifact_hashes())
-            with mock.patch("ops.dependency_repro.sha256_file", side_effect=digest_values):
+            mapping = self._fake_artifact_directory(directory)
+            source = directory / "pyaes-1.6.1.tar.gz"
+            wheel = directory / "pyaes-1.6.1-py3-none-any.whl"
+            source.rename(wheel)
+            mapping[wheel.name] = mapping.pop(source.name)
+            with mock.patch("ops.dependency_repro.sha256_file", side_effect=lambda path: mapping[path.name]):
                 with self.assertRaises(SafetyError):
                     verify_downloaded_artifacts(directory)
 
