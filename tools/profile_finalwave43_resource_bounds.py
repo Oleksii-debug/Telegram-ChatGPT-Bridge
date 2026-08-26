@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Credential-free resource-bound profiler for FINALWAVE-43.
 
-The profiler intentionally uses only synthetic metadata.  It does not connect to
-Telegram, read production files, or require any secret.  Wall-clock and tracemalloc
+The profiler intentionally uses only synthetic metadata. It does not connect to
+Telegram, read production files, or require any secret. Wall-clock and tracemalloc
 numbers are diagnostic rather than pass/fail thresholds; deterministic call/count
 bounds live in tests/test_finalwave43_resource_bounds.py.
 """
@@ -10,9 +10,14 @@ bounds live in tests/test_finalwave43_resource_bounds.py.
 from __future__ import annotations
 
 import json
+import sys
 import time
 import tracemalloc
-from dataclasses import asdict
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 from bridge.archive import ArchiveLimits
 from bridge.audit import AuditLog
@@ -162,7 +167,7 @@ def retention_truth() -> dict[str, object]:
         "private_file_registry": "unbounded_retention_missing",
         "write_idempotency_tombstones": "intentionally_unbounded_exactly_once_safety",
         "consumed_preview_payloads": "retained_via_idempotency_fk",
-        "safe_action": "do_not_delete_without audited retention/exactly-once policy",
+        "safe_action": "do_not_delete_without_audited_retention_exactly_once_policy",
     }
 
 
