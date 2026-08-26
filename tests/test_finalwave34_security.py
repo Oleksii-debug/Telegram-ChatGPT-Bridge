@@ -115,6 +115,13 @@ jobs:
         self.assertIn("secret context is forbidden", result)
         self.assertNotIn(name, result)
 
+    def test_raw_secret_context_is_rejected_without_echo(self):
+        expression = "${{ toJSON(" + "secrets) }}"
+        bad = self.workflow() + "      - run: echo \"" + expression + "\"\n"
+        result = self.findings(bad)
+        self.assertIn("secret context is forbidden", result)
+        self.assertNotIn(expression, result)
+
     def test_bracket_github_token_context_is_rejected(self):
         expression = "${{ github['" + "token'] }}"
         bad = self.workflow() + "      - run: echo \"" + expression + "\"\n"
@@ -124,12 +131,27 @@ jobs:
         bad = self.workflow().replace("runs-on: ubuntu-latest", "runs-on: 'self-hosted'")
         self.assertIn("approved GitHub-hosted runner", self.findings(bad))
 
-    def test_dynamic_runner_expression_is_rejected(self):
-        bad = self.workflow().replace(
-            "runs-on: ubuntu-latest",
-            "runs-on: ${{ matrix.runner }}",
-        )
+    def test_quoted_runs_on_key_cannot_bypass_runner_policy(self):
+        bad = self.workflow().replace("runs-on: ubuntu-latest", "'runs-on': 'self-hosted'")
         self.assertIn("approved GitHub-hosted runner", self.findings(bad))
+
+    def test_dynamic_runner_expression_is_rejected(self):
+        bad = self.workflow().replace("runs-on: ubuntu-latest", "runs-on: ${{ matrix.runner }}")
+        self.assertIn("approved GitHub-hosted runner", self.findings(bad))
+
+    def test_quoted_environment_key_is_rejected(self):
+        bad = self.workflow().replace(
+            "    runs-on: ubuntu-latest\n",
+            "    runs-on: ubuntu-latest\n    'environment': production\n",
+        )
+        self.assertIn("environment binding", self.findings(bad))
+
+    def test_quoted_unpinned_uses_key_is_rejected(self):
+        bad = self.workflow().replace(
+            f"uses: actions/setup-python@{self.PYTHON_SHA}",
+            "'uses': actions/setup-python@v7",
+        )
+        self.assertIn("not immutable-SHA pinned", self.findings(bad))
 
     def test_checkout_path_override_is_rejected(self):
         bad = self.workflow().replace(
@@ -146,6 +168,16 @@ jobs:
         )
         result = self.findings(bad)
         self.assertIn("checkout ssh-key override is forbidden", result)
+        self.assertNotIn(synthetic, result)
+
+    def test_quoted_checkout_token_key_is_rejected_without_echo(self):
+        synthetic = "synthetic-placeholder-token-value"
+        bad = self.workflow().replace(
+            "          submodules: false\n",
+            f"          submodules: false\n          'token': {synthetic}\n",
+        )
+        result = self.findings(bad)
+        self.assertIn("checkout token override is forbidden", result)
         self.assertNotIn(synthetic, result)
 
 

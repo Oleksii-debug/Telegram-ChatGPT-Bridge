@@ -19,7 +19,7 @@ WORKFLOW_DIR = Path(".github/workflows")
 MAX_WORKFLOW_BYTES = 2_000_000
 
 _SECRET_CONTEXT_RE = re.compile(
-    r"\$\{\{[^}\r\n]*\bsecrets\s*(?:\.|\[)",
+    r"\$\{\{[^}\r\n]*\bsecrets\b",
     re.IGNORECASE,
 )
 _GITHUB_TOKEN_CONTEXT_RE = re.compile(
@@ -43,9 +43,13 @@ _HIGH_RISK_TRIGGER_TOKEN_RE = re.compile(
     re.IGNORECASE,
 )
 _ON_HEADER_RE = re.compile(r"^(?:on|['\"]on['\"])\s*:\s*(.*)$", re.IGNORECASE)
-_ENVIRONMENT_RE = re.compile(r"(?im)^\s*environment\s*:")
+_ENVIRONMENT_RE = re.compile(r"(?im)^\s*['\"]?environment['\"]?\s*:")
 _GITHUB_HOSTED_RUNNER_RE = re.compile(
     r"^(?:ubuntu-(?:latest|24\.04|22\.04)|windows-(?:latest|2025|2022)|macos-(?:latest|15|14|13))$",
+    re.IGNORECASE,
+)
+_USES_RE = re.compile(
+    r"(?:^|\s|[-{,])['\"]?uses['\"]?\s*:\s*(?:\"([^\"]+)\"|'([^']+)'|([^\s#},]+))",
     re.IGNORECASE,
 )
 _CACHE_ACTION_PREFIXES = (
@@ -123,7 +127,7 @@ def _trigger_findings(path: str, lines: list[str]) -> list[str]:
 def _runner_findings(path: str, lines: list[str]) -> list[str]:
     findings: list[str] = []
     for line in lines:
-        match = re.match(r"^\s*runs-on\s*:\s*(.*?)\s*(?:#.*)?$", line)
+        match = re.match(r"^\s*['\"]?runs-on['\"]?\s*:\s*(.*?)\s*(?:#.*)?$", line)
         if not match:
             continue
         value = match.group(1).strip().strip("'\"")
@@ -170,14 +174,17 @@ def _checkout_findings(path: str, text: str, block: str) -> list[str]:
     if "secret_scan.py --mode history" in text:
         required["fetch-depth"] = "0"
     for key, value in required.items():
-        if not re.search(rf"(?im)^\s*{re.escape(key)}\s*:\s*{re.escape(value)}\s*(?:#.*)?$", block):
+        if not re.search(
+            rf"(?im)^\s*['\"]?{re.escape(key)}['\"]?\s*:\s*{re.escape(value)}\s*(?:#.*)?$",
+            block,
+        ):
             findings.append(f"workflow: checkout must set {key}: {value}: {path}")
 
     # These overrides make the bytes executed by CI differ from the reviewed PR
     # merge/current repository and can silently introduce alternate credentials.
     forbidden_keys = ("ref", "repository", "path", "token", "ssh-key", "ssh-known-hosts")
     for key in forbidden_keys:
-        if re.search(rf"(?im)^\s*{re.escape(key)}\s*:", block):
+        if re.search(rf"(?im)^\s*['\"]?{re.escape(key)}['\"]?\s*:", block):
             findings.append(f"workflow: checkout {key} override is forbidden: {path}")
     return findings
 
@@ -199,10 +206,10 @@ def scan_workflow_text(path: str, text: str) -> list[str]:
     findings.extend(_permissions_findings(path, lines))
 
     for index, line in enumerate(lines):
-        match = re.search(r"\buses:\s*([^\s#]+)", line)
+        match = _USES_RE.search(line)
         if not match:
             continue
-        target = match.group(1).strip().strip('"\'')
+        target = next(group for group in match.groups() if group is not None).strip()
         target_lower = target.casefold()
 
         if target.startswith("./"):
