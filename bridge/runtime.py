@@ -44,6 +44,16 @@ class PrivateTelegramReferences:
     session_reference: str
 
 
+@dataclass(frozen=True)
+class _FixedWindowOutcome:
+    """One atomic fixed-window decision derived from one persisted clock sample."""
+
+    allowed: bool
+    remaining: int
+    retry_after_seconds: int
+    reset_at_epoch: int
+
+
 def _bounded_int_env(name: str, default: int, minimum: int, maximum: int) -> int:
     raw = os.getenv(name)
     if raw in (None, ""):
@@ -232,6 +242,26 @@ class _SQLiteFixedWindowStore:
         limit: int,
         window_seconds: int,
     ) -> tuple[bool, int, int]:
+        outcome = self.take_outcome(
+            namespace=namespace,
+            actor=actor,
+            operation=operation,
+            limit=limit,
+            window_seconds=window_seconds,
+        )
+        return outcome.allowed, outcome.remaining, outcome.retry_after_seconds
+
+    def take_outcome(
+        self,
+        *,
+        namespace: str,
+        actor: str,
+        operation: str,
+        limit: int,
+        window_seconds: int,
+    ) -> _FixedWindowOutcome:
+        """Return enforcement and reset metadata from the same atomic decision."""
+
         if not namespace or len(namespace) > 32 or not operation or len(operation) > 256:
             raise RuntimeBootstrapError("invalid_rate_limit_namespace")
         if not isinstance(actor, str) or not actor or len(actor) > 512:
@@ -242,7 +272,8 @@ class _SQLiteFixedWindowStore:
         if now < 0:
             raise RuntimeBootstrapError("invalid_rate_limit_clock")
         window_start = (now // window_seconds) * window_seconds
-        retry_after = max(1, window_start + window_seconds - now)
+        window_end = window_start + window_seconds
+        retry_after = max(1, window_end - now)
         actor_hash = self._digest(actor)
         operation_hash = self._digest(operation)
         connection = self._connect()
@@ -280,7 +311,7 @@ class _SQLiteFixedWindowStore:
             if count >= limit:
                 connection.execute("COMMIT")
                 transaction_open = False
-                return False, 0, retry_after
+                return _FixedWindowOutcome(False, 0, retry_after, window_end)
             count += 1
             connection.execute(
                 "INSERT INTO fixed_window_quota(namespace,actor_hash,operation_hash,window_start,count) "
@@ -290,7 +321,7 @@ class _SQLiteFixedWindowStore:
             )
             connection.execute("COMMIT")
             transaction_open = False
-            return True, limit - count, 0
+            return _FixedWindowOutcome(True, limit - count, 0, window_end)
         except RuntimeBootstrapError:
             if transaction_open:
                 try:
@@ -318,7 +349,7 @@ class SQLiteReadRateLimiter:
 
     def check(self, actor: str) -> RateLimitDecision:
         try:
-            allowed, remaining, retry = self.store.take(
+            outcome = self.store.take_outcome(
                 namespace="read",
                 actor=actor,
                 operation="read-api",
@@ -327,7 +358,11 @@ class SQLiteReadRateLimiter:
             )
         except RuntimeBootstrapError as exc:
             raise BridgeError("Rate limiter is unavailable", status=503, code="rate_limiter_unavailable") from exc
-        return RateLimitDecision(allowed=allowed, remaining=remaining, retry_after_seconds=retry or None)
+        return RateLimitDecision(
+            allowed=outcome.allowed,
+            remaining=outcome.remaining,
+            retry_after_seconds=outcome.retry_after_seconds or None,
+        )
 
 
 class SQLiteWriteRateLimiter:
@@ -338,7 +373,7 @@ class SQLiteWriteRateLimiter:
 
     def consume(self, actor_sha256: str, operation_id: str) -> tuple[int, int]:
         try:
-            allowed, remaining, retry = self.store.take(
+            outcome = self.store.take_outcome(
                 namespace="write",
                 actor=actor_sha256,
                 operation=operation_id,
@@ -347,9 +382,13 @@ class SQLiteWriteRateLimiter:
             )
         except RuntimeBootstrapError as exc:
             raise EndpointPolicyError("rate_limiter_unavailable", status=503) from exc
-        if not allowed:
-            raise EndpointPolicyError("rate_limited", status=429, retry_after_seconds=retry)
-        return remaining, int(self.store.clock()) + self.window_seconds
+        if not outcome.allowed:
+            raise EndpointPolicyError(
+                "rate_limited",
+                status=429,
+                retry_after_seconds=outcome.retry_after_seconds,
+            )
+        return outcome.remaining, outcome.reset_at_epoch
 
 
 class _ReadSessionLockedClient:
