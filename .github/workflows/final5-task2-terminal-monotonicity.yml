@@ -26,11 +26,11 @@ jobs:
         with:
           python-version: '3.11'
       - name: Compile focused files
-        run: python -m py_compile ops/final5_task2_terminal_guard.py tests/test_final5_task2_terminal_monotonicity.py
+        run: python -m py_compile ops/final5_task2_terminal_guard.py tests/test_final5_task2_terminal_monotonicity.py tests/test_dev4_write_core.py
       - name: Run focused terminal-state tests
         run: python -m unittest -v tests.test_final5_task2_terminal_monotonicity
       - name: Run adjacent canonical write-safety tests
-        run: python -m unittest -v tests.test_write_safety
+        run: python -m unittest -v tests.test_dev4_write_core
       - name: Current-tree secret scan
         run: python ops/secret_scan.py --scope current
       - name: Full-history secret scan
