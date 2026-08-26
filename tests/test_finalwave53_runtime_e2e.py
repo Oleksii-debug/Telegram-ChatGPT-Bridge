@@ -223,7 +223,7 @@ class Finalwave53RuntimeE2E(unittest.TestCase):
             self.assertEqual("404 Not Found", unauth["status"])
             self.assertNotIn("FINALWAVE53_PRIVATE_CHAT", unauth["raw"].decode(errors="ignore"))
             self.assertEqual("2", self.data(request("/api/v1/dialogs/list", {"limit": 10}))["items"][0]["id"])
-            self.assertEqual([102, 101], [x["id"] for x in self.data(request("/api/v1/history/read", {"chat": "2", "limit": 10}))["items"]])
+            self.assertEqual([101, 102], [x["id"] for x in self.data(request("/api/v1/history/read", {"chat": "2", "limit": 10}))["items"]])
             search = self.data(request("/api/v1/search", {
                 "chat": "2", "sender": "@reader_user", "text": "ПРИВІТ",
                 "date_from": "2026-08-23T00:00:00Z", "date_to": "2026-08-24T00:00:00Z", "limit": 10,
@@ -288,6 +288,7 @@ class Finalwave53RuntimeE2E(unittest.TestCase):
             self.assertFalse(first["idempotent_replay"])
             self.assertTrue(replay["idempotent_replay"])
             self.assertEqual(1, len(boundary.external_writes))
+            self.assertEqual("send", boundary.external_writes[0]["kind"])
 
             audit = json.dumps(app.read_app.audit.events, ensure_ascii=False, sort_keys=True)
             for private in (PRIVATE, "FINALWAVE53_PRIVATE_CHAT", "Одержувач", AUTH, SIGNING, str(root)):
@@ -315,6 +316,8 @@ class Finalwave53RuntimeE2E(unittest.TestCase):
                 rows = [future.result(20) for future in [pool.submit(worker) for _ in range(8)]]
             ok, busy = [r for r in rows if r["status"].startswith("200")], [r for r in rows if r["status"] == "409 Conflict"]
             self.assertEqual(8, len(ok) + len(busy))
+            for row in busy:
+                self.assertEqual("write_in_progress", row["payload"]["error"]["code"])
             self.assertEqual(1, len(boundary.external_writes))
             self.assertEqual(1, sum(not bool(r["payload"]["data"]["idempotent_replay"]) for r in ok))
             self.assertTrue(self.data(request("/api/v1/messages/send/commit", commit))["idempotent_replay"])
