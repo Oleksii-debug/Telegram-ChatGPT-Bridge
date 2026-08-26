@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import secrets
 from dataclasses import dataclass
@@ -186,6 +187,11 @@ class BridgeApplication:
         # chat names and message contents are never rate-limit keys/evidence.
         self._check_rate("authenticated-read-api")
 
+    @staticmethod
+    def _validate_json_string(value: str) -> None:
+        if any(0xD800 <= ord(char) <= 0xDFFF for char in value):
+            raise BridgeError("JSON string contains an invalid Unicode surrogate", code="invalid_json_string")
+
     def _validate_json_tree(self, value: Any, *, depth: int = 0, counter: list[int] | None = None) -> None:
         if counter is None:
             counter = [0]
@@ -198,11 +204,17 @@ class BridgeApplication:
             for key, child in value.items():
                 if not isinstance(key, str):
                     raise BridgeError("JSON object keys must be strings", code="invalid_json_shape")
+                self._validate_json_string(key)
                 self._validate_json_tree(child, depth=depth + 1, counter=counter)
         elif isinstance(value, list):
             for child in value:
                 self._validate_json_tree(child, depth=depth + 1, counter=counter)
-        elif value is not None and not isinstance(value, (str, int, float, bool)):
+        elif isinstance(value, str):
+            self._validate_json_string(value)
+        elif isinstance(value, float):
+            if not math.isfinite(value):
+                raise BridgeError("JSON number must be finite", code="invalid_json_number")
+        elif value is not None and not isinstance(value, (int, bool)):
             raise BridgeError("Unsupported JSON value", code="invalid_json_shape")
 
     @staticmethod
@@ -214,6 +226,11 @@ class BridgeApplication:
             result[key] = value
         return result
 
+    @staticmethod
+    def _reject_json_constant(value: str) -> Any:
+        del value
+        raise BridgeError("JSON number must be finite", code="invalid_json_number")
+
     def _read_json(self, environ: dict[str, Any]) -> dict[str, Any]:
         content_type = str(environ.get("CONTENT_TYPE") or "").split(";", 1)[0].strip().casefold()
         if content_type != "application/json":
@@ -221,29 +238,48 @@ class BridgeApplication:
         raw_length = environ.get("CONTENT_LENGTH")
         if raw_length in (None, ""):
             raise BridgeError("Content-Length is required", code="invalid_content_length")
+        if not isinstance(raw_length, str) or not raw_length.isascii() or not raw_length.isdigit():
+            raise BridgeError("Invalid Content-Length", code="invalid_content_length")
         try:
-            length = int(str(raw_length))
+            length = int(raw_length)
         except ValueError as exc:
             raise BridgeError("Invalid Content-Length", code="invalid_content_length") from exc
-        if length < 0:
-            raise BridgeError("Invalid Content-Length", code="invalid_content_length")
         if length > self.config.max_json_bytes:
             raise BridgeError("Request body is too large", status=413, code="request_too_large")
-        stream = environ.get("wsgi.input") or BytesIO()
-        raw = stream.read(self.config.max_json_bytes + 1 if length == 0 else min(length, self.config.max_json_bytes + 1))
-        if len(raw) > self.config.max_json_bytes:
-            raise BridgeError("Request body is too large", status=413, code="request_too_large")
-        if length and len(raw) != length:
-            raise BridgeError("Incomplete request body", code="incomplete_body")
+
+        if length == 0:
+            raw = b""
+        else:
+            stream = environ.get("wsgi.input") or BytesIO()
+            try:
+                raw = stream.read(length)
+            except Exception as exc:
+                raise BridgeError("Request body could not be read", code="invalid_request_body") from exc
+            if not isinstance(raw, (bytes, bytearray)):
+                raise BridgeError("Request body must be bytes", code="invalid_request_body")
+            raw = bytes(raw)
+            if len(raw) > length:
+                raise BridgeError("Request body exceeded Content-Length", code="invalid_content_length")
+            if len(raw) != length:
+                raise BridgeError("Incomplete request body", code="incomplete_body")
+
         try:
             text = raw.decode("utf-8", "strict")
         except UnicodeDecodeError as exc:
             raise BridgeError("Request body must be valid UTF-8", code="invalid_utf8") from exc
         try:
-            value = json.loads(text or "{}", object_pairs_hook=self._no_duplicate_object)
+            value = json.loads(
+                text or "{}",
+                object_pairs_hook=self._no_duplicate_object,
+                parse_constant=self._reject_json_constant,
+            )
         except _DuplicateJsonKey as exc:
             raise BridgeError("Duplicate JSON object key", code="duplicate_field") from exc
-        except json.JSONDecodeError as exc:
+        except BridgeError:
+            raise
+        except RecursionError as exc:
+            raise BridgeError("JSON nesting is too deep", status=413, code="json_depth_limit") from exc
+        except (json.JSONDecodeError, ValueError) as exc:
             raise BridgeError("Malformed JSON", code="malformed_json") from exc
         self._validate_json_tree(value)
         return require_dict(value)
