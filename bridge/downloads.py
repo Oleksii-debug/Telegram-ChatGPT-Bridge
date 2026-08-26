@@ -111,7 +111,12 @@ class DownloadManager:
             try:
                 fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError as exc:
-                raise BridgeError("Download job is already running", status=409, code="job_busy", details={"retryable": True}) from exc
+                raise BridgeError(
+                    "Download job is already running",
+                    status=409,
+                    code="job_busy",
+                    details={"retryable": True},
+                ) from exc
             yield
         finally:
             try:
@@ -178,6 +183,83 @@ class DownloadManager:
         suffix = Path(name).suffix[:16]
         origin = self._origin_key(job_id, item.item_id)
         return self.files.root / f".{origin}{suffix}"
+
+    @staticmethod
+    def _is_owned_staging_leaf(job_id: str, name: str) -> bool:
+        """Recognize only exact manager-created target leaves for one job."""
+        prefix = f"{job_id}_"
+        if not isinstance(name, str) or not name.startswith(prefix):
+            return False
+        tail = name[len(prefix):]
+        if len(tail) < 29:
+            return False
+        token = tail[:24]
+        remainder = tail[24:]
+        if len(token) != 24 or any(ch not in "0123456789abcdef" for ch in token):
+            return False
+        if not remainder.endswith(".part"):
+            return False
+        suffix = remainder[:-5]
+        if len(suffix) > 16:
+            return False
+        if suffix and (
+            not suffix.startswith(".")
+            or "/" in suffix
+            or "\\" in suffix
+            or "\x00" in suffix
+        ):
+            return False
+        return True
+
+    def _reconcile_job_staging(self, job_id: str) -> None:
+        """Remove stale manager-owned staging leaves before any new Telegram I/O.
+
+        The same-job flock is already held when this runs, so a matching target
+        cannot belong to a live peer. Only exact manager-created target names are
+        cleanup authority. Unknown topology or disk errors fail before backend
+        effects rather than guessing about private data ownership.
+        """
+        try:
+            entries = list(os.scandir(self.staging_dir))
+        except OSError as exc:
+            raise BridgeError(
+                "Download staging recovery is unavailable",
+                status=503,
+                code="staging_recovery_unavailable",
+                details={"retryable": True},
+            ) from exc
+        for entry in entries:
+            if not self._is_owned_staging_leaf(job_id, entry.name):
+                continue
+            candidate = self.staging_dir / entry.name
+            try:
+                info = os.lstat(candidate)
+            except FileNotFoundError:
+                continue
+            except OSError as exc:
+                raise BridgeError(
+                    "Download staging recovery is unavailable",
+                    status=503,
+                    code="staging_recovery_unavailable",
+                    details={"retryable": True},
+                ) from exc
+            if not (stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode)):
+                raise BridgeError(
+                    "Unsafe stale download staging topology",
+                    status=500,
+                    code="staging_recovery_unsafe",
+                )
+            try:
+                candidate.unlink()
+            except FileNotFoundError:
+                continue
+            except OSError as exc:
+                raise BridgeError(
+                    "Download staging recovery is unavailable",
+                    status=503,
+                    code="staging_recovery_unavailable",
+                    details={"retryable": True},
+                ) from exc
 
     def _cleanup_staging_leaf(self, candidate: Path) -> None:
         """Remove only a staging-owned regular/symlink leaf; never arbitrary backend paths."""
@@ -274,9 +356,17 @@ class DownloadManager:
             except FileNotFoundError:
                 pass
             except OSError as exc:
-                raise BridgeError("Private download result state is unavailable", status=500, code="unsafe_recovered_file") from exc
+                raise BridgeError(
+                    "Private download result state is unavailable",
+                    status=500,
+                    code="unsafe_recovered_file",
+                ) from exc
             else:
-                raise BridgeError("Private download result already exists", status=500, code="download_result_collision")
+                raise BridgeError(
+                    "Private download result already exists",
+                    status=500,
+                    code="download_result_collision",
+                )
             result = self.backend.download_media(
                 chat=item.chat,
                 message_id=int(item.message_id),
@@ -288,23 +378,46 @@ class DownloadManager:
                 original_info = os.lstat(returned)
             except OSError as exc:
                 raise BridgeError("Downloaded file is unavailable", status=502, code="media_download_failed") from exc
-            if stat.S_ISLNK(original_info.st_mode) or not stat.S_ISREG(original_info.st_mode) or original_info.st_nlink != 1:
-                raise BridgeError("Backend returned unsafe file topology", status=502, code="unsafe_backend_path")
+            if (
+                stat.S_ISLNK(original_info.st_mode)
+                or not stat.S_ISREG(original_info.st_mode)
+                or original_info.st_nlink != 1
+            ):
+                raise BridgeError(
+                    "Backend returned unsafe file topology",
+                    status=502,
+                    code="unsafe_backend_path",
+                )
             resolved = returned.resolve(strict=True)
             try:
                 resolved.relative_to(self.staging_dir)
             except ValueError as exc:
-                raise BridgeError("Backend returned unsafe download path", status=502, code="unsafe_backend_path") from exc
+                raise BridgeError(
+                    "Backend returned unsafe download path",
+                    status=502,
+                    code="unsafe_backend_path",
+                ) from exc
             resolved_info = os.lstat(resolved)
-            if not stat.S_ISREG(resolved_info.st_mode) or resolved.is_symlink() or resolved_info.st_nlink != 1:
-                raise BridgeError("Backend returned unsafe file topology", status=502, code="unsafe_backend_path")
+            if (
+                not stat.S_ISREG(resolved_info.st_mode)
+                or resolved.is_symlink()
+                or resolved_info.st_nlink != 1
+            ):
+                raise BridgeError(
+                    "Backend returned unsafe file topology",
+                    status=502,
+                    code="unsafe_backend_path",
+                )
             size = resolved_info.st_size
             if size > self.limits.max_single_bytes:
                 raise BridgeError("Downloaded file exceeds size limit", status=413, code="file_too_large")
             if item.expected_size is not None and size != item.expected_size:
                 raise BridgeError("Downloaded file size mismatch", status=502, code="file_size_mismatch")
             digest = _sha256(resolved)
-            if item.expected_sha256 is not None and not secrets.compare_digest(digest, item.expected_sha256.lower()):
+            if item.expected_sha256 is not None and not secrets.compare_digest(
+                digest,
+                item.expected_sha256.lower(),
+            ):
                 raise BridgeError("Downloaded file hash mismatch", status=502, code="file_hash_mismatch")
             resolved.replace(final)
             try:
@@ -334,7 +447,9 @@ class DownloadManager:
             registered = True
             return record
         finally:
-            for candidate in {path for path in (target, returned, resolved) if path is not None}:
+            for candidate in {
+                path for path in (target, returned, resolved) if path is not None
+            }:
                 self._cleanup_staging_leaf(candidate)
             if not registered:
                 # Normal Python exceptions clean the unregistered file. A hard
@@ -356,17 +471,27 @@ class DownloadManager:
             records.append(record)
         return records
 
-    def _accept_result(self, payload: dict[str, Any], item: DownloadItem, record: FileRecord) -> None:
+    def _accept_result(
+        self,
+        payload: dict[str, Any],
+        item: DownloadItem,
+        record: FileRecord,
+    ) -> None:
         current_total = sum(existing.size for existing in self._complete_files(payload))
         if current_total + record.size > self.limits.max_bulk_bytes:
             self.files.delete(record.file_ref)
-            raise BridgeError("Bulk download exceeds total size limit", status=413, code="bulk_size_limit")
+            raise BridgeError(
+                "Bulk download exceeds total size limit",
+                status=413,
+                code="bulk_size_limit",
+            )
         payload["results"][item.item_id] = record.file_ref
         payload["failures"].pop(item.item_id, None)
 
     def resume(self, job_id: str) -> dict[str, Any]:
         with self._job_lock(job_id):
             payload = self.checkpoints.load(job_id)
+            self._reconcile_job_staging(job_id)
             if payload["status"] == "complete":
                 records = self._complete_files(payload)
                 return {
@@ -399,7 +524,10 @@ class DownloadManager:
                     continue
 
                 prior_failure = payload["failures"].get(item.item_id)
-                if prior_failure is not None and prior_failure.get("retryable") is False:
+                if (
+                    prior_failure is not None
+                    and prior_failure.get("retryable") is False
+                ):
                     continue
                 payload["failures"].pop(item.item_id, None)
                 try:
@@ -413,7 +541,9 @@ class DownloadManager:
                     }
                 self.checkpoints.save(payload)
 
-            pending_ids = [item.item_id for item in items if item.item_id not in payload["results"]]
+            pending_ids = [
+                item.item_id for item in items if item.item_id not in payload["results"]
+            ]
             if not pending_ids:
                 payload["status"] = "complete"
                 payload["failures"] = {}
