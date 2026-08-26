@@ -59,6 +59,10 @@ TERMINAL_STATES = {
     "CRITICAL_PRELIVE_RECOVERY_FAILED", "CRITICAL_ROLLBACK_FAILED",
     "CRITICAL_TRANSACTION_AMBIGUOUS",
 }
+CRITICAL_TERMINAL_STATES = {
+    "CRITICAL_PRELIVE_RECOVERY_FAILED", "CRITICAL_ROLLBACK_FAILED",
+    "CRITICAL_TRANSACTION_AMBIGUOUS",
+}
 ALL_STATES = ACTIVE_STATES | TERMINAL_STATES
 LEGAL_TRANSITIONS = {
     "MATERIALIZING": {"MATERIALIZED", "PREAPPROVAL_ABORTED", "CRITICAL_TRANSACTION_AMBIGUOUS"},
@@ -688,11 +692,47 @@ def _load_transaction_journal(control_root: Path) -> dict | None:
         raise SafetyError("deployment transaction journal unreadable") from exc
 
 
+def _fsync_parent_directory(path: Path) -> None:
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    try:
+        fd = os.open(path.parent, flags)
+    except OSError as exc:
+        raise SafetyError("deployment transaction journal directory could not be opened for sync") from exc
+    try:
+        os.fsync(fd)
+    except OSError as exc:
+        raise SafetyError("deployment transaction journal directory sync failed") from exc
+    finally:
+        os.close(fd)
+
+
 def _write_transaction_journal(control_root: Path, journal: dict) -> dict:
     updated = dict(journal)
     updated["updated_at"] = utc_now_iso()
     updated = _validate_transaction_journal(updated)
-    write_json_atomic(_journal_path(control_root), updated, mode=0o600)
+    path = _journal_path(control_root)
+    temp = path.with_name(
+        f"{path.name}.tmp.{os.getpid()}.{os.urandom(8).hex()}"
+    )
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd = None
+    try:
+        fd = os.open(temp, flags, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            fd = None
+            handle.write(json.dumps(updated, indent=2, sort_keys=True) + "\n")
+            handle.flush()
+            os.fchmod(handle.fileno(), 0o600)
+            os.fsync(handle.fileno())
+        os.replace(temp, path)
+        _fsync_parent_directory(path)
+    except Exception:
+        if fd is not None:
+            os.close(fd)
+        temp.unlink(missing_ok=True)
+        raise
     return updated
 
 
@@ -716,7 +756,9 @@ def _transition_transaction(control_root: Path, journal: dict, state: str, **ext
 def _best_effort_transaction(control_root: Path, journal: dict, state: str, **extra) -> dict:
     try:
         return _transition_transaction(control_root, journal, state, **extra)
-    except Exception:
+    except Exception as exc:
+        if state in CRITICAL_TERMINAL_STATES:
+            raise SafetyError("critical deployment transaction terminalization could not be persisted") from exc
         fallback = dict(journal)
         fallback["state"] = state
         fallback.update(extra)
@@ -886,10 +928,14 @@ def _reconcile_incomplete_transaction(*, control_root: Path, releases_root: Path
     stage = releases_root / (".finalize_" + sha)
     old = releases_root / previous_sha
     if stage.is_symlink() or not active_link.is_symlink():
+        _best_effort_transaction(control_root, journal, "CRITICAL_TRANSACTION_AMBIGUOUS",
+                                 reason_code="recovery_path_unsafe")
         raise SafetyError("transaction recovery path is unsafe")
     try:
         active = active_link.resolve(strict=True)
     except OSError as exc:
+        _best_effort_transaction(control_root, journal, "CRITICAL_TRANSACTION_AMBIGUOUS",
+                                 reason_code="active_target_missing")
         raise SafetyError("transaction recovery active target missing") from exc
     previous = None
     if old.exists() and old.is_dir() and not old.is_symlink():
@@ -1055,8 +1101,14 @@ def _reconcile_incomplete_transaction(*, control_root: Path, releases_root: Path
         )
 
     if state in {"SWITCHED", "VERIFIED"}:
-        _validate_consumed_approval_marker(control_root=control_root,
-            consumption_root=approval_consumption_root, journal=journal, require_exists=True)
+        try:
+            _validate_consumed_approval_marker(
+                control_root=control_root, consumption_root=approval_consumption_root,
+                journal=journal, require_exists=True)
+        except SafetyError as exc:
+            _best_effort_transaction(control_root, journal, "CRITICAL_TRANSACTION_AMBIGUOUS",
+                                     reason_code="committed_marker_missing_or_invalid_after_switch")
+            raise SafetyError("committed approval marker is invalid after switch") from exc
         if final_target is not None and active == final_target:
             try:
                 _verify_journal_candidate(final, journal, persistent_state_root, runtime_entries)
@@ -1121,8 +1173,16 @@ def _execute_prepared_release_locked(*, repo: Path, prepared_release: Path, repo
                                      approval_consumption_root: Path, quiesce_hook: Path,
                                      resume_hook: Path, restart_hook: Path, identity_hook: Path,
                                      unauth_hook: Path, auth_hook: Path, status_file: Path) -> int:
-    runtime_entries = load_runtime_manifest(runtime_manifest)
     prior = _load_transaction_journal(control_root)
+    try:
+        runtime_entries = load_runtime_manifest(runtime_manifest)
+    except SafetyError as exc:
+        if prior and prior["state"] in ACTIVE_STATES:
+            _best_effort_transaction(
+                control_root, prior, "CRITICAL_TRANSACTION_AMBIGUOUS",
+                reason_code="runtime_manifest_changed")
+            raise SafetyError("runtime manifest invalid during incomplete transaction recovery") from exc
+        raise
     if prior and prior["state"] in ACTIVE_STATES:
         _reconcile_incomplete_transaction(
             control_root=control_root, releases_root=releases_root,
@@ -1332,12 +1392,32 @@ def execute_prepared_release(*, repo: Path, prepared_release: Path, repository_i
     persistent_state_root = topology["persistent_state_root"]
     control_root = topology["control_root"]
     active_link = topology["active_link"]
-    _validate_control_plane(
-        control_root=control_root, runtime_manifest=runtime_manifest, approval_file=approval_file,
-        approval_consumption_root=approval_consumption_root, quiesce_hook=quiesce_hook,
-        resume_hook=resume_hook, restart_hook=restart_hook, identity_hook=identity_hook,
-        unauth_hook=unauth_hook, auth_hook=auth_hook, status_file=status_file)
+    validate_private_control_root(control_root)
     with _deployment_lock(control_root):
+        prior = _load_transaction_journal(control_root)
+        try:
+            validate_private_control_file(runtime_manifest, control_root, "runtime manifest")
+        except SafetyError as exc:
+            if prior and prior["state"] in ACTIVE_STATES:
+                _best_effort_transaction(
+                    control_root, prior, "CRITICAL_TRANSACTION_AMBIGUOUS",
+                    reason_code="runtime_manifest_changed")
+            raise SafetyError("runtime manifest control-plane validation failed") from exc
+        try:
+            _validate_control_plane(
+                control_root=control_root, runtime_manifest=runtime_manifest,
+                approval_file=approval_file,
+                approval_consumption_root=approval_consumption_root,
+                quiesce_hook=quiesce_hook, resume_hook=resume_hook,
+                restart_hook=restart_hook, identity_hook=identity_hook,
+                unauth_hook=unauth_hook, auth_hook=auth_hook,
+                status_file=status_file)
+        except SafetyError as exc:
+            if prior and prior["state"] in ACTIVE_STATES:
+                _best_effort_transaction(
+                    control_root, prior, "CRITICAL_TRANSACTION_AMBIGUOUS",
+                    reason_code="control_plane_changed")
+            raise SafetyError("deployment control plane changed during recovery") from exc
         return _execute_prepared_release_locked(
             repo=repo, prepared_release=prepared_release, repository_id=repository_id,
             approved_ref=approved_ref, ci_run_id=ci_run_id, audit_id=audit_id,
@@ -1370,9 +1450,9 @@ def main(argv=None) -> int:
         control = Path(args.control_root)
         validate_private_control_root(control)
         runtime = Path(args.runtime_manifest)
-        validate_private_control_file(runtime, control, "runtime manifest")
-        entries = load_runtime_manifest(runtime)
         if args.mode == "prepare":
+            validate_private_control_file(runtime, control, "runtime manifest")
+            entries = load_runtime_manifest(runtime)
             if not args.sha or not args.python_executable:
                 raise SafetyError("prepare requires sha and python executable")
             path, meta, digest = prepare_versioned_release(
