@@ -56,8 +56,8 @@ def unique_name(name: str, used: set[str]) -> str:
 class ArchiveLimits:
     max_members: int = 200
     max_total_bytes: int = 750 * 1024 * 1024
-    max_build_seconds: float = 120.0
     compression: int = zipfile.ZIP_DEFLATED
+    max_build_seconds: float = 120.0
 
     def __post_init__(self) -> None:
         if (
@@ -224,11 +224,18 @@ class ArchiveBuilder:
             )
         deadline = self.monotonic() + float(self.limits.max_build_seconds)
         self._check_liveness(deadline=deadline, cancelled=cancelled)
-        refs = list(dict.fromkeys(file_refs))
+        refs: list[str] = []
+        seen_refs: set[str] = set()
+        for ref in file_refs:
+            self._check_liveness(deadline=deadline, cancelled=cancelled)
+            if ref in seen_refs:
+                continue
+            seen_refs.add(ref)
+            refs.append(ref)
+            if len(refs) > self.limits.max_members:
+                raise BridgeError("Archive member limit exceeded", status=413, code="zip_member_limit")
         if not refs:
             raise BridgeError("No files selected", code="empty_archive")
-        if len(refs) > self.limits.max_members:
-            raise BridgeError("Archive member limit exceeded", status=413, code="zip_member_limit")
         records: list[FileRecord] = []
         total = 0
         for ref in refs:
