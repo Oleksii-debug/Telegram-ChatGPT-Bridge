@@ -66,7 +66,7 @@
       ],
       "dev_a_overrides": [
         "bridge/__init__.py", "bridge/app.py", "bridge/archive.py", "bridge/audit.py", "bridge/backend.py",
-        "bridge/downloads.py", "bridge/models.py", "bridge/storage.py", "bridge/validation.py"
+        "bridge/downloads.py", "bridge/errors.py", "bridge/models.py", "bridge/storage.py", "bridge/validation.py"
       ]
     },
     "DEV4": {
@@ -79,7 +79,10 @@
         "ops/write_safety.py", "tests/test_dev4_endpoint_policy.py", "tests/test_dev4_file_send_policy.py",
         "tests/test_dev4_session_lock.py", "tests/test_dev4_write_core.py", "tools/build_action_openapi.py"
       ],
-      "dev_a_overrides": ["ops/write_safety.py"]
+      "dev_a_overrides": [
+        "ops/telegram_session_lock.py", "ops/write_endpoint_policy.py", "ops/write_safety.py",
+        "tests/test_dev4_endpoint_policy.py", "tools/build_action_openapi.py"
+      ]
     },
     "DEV2": {
       "pr": 5,
@@ -139,17 +142,65 @@
     "dev04_media_storage_sync": "301817d7e2c1a2fa55435d11ce5c6edc0cef5d71",
     "dev08_deployment_recovery_oracle_sync": "5e35599cca1162bad9501044dfb6a79fa358e182",
     "dev03_read_hardening_sync": "c0a2b443e811eee8460af6c688f30ad3bbdf5f4d",
-    "dev07_audit_sink_sync": "4884e55ab582c1e906a692499efb6c68575cb8df"
+    "dev07_audit_sink_sync": "4884e55ab582c1e906a692499efb6c68575cb8df",
+    "post_audit_canonical_integrations": "59fa24a87fae5f0f549a475f59cd30e1fcf9007e"
   },
   "dev_a_paths": [
-    ".github/workflows/ci.yml", "bridge/__init__.py", "bridge/file_access.py", "bridge/filenames.py", "bridge/integrated_app.py",
-    "docs/DEV03_SWARM_READ_HARDENING.md", "docs/DEV04_MEDIA_STORAGE.md", "docs/DEV08_DEPLOYMENT_RECOVERY_R3.md",
-    "docs/DEV_A_INTEGRATED_RELEASE_CANDIDATE.md", "docs/DEV_A_PROVENANCE_LEDGER.md",
-    "integration/provenance_v1.json", "ops/candidate_contracts.py", "ops/deploy_release.py", "ops/dev08_deploy_recovery.py", "ops/integration_interfaces.py",
-    "tests/test_dev01_dev03_peer_provenance.py", "tests/test_dev01_dev04_peer_provenance.py", "tests/test_dev01_dev08_peer_provenance.py",
-    "tests/test_dev03_history_offset.py", "tests/test_dev03_swarm_read.py", "tests/test_dev04_media_storage.py",
-    "tests/test_dev04_migration_concurrency.py", "tests/test_dev04_private_serving.py", "tests/test_dev07_audit_security.py",
-    "tests/test_dev_a_candidate_contracts.py", "tests/test_dev_a_integration.py", "tests/test_dev_a_provenance.py",
+    ".github/workflows/ci.yml",
+    ".github/workflows/finalwave26-a01-11.yml",
+    ".github/workflows/finalwave37-rollback-state.yml",
+    ".github/workflows/finalwave38-runtime-composition.yml",
+    ".github/workflows/finalwave42.yml",
+    "bridge/__init__.py",
+    "bridge/action_request_guard.py",
+    "bridge/file_access.py",
+    "bridge/filenames.py",
+    "bridge/integrated_app.py",
+    "bridge/phase_aware_write_app.py",
+    "bridge/runtime_composition.py",
+    "bridge/upload_snapshot.py",
+    "docs/DEV03_SWARM_READ_HARDENING.md",
+    "docs/DEV04_MEDIA_STORAGE.md",
+    "docs/DEV08_DEPLOYMENT_RECOVERY_R3.md",
+    "docs/DEV_A_INTEGRATED_RELEASE_CANDIDATE.md",
+    "docs/DEV_A_PROVENANCE_LEDGER.md",
+    "docs/FINALWAVE22_B8_RATE_LIMIT.md",
+    "docs/FINALWAVE26_OPENAPI_RUNTIME_PARITY.md",
+    "docs/FINALWAVE37_ROLLBACK_STATE_COMPAT.md",
+    "docs/FINALWAVE42_PUBLIC_ERROR_PRIVACY.md",
+    "integration/provenance_v1.json",
+    "ops/candidate_contracts.py",
+    "ops/deploy_release.py",
+    "ops/dev08_deploy_recovery.py",
+    "ops/finalwave37_rollback_state_compat.py",
+    "ops/integration_interfaces.py",
+    "ops/phase_aware_write_adapter.py",
+    "ops/runtime_write_reliability.py",
+    "ops/secure_write_store.py",
+    "ops/structured_safe_write.py",
+    "tests/test_dev01_dev03_peer_provenance.py",
+    "tests/test_dev01_dev04_peer_provenance.py",
+    "tests/test_dev01_dev08_peer_provenance.py",
+    "tests/test_dev03_history_offset.py",
+    "tests/test_dev03_swarm_read.py",
+    "tests/test_dev04_media_storage.py",
+    "tests/test_dev04_migration_concurrency.py",
+    "tests/test_dev04_private_serving.py",
+    "tests/test_dev07_audit_security.py",
+    "tests/test_dev_a_candidate_contracts.py",
+    "tests/test_dev_a_integration.py",
+    "tests/test_dev_a_provenance.py",
+    "tests/test_finalwave22_rate_limit_auth_failclosed.py",
+    "tests/test_finalwave22_rate_limit_multiprocess.py",
+    "tests/test_finalwave26_deploy_recovery_diagnostics.py",
+    "tests/test_finalwave26_openapi_runtime_parity.py",
+    "tests/test_finalwave26_wsgi_guard_wiring.py",
+    "tests/test_finalwave37_rollback_state_compat.py",
+    "tests/test_finalwave38_runtime_composition.py",
+    "tests/test_finalwave38_session_lock_security.py",
+    "tests/test_finalwave42_public_error_privacy.py",
+    "tests/test_finalwave46_request_parser_fuzz.py",
+    "tests/test_finalwave46_request_parser_resilience.py",
     "tools/verify_integration_provenance.py"
   ],
   "swarm_integrations": {
@@ -164,7 +215,7 @@
         "bridge/validation.py",
         "docs/DEV03_SWARM_READ_HARDENING.md",
         "tests/test_dev03_history_offset.py",
-        "tests/test_dev03_swarm_read.py"
+        "tests/test_dev03_swARM_READ_HARDENING.md"
       ],
       "excluded_specialist_paths": [".github/workflows/dev03-read.yml"],
       "auditor_findings": ["A01-08", "A01-09"],
