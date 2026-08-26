@@ -48,27 +48,15 @@ class BearerGuard:
         header = environ.get("HTTP_AUTHORIZATION") or ""
         if not isinstance(header, str) or len(header) > 1024:
             raise HiddenNotFound()
-
-        # HTTP auth-scheme matching is case-insensitive and credentials are
-        # separated by one or more ASCII SP characters.  Reject tabs, leading
-        # OWS, trailing OWS, comma-joined duplicate Authorization fields and
-        # other ambiguous representations rather than normalizing them.
-        first_space = header.find(" ")
-        if first_space <= 0 or header[:first_space].lower() != "bearer":
+        # Preserve the accepted canonical API contract: exactly ``Bearer``
+        # followed by one ASCII SP and the configured opaque credential.
+        # Case variants, extra whitespace and joined duplicate-header values
+        # remain fail-closed rather than being normalized here.
+        prefix = "Bearer "
+        if not header.startswith(prefix):
             raise HiddenNotFound()
-        candidate_index = first_space
-        while candidate_index < len(header) and header[candidate_index] == " ":
-            candidate_index += 1
-        candidate = header[candidate_index:]
-        if (
-            not candidate
-            or candidate != candidate.strip()
-            or "," in candidate
-            or any(character.isspace() for character in candidate)
-            or any(ord(character) < 0x20 or ord(character) == 0x7F for character in candidate)
-        ):
-            raise HiddenNotFound()
-        if not hmac.compare_digest(candidate, self._token):
+        candidate = header[len(prefix) :]
+        if not candidate or not hmac.compare_digest(candidate, self._token):
             raise HiddenNotFound()
 
 
@@ -118,8 +106,8 @@ class FileSigner:
         # Expiration is exclusive: at exp, the capability is already invalid.
         if exp <= now:
             return False
-        # A valid HMAC must not turn a minting-policy mistake into a long-lived
-        # capability.  Clock rollback therefore fails closed as "too future".
+        # A valid HMAC must not turn a minting-policy mistake or backward clock
+        # jump into a long-lived private-file capability.
         if exp - now > self._max_ttl_seconds:
             return False
         expected = self.signature(file_ref, exp)
