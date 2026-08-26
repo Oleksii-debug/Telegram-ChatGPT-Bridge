@@ -59,6 +59,10 @@ TERMINAL_STATES = {
     "CRITICAL_PRELIVE_RECOVERY_FAILED", "CRITICAL_ROLLBACK_FAILED",
     "CRITICAL_TRANSACTION_AMBIGUOUS",
 }
+CRITICAL_TERMINAL_STATES = {
+    "CRITICAL_PRELIVE_RECOVERY_FAILED", "CRITICAL_ROLLBACK_FAILED",
+    "CRITICAL_TRANSACTION_AMBIGUOUS",
+}
 ALL_STATES = ACTIVE_STATES | TERMINAL_STATES
 LEGAL_TRANSITIONS = {
     "MATERIALIZING": {"MATERIALIZED", "PREAPPROVAL_ABORTED", "CRITICAL_TRANSACTION_AMBIGUOUS"},
@@ -688,11 +692,37 @@ def _load_transaction_journal(control_root: Path) -> dict | None:
         raise SafetyError("deployment transaction journal unreadable") from exc
 
 
+def _fsync_parent_directory(path: Path) -> None:
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    try:
+        fd = os.open(path.parent, flags)
+    except OSError as exc:
+        raise SafetyError("deployment transaction journal directory could not be opened for sync") from exc
+    try:
+        os.fsync(fd)
+    except OSError as exc:
+        raise SafetyError("deployment transaction journal directory sync failed") from exc
+    finally:
+        os.close(fd)
+
+
 def _write_transaction_journal(control_root: Path, journal: dict) -> dict:
     updated = dict(journal)
     updated["updated_at"] = utc_now_iso()
     updated = _validate_transaction_journal(updated)
-    write_json_atomic(_journal_path(control_root), updated, mode=0o600)
+    path = _journal_path(control_root)
+    temp = path.with_name(path.name + ".tmp")
+    try:
+        with temp.open("w", encoding="utf-8") as handle:
+            handle.write(json.dumps(updated, indent=2, sort_keys=True) + "\n")
+            handle.flush()
+            os.fchmod(handle.fileno(), 0o600)
+            os.fsync(handle.fileno())
+        os.replace(temp, path)
+        _fsync_parent_directory(path)
+    except Exception:
+        temp.unlink(missing_ok=True)
+        raise
     return updated
 
 
@@ -716,7 +746,9 @@ def _transition_transaction(control_root: Path, journal: dict, state: str, **ext
 def _best_effort_transaction(control_root: Path, journal: dict, state: str, **extra) -> dict:
     try:
         return _transition_transaction(control_root, journal, state, **extra)
-    except Exception:
+    except Exception as exc:
+        if state in CRITICAL_TERMINAL_STATES:
+            raise SafetyError("critical deployment transaction terminalization could not be persisted") from exc
         fallback = dict(journal)
         fallback["state"] = state
         fallback.update(extra)
@@ -886,10 +918,14 @@ def _reconcile_incomplete_transaction(*, control_root: Path, releases_root: Path
     stage = releases_root / (".finalize_" + sha)
     old = releases_root / previous_sha
     if stage.is_symlink() or not active_link.is_symlink():
+        _best_effort_transaction(control_root, journal, "CRITICAL_TRANSACTION_AMBIGUOUS",
+                                 reason_code="recovery_path_unsafe")
         raise SafetyError("transaction recovery path is unsafe")
     try:
         active = active_link.resolve(strict=True)
     except OSError as exc:
+        _best_effort_transaction(control_root, journal, "CRITICAL_TRANSACTION_AMBIGUOUS",
+                                 reason_code="active_target_missing")
         raise SafetyError("transaction recovery active target missing") from exc
     previous = None
     if old.exists() and old.is_dir() and not old.is_symlink():
@@ -950,7 +986,7 @@ def _reconcile_incomplete_transaction(*, control_root: Path, releases_root: Path
                                      reason_code=decision.reason_code)
             raise SafetyError("BACKED_UP candidate-active transaction evidence is ambiguous")
         if decision.action == "ROLLBACK_REQUIRED":
-            if previous is None:  # classifier should already reject this; preserve defense in depth.
+            if previous is None:
                 _best_effort_transaction(control_root, journal, "CRITICAL_TRANSACTION_AMBIGUOUS",
                                          reason_code="previous_release_missing")
                 raise SafetyError("previous release is unavailable for candidate rollback")
@@ -988,11 +1024,6 @@ def _reconcile_incomplete_transaction(*, control_root: Path, releases_root: Path
             )
             state = "SWITCHED"
         except Exception as persist_exc:
-            # We observed the switch but cannot make that observation durable. Restore the
-            # previous code first, verify its running lifecycle, then record the legal
-            # BACKED_UP -> PRELIVE_RECOVERED terminal state. Persistent state is shared
-            # external state and is intentionally not restored here; schema compatibility
-            # remains a separate audited release constraint (PR #51).
             try:
                 restore_link(active_link, previous)
                 _recover_previous_release(previous_sha, restart_hook, identity_hook, unauth_hook,
@@ -1055,8 +1086,14 @@ def _reconcile_incomplete_transaction(*, control_root: Path, releases_root: Path
         )
 
     if state in {"SWITCHED", "VERIFIED"}:
-        _validate_consumed_approval_marker(control_root=control_root,
-            consumption_root=approval_consumption_root, journal=journal, require_exists=True)
+        try:
+            _validate_consumed_approval_marker(
+                control_root=control_root, consumption_root=approval_consumption_root,
+                journal=journal, require_exists=True)
+        except SafetyError as exc:
+            _best_effort_transaction(control_root, journal, "CRITICAL_TRANSACTION_AMBIGUOUS",
+                                     reason_code="committed_marker_missing_or_invalid_after_switch")
+            raise SafetyError("committed approval marker is invalid after switch") from exc
         if final_target is not None and active == final_target:
             try:
                 _verify_journal_candidate(final, journal, persistent_state_root, runtime_entries)
@@ -1121,8 +1158,16 @@ def _execute_prepared_release_locked(*, repo: Path, prepared_release: Path, repo
                                      approval_consumption_root: Path, quiesce_hook: Path,
                                      resume_hook: Path, restart_hook: Path, identity_hook: Path,
                                      unauth_hook: Path, auth_hook: Path, status_file: Path) -> int:
-    runtime_entries = load_runtime_manifest(runtime_manifest)
     prior = _load_transaction_journal(control_root)
+    try:
+        runtime_entries = load_runtime_manifest(runtime_manifest)
+    except SafetyError as exc:
+        if prior and prior["state"] in ACTIVE_STATES:
+            _best_effort_transaction(
+                control_root, prior, "CRITICAL_TRANSACTION_AMBIGUOUS",
+                reason_code="runtime_manifest_changed")
+            raise SafetyError("runtime manifest invalid during incomplete transaction recovery") from exc
+        raise
     if prior and prior["state"] in ACTIVE_STATES:
         _reconcile_incomplete_transaction(
             control_root=control_root, releases_root=releases_root,
