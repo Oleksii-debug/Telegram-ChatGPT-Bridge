@@ -1,0 +1,47 @@
+name: FINALWAVE-51 Targeted Download Faults
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  download-fault-matrix:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout full history
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Set up Python 3.11
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.11'
+      - name: Compile download crash surface
+        run: >-
+          python -m py_compile
+          bridge/download_validation.py
+          bridge/downloads.py
+          bridge/storage.py
+          tests/test_finalwave51_download_crash.py
+          tests/test_finalwave51_download_disk_faults.py
+          tests/test_finalwave51_validation_receipts.py
+          tests/test_storage_downloads.py
+          tests/test_dev04_media_storage.py
+      - name: Run FINALWAVE-51 fault matrix
+        run: python -m unittest discover -s tests -p 'test_finalwave51_*.py' -v
+      - name: Run incumbent download and storage regressions
+        run: |
+          python -m unittest discover -s tests -p 'test_storage_downloads.py' -v
+          python -m unittest discover -s tests -p 'test_dev04_media_storage.py' -v
+      - name: Current-tree secret scan
+        if: always()
+        run: python tools/secret_scan.py --mode current
+      - name: Full-history secret scan
+        if: always()
+        run: python tools/secret_scan.py --mode history
+      - name: Verify no deploy arming files
+        if: always()
+        run: test ! -e .cpanel.yml && test ! -e ops/ENABLE_HOSTIQ_AUTO_DEPLOY
