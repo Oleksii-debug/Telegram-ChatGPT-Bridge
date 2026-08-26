@@ -323,6 +323,11 @@ class UnifiedBridgeApplication:
             if self.write_coordinator is None or self.write_store is None:
                 raise BridgeError("Write store is not configured", status=503, code="write_store_unconfigured")
 
+            # Protect the body-parser/validation boundary too. The established
+            # operation quota below remains separate so malformed authenticated
+            # requests cannot bypass B8 without double-charging valid requests
+            # against one counter.
+            self._write_limiter.consume(context.actor_sha256, f"request:{spec.operation_id}")
             body = self.read_app._read_json(environ)
             if spec.operation_class is OperationClass.WRITE_PREVIEW:
                 private_payload = self._preview_payload(spec, body)
