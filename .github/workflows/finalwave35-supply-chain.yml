@@ -26,8 +26,10 @@ jobs:
           python-version: '3.11'
       - name: Compile specialist guard and regressions
         run: python -m py_compile tools/finalwave35_supply_chain.py tests/test_finalwave35_supply_chain.py
-      - name: Git and dependency supply-chain preflight
-        run: python -m tools.finalwave35_supply_chain --ref HEAD
+      - name: Exact PR-head Git and dependency supply-chain preflight
+        env:
+          CANDIDATE_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: python -m tools.finalwave35_supply_chain --ref "$CANDIDATE_HEAD_SHA"
       - name: FINALWAVE35 adversarial and inherited release-package tests
         run: python -m unittest -v tests.test_finalwave35_supply_chain tests.test_release_package
       - name: Current-tree secret scan
