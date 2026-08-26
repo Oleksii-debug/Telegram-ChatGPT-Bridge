@@ -1,7 +1,8 @@
 """FINALWAVE-26 adversarial OpenAPI/runtime request-parity regressions.
 
-Credential-free synthetic tests only.  They exercise the exact public WSGI boundary
-without Telegram or production access and must fail closed before preview/effect.
+Credential-free synthetic tests only. They exercise the production Action request
+boundary without Telegram or production access and must fail closed before
+preview/effect.
 """
 from __future__ import annotations
 
@@ -11,12 +12,13 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from bridge.action_request_guard import ActionRequestGuard, validate_action_request
 from bridge.app import BridgeApplication, ReadAppConfig
 from bridge.integrated_app import UnifiedBridgeApplication, validate_unified_registry
 from bridge.models import Page
 from bridge.security import RateLimitDecision
 from ops.dev06_api_contracts import CANONICAL_ROUTES, build_chatgpt_action_openapi, validate_runtime_parity
-from ops.openapi_registry import OPERATIONS
+from ops.openapi_registry import OPERATIONS, OperationClass
 from ops.telegram_write_adapter import (
     DeterministicFakeTelegramClient,
     TelegramRuntimeConfig,
@@ -107,7 +109,7 @@ class Finalwave26OpenApiRuntimeParityTests(unittest.TestCase):
             lambda: self.client,
         )
 
-    def _app(self, *, write_limit: int = 100) -> UnifiedBridgeApplication:
+    def _app(self, *, write_limit: int = 100) -> ActionRequestGuard:
         read_app = BridgeApplication(
             config=ReadAppConfig(
                 auth_secret=TOKEN,
@@ -118,7 +120,7 @@ class Finalwave26OpenApiRuntimeParityTests(unittest.TestCase):
             backend=_EmptyReadBackend(),
             rate_limiter=_AllowReadLimiter(),
         )
-        return UnifiedBridgeApplication(
+        unified = UnifiedBridgeApplication(
             read_app=read_app,
             write_adapter=self.adapter,
             write_limiter=FixedWindowEndpointLimiter(
@@ -127,6 +129,7 @@ class Finalwave26OpenApiRuntimeParityTests(unittest.TestCase):
                 clock=lambda: 120.0,
             ),
         )
+        return ActionRequestGuard(unified)
 
     def test_live_registry_openapi_and_wsgi_inventory_are_bidirectionally_exact(self):
         self.assertEqual([], validate_runtime_parity())
@@ -147,6 +150,13 @@ class Finalwave26OpenApiRuntimeParityTests(unittest.TestCase):
         lowered = json.dumps(schema, sort_keys=True).lower()
         for private_word in ("setup", "login_code", "2fa", "session_string", "api_hash"):
             self.assertNotIn(private_word, lowered)
+
+    def test_every_write_operation_has_runtime_request_schema(self):
+        for spec in OPERATIONS:
+            if spec.operation_class not in {OperationClass.WRITE_PREVIEW, OperationClass.WRITE_COMMIT}:
+                continue
+            with self.subTest(operation_id=spec.operation_id):
+                self.assertTrue(validate_action_request(spec, {}))
 
     def test_write_preview_runtime_rejects_openapi_type_coercions_before_preview(self):
         app = self._app()
@@ -178,7 +188,36 @@ class Finalwave26OpenApiRuntimeParityTests(unittest.TestCase):
             with self.subTest(path=path, body=body):
                 result = _request(app, path, body)
                 self.assertEqual(400, result["status"], result)
+                self.assertEqual("invalid_request_contract", result["json"]["error"]["code"])
                 self.assertEqual([], self.client.external_writes)
+
+    def test_commit_contract_rejects_non_boolean_or_false_explicit_command(self):
+        app = self._app()
+        for value in (1, "true", False):
+            with self.subTest(value=value):
+                result = _request(
+                    app,
+                    "/api/v1/messages/send/commit",
+                    {
+                        "preview_token": "p" * 32,
+                        "idempotency_key": "idem-key-0001",
+                        "explicit_user_command": value,
+                    },
+                )
+                self.assertEqual(400, result["status"], result)
+                self.assertEqual([], self.client.external_writes)
+
+    def test_valid_send_preview_still_creates_preview_without_external_effect(self):
+        app = self._app()
+        result = _request(
+            app,
+            "/api/v1/messages/send/preview",
+            {"chat": "@target", "text": "synthetic draft"},
+        )
+        self.assertEqual(200, result["status"], result)
+        self.assertEqual("SEND", result["json"]["data"]["action"])
+        self.assertTrue(result["json"]["data"]["preview_token"])
+        self.assertEqual([], self.client.external_writes)
 
     def test_content_length_zero_is_zero_bytes_not_unknown_length(self):
         app = self._app()
@@ -198,6 +237,22 @@ class Finalwave26OpenApiRuntimeParityTests(unittest.TestCase):
         self.assertEqual(400, first["status"], first)
         self.assertEqual(429, second["status"], second)
         self.assertGreaterEqual(int(second["headers"]["Retry-After"]), 1)
+        self.assertEqual([], self.client.external_writes)
+
+    def test_malformed_json_and_content_type_also_consume_attempt_quota(self):
+        app = self._app(write_limit=1)
+        first = _request(app, "/api/v1/messages/send/preview", raw=b"{")
+        second = _request(app, "/api/v1/messages/send/preview", raw=b"{")
+        self.assertEqual(400, first["status"], first)
+        self.assertEqual(429, second["status"], second)
+        self.assertEqual([], self.client.external_writes)
+
+    def test_unauthorized_write_does_not_consume_authenticated_attempt_quota(self):
+        app = self._app(write_limit=1)
+        unauth = _request(app, "/api/v1/messages/send/preview", {"chat": "@target", "text": "draft"}, token=None)
+        good = _request(app, "/api/v1/messages/send/preview", {"chat": "@target", "text": "draft"})
+        self.assertEqual(404, unauth["status"], unauth)
+        self.assertEqual(200, good["status"], good)
         self.assertEqual([], self.client.external_writes)
 
     def test_unknown_write_operation_fails_closed_without_preview_or_effect(self):
