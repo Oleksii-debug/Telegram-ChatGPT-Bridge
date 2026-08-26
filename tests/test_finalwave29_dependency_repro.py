@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
@@ -19,12 +20,19 @@ from ops.dependency_repro import (
     verify_downloaded_artifacts,
 )
 from ops.release_guard import SafetyError
-from ops.release_package import EXPECTED_RUNTIME_LOCK
+from ops.release_package import EXPECTED_RUNTIME_LOCK, validate_dependency_contract, validate_public_release_tree
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
 class DependencyReproContractTests(unittest.TestCase):
+    def _dependency_root(self) -> tuple[tempfile.TemporaryDirectory, Path]:
+        temp = tempfile.TemporaryDirectory()
+        root = Path(temp.name)
+        shutil.copy2(ROOT / "requirements.txt", root / "requirements.txt")
+        shutil.copy2(ROOT / "requirements.lock", root / "requirements.lock")
+        return temp, root
+
     def test_truth_model_never_claims_bit_reproducible_build(self):
         result = validate_artifact_policy()
         self.assertEqual("hash-locked-inputs+sealed-prepared-instance-v1", REPRODUCIBILITY_MODEL)
@@ -69,6 +77,55 @@ class DependencyReproContractTests(unittest.TestCase):
             self.assertNotEqual(original, changed)
             differences = sum(a != b for a, b in zip(original, changed))
             self.assertEqual(1, differences)
+
+    def test_requirement_directives_urls_extras_and_markers_fail_closed(self):
+        bad_lines = (
+            "--index-url https://example.invalid/simple\nTelethon==1.44.0\n",
+            "Telethon[cryptg]==1.44.0\n",
+            "Telethon==1.44.0; python_version >= '3.11'\n",
+            "Telethon @ https://example.invalid/telethon.whl\n",
+            "-r other.txt\nTelethon==1.44.0\n",
+        )
+        for content in bad_lines:
+            with self.subTest(content=content.splitlines()[0]):
+                temp, root = self._dependency_root()
+                self.addCleanup(temp.cleanup)
+                (root / "requirements.txt").write_text(content, encoding="utf-8")
+                with self.assertRaises(SafetyError):
+                    validate_dependency_contract(root)
+
+    def test_partial_or_empty_test_dependency_overlay_fails_closed(self):
+        temp, root = self._dependency_root()
+        self.addCleanup(temp.cleanup)
+        (root / "requirements-test.txt").write_text("", encoding="utf-8")
+        with self.assertRaises(SafetyError):
+            validate_dependency_contract(root)
+        (root / "requirements-test.lock").write_text("Telethon==1.44.0\n", encoding="utf-8")
+        with self.assertRaises(SafetyError):
+            validate_dependency_contract(root)
+
+    def test_private_path_exclusion_covers_case_variants_journals_and_traversal(self):
+        forbidden = (
+            ".ENV",
+            ".env.production",
+            "var/state.db",
+            "PRIVATE/config.json",
+            "sessions/current",
+            "state/account.SESSION",
+            "state/account.session-journal",
+            "credentials.json",
+            "token.json",
+            "cookies/profile",
+            "browser_profiles/default",
+            "../escape",
+            "/tmp/escape",
+        )
+        for path in forbidden:
+            with self.subTest(path=path), self.assertRaises(SafetyError):
+                validate_public_release_tree(
+                    ROOT,
+                    paths=("passenger_wsgi.py", "requirements.txt", "requirements.lock", path),
+                )
 
     def test_artifact_set_rejects_missing_extra_or_wrong_hash(self):
         with tempfile.TemporaryDirectory() as td:
