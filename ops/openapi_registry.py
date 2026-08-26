@@ -228,7 +228,7 @@ def build_action_openapi(base_url: str) -> dict[str, Any]:
                 "404": {"description": "Not found or unauthorized", "content": {"application/json": {"schema": _ref("ErrorResponse")}}},
                 "409": {"description": "Preview/idempotency/write-state conflict", "content": {"application/json": {"schema": _ref("ErrorResponse")}}},
                 "429": {"description": "Rate/FloodWait response", "content": {"application/json": {"schema": _ref("ErrorResponse")}}},
-                "503": {"description": "Bridge or Telegram session unavailable", "content": {"application/json": {"schema": _ref("ErrorResponse")}}},
+                "503": {"description": "Private bridge dependency unavailable", "content": {"application/json": {"schema": _ref("ErrorResponse")}}},
             },
             # Informational only; validator classification comes from OPERATIONS.
             "x-bridge-operation-class": spec.operation_class.value,
