@@ -1,0 +1,81 @@
+name: FINALWAVE-38 Runtime Composition
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  runtime-composition:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout full history
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Set up Python 3.11
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.11'
+      - name: Compile runtime composition surface
+        run: >-
+          python -m py_compile
+          passenger_wsgi.py
+          bridge/__init__.py
+          bridge/app.py
+          bridge/runtime.py
+          bridge/runtime_wsgi.py
+          bridge/runtime_composition.py
+          bridge/integrated_app.py
+          bridge/phase_aware_write_app.py
+          bridge/file_access.py
+          bridge/upload_snapshot.py
+          bridge/audit.py
+          ops/write_safety.py
+          ops/write_endpoint_policy.py
+          ops/secure_write_store.py
+          ops/structured_safe_write.py
+          ops/runtime_write_reliability.py
+          ops/telegram_write_adapter.py
+          ops/phase_aware_write_adapter.py
+          ops/telegram_session_lock.py
+          tests/test_runtime_bootstrap.py
+          tests/test_finalwave38_runtime_composition.py
+      - name: Runtime composition and adjacent bootstrap regressions
+        run: |
+          python -m unittest -v \
+            tests.test_finalwave38_runtime_composition \
+            tests.test_runtime_bootstrap
+      - name: Validate unified ChatGPT Action schema offline
+        run: python tools/build_action_openapi.py --validate-only
+      - name: Verify production WSGI import identity is lazy runtime wrapper
+        run: |
+          python - <<'PY'
+          import sys
+          before = {name for name in sys.modules if name == 'telethon' or name.startswith('telethon.')}
+          import passenger_wsgi
+          import bridge
+          import bridge.app as app_module
+          from bridge import runtime_wsgi
+          assert passenger_wsgi.application is runtime_wsgi.application
+          assert bridge.application is runtime_wsgi.application
+          assert app_module.application is runtime_wsgi.application
+          after = {name for name in sys.modules if name == 'telethon' or name.startswith('telethon.')}
+          assert before == after
+          print('FINALWAVE38_PASSENGER_RUNTIME_IDENTITY_PASS')
+          PY
+      - name: Current-tree secret scan
+        if: always()
+        run: python tools/secret_scan.py --mode current
+      - name: Full-history secret scan
+        if: always()
+        run: python tools/secret_scan.py --mode history
+      - name: Verify specialist overlay cannot arm deployment
+        if: always()
+        run: |
+          test ! -e .cpanel.yml
+          test ! -e ops/ENABLE_HOSTIQ_AUTO_DEPLOY
+          test "${{ github.head_ref || github.ref_name }}" != "main"
