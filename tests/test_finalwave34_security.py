@@ -201,6 +201,21 @@ jobs:
         )
         self.assertIn("not immutable-SHA pinned", self.findings(bad))
 
+    def test_yaml_merge_key_is_rejected(self):
+        bad = self.workflow().replace(
+            "          persist-credentials: false\n",
+            "          <<: *checkout_inputs\n          persist-credentials: false\n",
+        )
+        self.assertIn("YAML merge keys are forbidden", self.findings(bad))
+
+    def test_escaped_mapping_key_is_rejected(self):
+        escaped = '"u\\u0073es": actions/setup-python@v7'
+        bad = self.workflow().replace(
+            f"uses: actions/setup-python@{self.PYTHON_SHA}",
+            escaped,
+        )
+        self.assertIn("escaped YAML mapping keys are forbidden", self.findings(bad))
+
     def test_checkout_path_override_is_rejected(self):
         bad = self.workflow().replace(
             "          submodules: false\n",

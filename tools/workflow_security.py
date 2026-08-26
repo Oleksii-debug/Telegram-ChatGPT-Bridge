@@ -44,6 +44,8 @@ _HIGH_RISK_TRIGGER_TOKEN_RE = re.compile(
 )
 _ON_HEADER_RE = re.compile(r"^(?:on|['\"]on['\"])\s*:\s*(.*)$", re.IGNORECASE)
 _ENVIRONMENT_RE = re.compile(r"(?im)^\s*['\"]?environment['\"]?\s*:")
+_YAML_MERGE_RE = re.compile(r"(?im)^\s*<<\s*:")
+_ESCAPED_MAPPING_KEY_RE = re.compile(r"['\"][^'\"\r\n]*\\[^'\"\r\n]*['\"]\s*:")
 _GITHUB_HOSTED_RUNNER_RE = re.compile(
     r"^(?:ubuntu-(?:latest|24\.04|22\.04)|windows-(?:latest|2025|2022)|macos-(?:latest|15|14|13))$",
     re.IGNORECASE,
@@ -195,6 +197,10 @@ def scan_workflow_text(path: str, text: str) -> list[str]:
 
     findings.extend(_trigger_findings(path, lines))
     findings.extend(_runner_findings(path, lines))
+    if _YAML_MERGE_RE.search(text):
+        findings.append(f"workflow: YAML merge keys are forbidden in tracked public CI: {path}")
+    if _ESCAPED_MAPPING_KEY_RE.search(text):
+        findings.append(f"workflow: escaped YAML mapping keys are forbidden: {path}")
     if _ENVIRONMENT_RE.search(text):
         findings.append(f"workflow: GitHub environment binding requires explicit security review: {path}")
     if _SECRET_CONTEXT_RE.search(text):
