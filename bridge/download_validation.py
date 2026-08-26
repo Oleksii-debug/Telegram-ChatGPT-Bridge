@@ -19,10 +19,28 @@ class DownloadValidationReceipts:
     """Persist only size+digest evidence, never Telegram/private payload content."""
 
     def __init__(self, root: Path) -> None:
-        self.root = root.resolve()
-        self.root.mkdir(parents=True, exist_ok=True)
+        candidate = root if root.is_absolute() else root.absolute()
+        try:
+            parent = candidate.parent.resolve(strict=True)
+        except OSError as exc:
+            raise BridgeError(
+                "Download validation receipt root is unavailable",
+                status=503,
+                code="validation_receipt_unavailable",
+            ) from exc
+        self.root = parent / candidate.name
         try:
             info = os.lstat(self.root)
+        except FileNotFoundError:
+            try:
+                os.mkdir(self.root, 0o700)
+                info = os.lstat(self.root)
+            except OSError as exc:
+                raise BridgeError(
+                    "Download validation receipt root is unavailable",
+                    status=503,
+                    code="validation_receipt_unavailable",
+                ) from exc
         except OSError as exc:
             raise BridgeError(
                 "Download validation receipt root is unavailable",
@@ -117,12 +135,6 @@ class DownloadValidationReceipts:
                 code="validation_receipt_corrupt",
             )
         size = int(match.group(1))
-        if size < 0:
-            raise BridgeError(
-                "Download validation receipt is corrupt",
-                status=500,
-                code="validation_receipt_corrupt",
-            )
         return size, match.group(2)
 
     def persist(self, job_id: str, item_id: str, *, size: int, sha256: str) -> None:
