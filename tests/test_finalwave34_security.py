@@ -95,6 +95,42 @@ jobs:
         bad = self.workflow().replace("pull_request:", "workflow_call:")
         self.assertIn("high-risk trigger", self.findings(bad))
 
+    def test_inline_high_risk_trigger_is_rejected(self):
+        bad = self.workflow().replace("on:\n  pull_request:\n", "on: [push, pull_request_target]\n")
+        self.assertIn("high-risk trigger", self.findings(bad))
+
+    def test_quoted_high_risk_trigger_is_rejected(self):
+        bad = self.workflow().replace("  pull_request:\n", "  'pull_request_target':\n")
+        self.assertIn("high-risk trigger", self.findings(bad))
+
+    def test_trigger_alias_is_rejected_fail_closed(self):
+        bad = self.workflow().replace("on:\n  pull_request:\n", "on: *event_set\n")
+        self.assertIn("trigger YAML anchors/aliases are forbidden", self.findings(bad))
+
+    def test_bracket_secret_context_is_rejected_without_echo(self):
+        name = "SYNTHETIC_" + "CREDENTIAL"
+        expression = "${{ secrets['" + name + "'] }}"
+        bad = self.workflow() + "      - run: echo \"" + expression + "\"\n"
+        result = self.findings(bad)
+        self.assertIn("secret context is forbidden", result)
+        self.assertNotIn(name, result)
+
+    def test_bracket_github_token_context_is_rejected(self):
+        expression = "${{ github['" + "token'] }}"
+        bad = self.workflow() + "      - run: echo \"" + expression + "\"\n"
+        self.assertIn("github.token exposure", self.findings(bad))
+
+    def test_quoted_self_hosted_runner_is_rejected(self):
+        bad = self.workflow().replace("runs-on: ubuntu-latest", "runs-on: 'self-hosted'")
+        self.assertIn("approved GitHub-hosted runner", self.findings(bad))
+
+    def test_dynamic_runner_expression_is_rejected(self):
+        bad = self.workflow().replace(
+            "runs-on: ubuntu-latest",
+            "runs-on: ${{ matrix.runner }}",
+        )
+        self.assertIn("approved GitHub-hosted runner", self.findings(bad))
+
     def test_checkout_path_override_is_rejected(self):
         bad = self.workflow().replace(
             "          submodules: false\n",
