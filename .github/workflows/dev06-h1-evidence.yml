@@ -38,6 +38,7 @@ jobs:
           ops/dev06_deployed_action_evidence.py
           tests/test_dev06_action_e2e_evidence.py
           tests/test_dev06_deployed_action_evidence.py
+          tests/test_finalwave27_h1_h2_security.py
           tools/verify_dev06_action_e2e.py
           tools/verify_dev06_deployed_action.py
           EOF
@@ -60,6 +61,7 @@ jobs:
           tests/test_dev06_runtime_conformance.py
           tests/test_dev06_deployed_action_evidence.py
           tests/test_dev06_action_e2e_evidence.py
+          tests/test_finalwave27_h1_h2_security.py
       - name: Validate canonical compatible Action schema
         run: python tools/build_dev06_action_openapi.py --validate-only
       - name: Run canonical DEV06 plus H1 H2 evidence tests
@@ -69,7 +71,8 @@ jobs:
             tests.test_dev06_api_contracts \
             tests.test_dev06_runtime_conformance \
             tests.test_dev06_deployed_action_evidence \
-            tests.test_dev06_action_e2e_evidence -v
+            tests.test_dev06_action_e2e_evidence \
+            tests.test_finalwave27_h1_h2_security -v
       - name: Exercise H1 comparator in source-mock mode only
         env:
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
