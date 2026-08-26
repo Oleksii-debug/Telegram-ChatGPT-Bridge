@@ -116,16 +116,6 @@ class AuditLog:
                         fcntl.flock(lock_fd, fcntl.LOCK_EX)
                     except OSError as exc:
                         raise AuditSecurityError("audit initialization lock cannot be acquired") from exc
-                    try:
-                        leaf_fd = self._open_existing_leaf(parent_fd)
-                    except FileNotFoundError:
-                        leaf_fd = None
-                    if leaf_fd is not None:
-                        try:
-                            leaf_info = os.fstat(leaf_fd)
-                            self._leaf_identity = (leaf_info.st_dev, leaf_info.st_ino)
-                        finally:
-                            os.close(leaf_fd)
                 finally:
                     try:
                         assert fcntl is not None
