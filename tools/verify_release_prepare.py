@@ -12,10 +12,11 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Callable, TypeVar
 
 # GitHub Actions and one-time operator validation invoke this file directly as
@@ -28,7 +29,13 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from ops import deploy_release
-from ops.release_guard import SafetyError, sha256_file
+from ops.release_guard import (
+    SafetyError,
+    build_manifest,
+    sha256_file,
+    sha256_json,
+    validate_exact_source_payload,
+)
 from ops.release_package import build_release_identity, validate_public_release_tree
 
 REPOSITORY_ID = "Oleksii-debug/Telegram-ChatGPT-Bridge"
@@ -47,10 +54,13 @@ _STAGE_RE = frozenset({
     "PREPARE_COMPILE",
     "PREPARE_TESTS",
     "PREPARED_VERIFY",
+    "ARCHIVE_IDENTITY",
+    "ARTIFACT_INTEGRITY",
     "PACKAGE_CONTRACT",
     "LOCK_BINDING",
     "RUNTIME_IMPORT",
     "IDENTITY",
+    "REF_FRESHNESS",
 })
 _TEST_ID_RE = re.compile(r"^[A-Za-z0-9_.]{1,220}$")
 _MAX_TEST_DIAGNOSTICS = 8
@@ -246,6 +256,53 @@ def _build_canonical_envelope_identity(prepared: Path, *, sha: str) -> dict[str,
         return build_release_identity(root, sha=sha, repository=REPOSITORY_ID)
 
 
+def _verify_archive_identity(repo: Path, sha: str, meta: dict) -> None:
+    """Re-export the immutable Git object and bind it to PREPARE source metadata.
+
+    This check deliberately uses repository metadata only outside the prepared
+    artifact. The prepared artifact remains portable with no `.git` directory.
+    """
+    expected = str(meta.get("source_manifest_sha256", ""))
+    if not re.fullmatch(r"[0-9a-f]{64}", expected):
+        raise SafetyError("prepared source manifest identity is missing or invalid")
+    with tempfile.TemporaryDirectory(prefix="telegram-bridge-archive-audit-") as tmp:
+        exported = Path(tmp) / "release"
+        exported.mkdir()
+        deploy_release.git_export(repo, sha, exported)
+        validate_exact_source_payload(exported, [])
+        observed = sha256_json(build_manifest(exported))
+    if observed != expected:
+        raise SafetyError("prepared source manifest does not match exact Git archive")
+
+
+def _verify_prepared_tree_integrity(prepared: Path) -> None:
+    """Add fail-closed topology checks around the sealed prepared instance.
+
+    Byte and symlink-target integrity remains authoritative in
+    ``deploy_release.verify_prepared_release``. This layer additionally rejects
+    repository metadata inside the artifact and regular-file hardlinks, so a
+    sealed instance cannot alias a mutable peer inode outside its tree.
+    """
+    root = prepared.resolve(strict=True)
+    uid = os.getuid() if hasattr(os, "getuid") else None
+    for path in [root, *sorted(root.rglob("*"))]:
+        rel = "" if path == root else path.relative_to(root).as_posix()
+        if rel and ".git" in PurePosixPath(rel).parts:
+            raise SafetyError("prepared artifact must not contain repository metadata")
+        try:
+            st = path.lstat()
+        except OSError as exc:
+            raise SafetyError("prepared artifact topology became unreadable") from exc
+        if uid is not None and st.st_uid != uid:
+            raise SafetyError("prepared artifact owner is unexpected")
+        if path.is_symlink():
+            continue
+        if stat.S_IMODE(st.st_mode) & 0o222:
+            raise SafetyError("prepared artifact retains write permission")
+        if path.is_file() and st.st_nlink != 1:
+            raise SafetyError("prepared artifact regular-file hardlinks are forbidden")
+
+
 def verify_exact_candidate(repo: Path, sha: str, approved_ref: str) -> dict[str, object]:
     """Verify only bytes exported from ``sha``; never trust working-tree bytes.
 
@@ -280,6 +337,9 @@ def verify_exact_candidate(repo: Path, sha: str, approved_ref: str) -> dict[str,
         if meta.get("sha") != sha:
             raise ReleasePrepareStageError("PREPARED_VERIFY")
 
+        _at_stage("ARCHIVE_IDENTITY", lambda: _verify_archive_identity(repo, sha, meta))
+        _at_stage("ARTIFACT_INTEGRITY", lambda: _verify_prepared_tree_integrity(prepared))
+
         # Validate package/startup/dependency bytes only after the exact Git SHA
         # has been exported and sealed by PREPARE. ``paths`` is the exact Git
         # tree inventory so generated .venv/metadata cannot expand release scope.
@@ -303,6 +363,13 @@ def verify_exact_candidate(repo: Path, sha: str, approved_ref: str) -> dict[str,
         identity = _at_stage(
             "IDENTITY",
             lambda: _build_canonical_envelope_identity(prepared, sha=sha),
+        )
+
+        # PREPARE can take minutes. A ref that was exact at entry but moved while
+        # dependencies/tests ran must not yield fresh exact-head evidence.
+        _at_stage(
+            "REF_FRESHNESS",
+            lambda: deploy_release.verify_approved_ref_policy(repo, sha, approved_ref),
         )
         return {
             "state": "NONLIVE_PREPARE_VERIFIED",
