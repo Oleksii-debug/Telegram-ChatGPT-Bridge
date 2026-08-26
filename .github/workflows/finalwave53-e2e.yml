@@ -1,0 +1,51 @@
+name: FINALWAVE-53 Runtime E2E
+
+on:
+  pull_request:
+  push:
+    branches:
+      - finalwave26/53-synthetic-e2e
+
+permissions:
+  contents: read
+
+jobs:
+  finalwave53-runtime-e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout full history
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          clean: true
+          lfs: false
+          submodules: false
+      - name: Set up Python 3.11
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.11'
+      - name: Compile FINALWAVE-53 oracle
+        run: python -m py_compile tests/test_finalwave53_runtime_e2e.py
+      - name: Run continuous runtime E2E and adjacent regressions
+        run: |
+          umask 022
+          python -m unittest \
+            tests.test_finalwave53_runtime_e2e \
+            tests.test_devc_release_e2e \
+            tests.test_runtime_bootstrap \
+            tests.test_dev_a_integration -v
+      - name: Current-tree secret scan
+        if: always()
+        run: python tools/secret_scan.py --mode current
+      - name: Full-history secret scan
+        if: always()
+        run: python tools/secret_scan.py --mode history
+      - name: Verify specialist lane remains non-deploying
+        if: always()
+        run: |
+          test -f RECOVERY_BASELINE.md
+          grep -q 'DO NOT MERGE / DO NOT DEPLOY' RECOVERY_BASELINE.md
+          test ! -e .cpanel.yml
+          test ! -e ops/ENABLE_HOSTIQ_AUTO_DEPLOY
