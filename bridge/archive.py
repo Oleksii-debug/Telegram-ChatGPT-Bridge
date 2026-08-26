@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Iterable
 
 from .errors import BridgeError
-from .filenames import filename_collision_key, safe_filename
+from .filenames import disambiguated_filename, filename_collision_key, safe_filename
 from .storage import FileRecord, FileRecordStore
 
 
@@ -25,22 +25,30 @@ def _collision_key(name: str) -> str:
 
 
 def unique_name(name: str, used: set[str]) -> str:
-    """Return a safe member name unique under Unicode-NFC + casefold.
+    """Return a safe member name unique under compatibility caseless matching.
 
     ZIP consumers differ in case sensitivity and Unicode normalization. The
     archive therefore resolves those collisions deterministically instead of
-    emitting two visually/equivalently named members.
+    emitting two visually/equivalently named members. Collision markers are
+    allocated *inside* the filename length/UTF-8 byte budget so truncation can
+    never erase the marker and turn this loop into an availability failure.
     """
     base = safe_archive_name(name)
-    stem = Path(base).stem or "file"
-    suffix = Path(base).suffix
-    candidate = base
-    index = 2
-    while _collision_key(candidate) in used:
-        candidate = safe_archive_name(f"{stem} ({index}){suffix}")
-        index += 1
-    used.add(_collision_key(candidate))
-    return candidate
+    base_key = _collision_key(base)
+    if base_key not in used:
+        used.add(base_key)
+        return base
+
+    # A finite used set of N keys must have a free value among N+1 distinct
+    # collision variants.  Bounding the loop makes a future regression fail
+    # closed instead of hanging an archive request indefinitely.
+    for index in range(2, len(used) + 3):
+        candidate = disambiguated_filename(base, index, limit=180)
+        key = _collision_key(candidate)
+        if key not in used:
+            used.add(key)
+            return candidate
+    raise BridgeError("Archive member collision allocation failed", status=500, code="zip_member_collision")
 
 
 @dataclass(frozen=True)
