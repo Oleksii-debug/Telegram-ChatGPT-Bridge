@@ -318,9 +318,11 @@ class Final5TelethonReadBackend(TelethonReadBackend):
                             continue
                     filtered.append(record)
 
-                # A global cursor still uses the canonical bounded-prefix model;
-                # only scoped Telethon continuation is advanced here.
-                if entity is None and boundary is not None:
+                # Global cursors and legacy scoped clients retain local boundary
+                # filtering. Real Telethon scoped cursors instead move the server
+                # iterator itself with exclusive offset_id and must not apply the
+                # same boundary a second time.
+                if boundary is not None and (entity is None or offset_id is None):
                     filtered = [record for record in filtered if message_sort_key(record) < boundary]
 
                 page = filtered[:limit]
@@ -332,8 +334,6 @@ class Final5TelethonReadBackend(TelethonReadBackend):
                     # Continue strictly older than the last raw scanned message,
                     # even when local sender/date filtering returned < limit rows.
                     next_boundary = message_sort_key(records[-1])
-                elif entity is None and len(filtered) > limit and page:
-                    next_boundary = message_sort_key(page[-1])
 
                 return Page(
                     tuple(page),
