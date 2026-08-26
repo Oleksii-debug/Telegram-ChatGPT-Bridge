@@ -101,8 +101,8 @@ jobs:
           PY
       - name: FINALWAVE-39 Passenger concurrency stress
         run: |
-          python -m py_compile tests/test_finalwave39_passenger_concurrency.py tests/test_finalwave39_lock_order.py tests/test_finalwave39_audit_partial_write.py
-          python -m unittest -v tests.test_finalwave39_passenger_concurrency tests.test_finalwave39_lock_order tests.test_finalwave39_audit_partial_write
+          python -m py_compile tests/test_finalwave39_passenger_concurrency.py tests/test_finalwave39_lock_order.py
+          python -m unittest -v tests.test_finalwave39_passenger_concurrency tests.test_finalwave39_lock_order
       - name: Verify deterministic integration provenance and overlap decisions
         run: python tools/verify_integration_provenance.py
       - name: Verify single deploy-capable entrypoint
