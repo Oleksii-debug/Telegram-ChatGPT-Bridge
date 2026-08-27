@@ -32,22 +32,44 @@ class _SeedConnection:
     def __init__(self) -> None:
         self.statements: list[str] = []
         self.seeded = False
-
-    def executescript(self, script: str) -> None:
-        self.statements.append(script)
+        self.in_transaction = False
 
     def execute(self, sql: str, parameters=()):
         normalized = " ".join(sql.split())
         self.statements.append(normalized)
+        if normalized == "BEGIN IMMEDIATE":
+            self.in_transaction = True
+            return self
+        if normalized.startswith("SELECT name, type FROM sqlite_master"):
+            return self
+        if normalized.startswith("CREATE TABLE IF NOT EXISTS meta"):
+            return self
         if normalized.startswith("INSERT OR IGNORE INTO meta"):
             self.seeded = True
             return self
         if normalized.startswith("SELECT value FROM meta"):
             return self
+        if normalized.startswith("CREATE TABLE IF NOT EXISTS previews"):
+            return self
+        if normalized.startswith("CREATE TABLE IF NOT EXISTS idempotency"):
+            return self
+        if normalized.startswith("CREATE INDEX IF NOT EXISTS idx_previews_expires"):
+            return self
+        if normalized.startswith("CREATE INDEX IF NOT EXISTS idx_idempotency_state"):
+            return self
         raise AssertionError(f"unexpected SQL: {normalized}")
+
+    def fetchall(self):
+        return []
 
     def fetchone(self):
         return _Row(value="1") if self.seeded else None
+
+    def commit(self) -> None:
+        self.in_transaction = False
+
+    def rollback(self) -> None:
+        self.in_transaction = False
 
 
 class WriteStoreSchemaRaceTests(unittest.TestCase):
@@ -65,6 +87,7 @@ class WriteStoreSchemaRaceTests(unittest.TestCase):
         seed_statements = [s for s in connection.statements if s.startswith("INSERT")]
         self.assertEqual(1, len(seed_statements))
         self.assertIn("INSERT OR IGNORE", seed_statements[0])
+        self.assertIn("BEGIN IMMEDIATE", connection.statements)
 
     def test_existing_incompatible_schema_still_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -78,6 +101,57 @@ class WriteStoreSchemaRaceTests(unittest.TestCase):
                 con.close()
             with self.assertRaisesRegex(RuntimeError, "unsupported write-store schema"):
                 PersistentWriteStore(db_path)
+
+    def test_incompatible_schema_is_not_mutated_before_rejection(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            db_path = Path(td) / "writes.sqlite3"
+            con = sqlite3.connect(db_path)
+            try:
+                con.execute("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+                con.execute("INSERT INTO meta(key,value) VALUES('schema_version','999')")
+                con.commit()
+                before = con.execute(
+                    "SELECT type,name,sql FROM sqlite_master ORDER BY type,name"
+                ).fetchall()
+            finally:
+                con.close()
+
+            with self.assertRaisesRegex(RuntimeError, "unsupported write-store schema"):
+                PersistentWriteStore(db_path)
+
+            con = sqlite3.connect(db_path)
+            try:
+                after = con.execute(
+                    "SELECT type,name,sql FROM sqlite_master ORDER BY type,name"
+                ).fetchall()
+            finally:
+                con.close()
+            self.assertEqual(before, after, "unsupported DB must not be partially migrated")
+
+    def test_existing_managed_tables_without_schema_metadata_fail_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            db_path = Path(td) / "writes.sqlite3"
+            con = sqlite3.connect(db_path)
+            try:
+                con.execute("CREATE TABLE previews (legacy TEXT)")
+                con.commit()
+            finally:
+                con.close()
+
+            with self.assertRaisesRegex(RuntimeError, "write-store schema metadata missing"):
+                PersistentWriteStore(db_path)
+
+            con = sqlite3.connect(db_path)
+            try:
+                names = {
+                    row[0]
+                    for row in con.execute(
+                        "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
+                    )
+                }
+            finally:
+                con.close()
+            self.assertEqual({"previews"}, names)
 
     def test_eight_process_cold_start_shares_one_write_store(self) -> None:
         with tempfile.TemporaryDirectory() as td:
