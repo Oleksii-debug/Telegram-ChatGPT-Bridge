@@ -31,7 +31,7 @@ class GlobalSearchR10Backend(GlobalSearchR8Backend):
         if chat is None and not text.strip():
             raise BridgeError(
                 "Telegram global search requires non-empty text; sender-only/date-only global search needs a separate bounded cross-dialog implementation",
-                status=422,
+                status=400,
                 code="telegram_global_empty_query_unsupported",
                 details={"retryable": False},
             )
