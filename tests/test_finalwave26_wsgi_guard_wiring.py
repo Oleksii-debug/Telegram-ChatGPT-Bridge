@@ -45,7 +45,7 @@ class Finalwave26WsgiGuardWiringTests(unittest.TestCase):
             "CONTENT_LENGTH": "0",
             "wsgi.input": io.BytesIO(b""),
         }
-        with mock.patch("bridge.runtime.build_production_application_from_env", return_value=sentinel) as builder:
+        with mock.patch("bridge.runtime_composition.build_production_application_from_env", return_value=sentinel) as builder:
             body1 = b"".join(runtime_wsgi.application(environ, start_response))
             body2 = b"".join(runtime_wsgi.application(environ, start_response))
         self.assertEqual(b"", body1)
