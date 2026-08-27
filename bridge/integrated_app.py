@@ -17,12 +17,14 @@ Production safety defaults are fail-closed:
 from __future__ import annotations
 
 import hashlib
+import os
 from collections.abc import Mapping
 from typing import Any, Callable, Iterable
 
 from .app import BridgeApplication
 from .backend import UnavailableReadBackend
 from .errors import BridgeError, HiddenNotFound
+from .file_access import open_verified_file
 from .routes import READ_ROUTE_REGISTRY
 from .security import RejectingRateLimiter
 
@@ -36,7 +38,7 @@ from ops.write_endpoint_policy import (
     WriteEndpointPolicy,
     structured_write_error,
 )
-from ops.write_safety import PersistentWriteStore, WriteSafetyError
+from ops.write_safety import PersistentWriteStore, SafeNoSideEffectFailure, WriteSafetyError
 
 
 _AUTHENTICATED_WRITE_ACTOR = hashlib.sha256(b"authenticated-write-api-v1").hexdigest()
@@ -136,7 +138,6 @@ class UnifiedBridgeApplication:
         if self.read_app.auth is None:
             raise HiddenNotFound()
         self.read_app.auth.require(environ)
-        # Deliberately use a fixed service-class hash, not a token-derived hash.
         return EndpointContext(authenticated=True, actor_sha256=_AUTHENTICATED_WRITE_ACTOR)
 
     @staticmethod
@@ -254,10 +255,29 @@ class UnifiedBridgeApplication:
             "count": count,
         }
 
+    @staticmethod
+    def _snapshot_upload_path(handle: Any) -> str:
+        """Bind an upload path to the already-verified open snapshot descriptor.
+
+        HOSTiQ production is Linux/Passenger.  ``/proc/self/fd`` keeps the path
+        bound to the open unlinked snapshot rather than reopening the mutable
+        registered pathname.  Fail closed if procfs is unavailable or does not
+        resolve to the exact descriptor inode.
+        """
+        try:
+            fd = int(handle.fileno())
+            current = os.fstat(fd)
+            path = f"/proc/self/fd/{fd}"
+            observed = os.stat(path)
+        except (OSError, TypeError, ValueError):
+            raise SafeNoSideEffectFailure() from None
+        if current.st_dev != observed.st_dev or current.st_ino != observed.st_ino:
+            raise SafeNoSideEffectFailure()
+        return path
+
     def _execute_external_write(self, action: str, payload: dict[str, Any]) -> Mapping[str, Any]:
         adapter = self.write_adapter
         if adapter is None:
-            # Caller checks this before PersistentWriteStore crosses CALLING.
             raise RuntimeError("writer unexpectedly unavailable")
 
         if action == "SEND":
@@ -268,22 +288,28 @@ class UnifiedBridgeApplication:
             receipt = adapter.forward(payload["source"], payload["target"], payload["message_ids"])
         elif action == "SEND_FILES":
             if self.read_app.files is None:
-                raise RuntimeError("private file store unavailable")
-            paths: list[str] = []
-            for item in payload["files"]:
-                record = self.read_app.files.get(item["file_id"])
-                if record is None:
-                    raise RuntimeError("registered private file unavailable")
-                if record.sha256 != item["sha256"] or record.size != item["size"]:
-                    raise RuntimeError("registered private file identity mismatch")
-                paths.append(record.path)
-            receipt = adapter.send_files(
-                payload["target"],
-                paths,
-                caption=payload.get("caption", ""),
-                reply_to_message_id=payload.get("reply_to_message_id"),
-                voice_note=bool(payload.get("voice_note", False)),
-            )
+                raise SafeNoSideEffectFailure()
+            snapshots = []
+            try:
+                paths: list[str] = []
+                for item in payload["files"]:
+                    verified = open_verified_file(self.read_app.files, item["file_id"])
+                    if verified is None:
+                        raise SafeNoSideEffectFailure()
+                    snapshots.append(verified)
+                    if verified.record.sha256 != item["sha256"] or verified.record.size != item["size"]:
+                        raise SafeNoSideEffectFailure()
+                    paths.append(self._snapshot_upload_path(verified.handle))
+                receipt = adapter.send_files(
+                    payload["target"],
+                    paths,
+                    caption=payload.get("caption", ""),
+                    reply_to_message_id=payload.get("reply_to_message_id"),
+                    voice_note=bool(payload.get("voice_note", False)),
+                )
+            finally:
+                for verified in snapshots:
+                    verified.close()
         else:
             raise RuntimeError("unsupported external write action")
         return self._receipt_metadata(receipt, action)
@@ -323,10 +349,6 @@ class UnifiedBridgeApplication:
             if self.write_coordinator is None or self.write_store is None:
                 raise BridgeError("Write store is not configured", status=503, code="write_store_unconfigured")
 
-            # Protect the body-parser/validation boundary too. The established
-            # operation quota below remains separate so malformed authenticated
-            # requests cannot bypass B8 without double-charging valid requests
-            # against one counter.
             self._write_limiter.consume(context.actor_sha256, f"request:{spec.operation_id}")
             body = self.read_app._read_json(environ)
             if spec.operation_class is OperationClass.WRITE_PREVIEW:
@@ -362,7 +384,6 @@ class UnifiedBridgeApplication:
                 raise HiddenNotFound()
             self.read_app._only(body, {"preview_token", "idempotency_key", "explicit_user_command"})
             if self.write_adapter is None:
-                # Do not reserve/consume the preview until a real writer exists.
                 raise BridgeError("Telegram writer is not configured", status=503, code="telegram_writer_unconfigured")
             commit_context = EndpointContext(
                 authenticated=context.authenticated,
@@ -398,7 +419,6 @@ class UnifiedBridgeApplication:
                 },
             )
         except BaseException as exc:
-            # Raw exception strings are never copied to the response or audit sink.
             return self._write_error(start_response, exc, request_id)
 
     def __call__(self, environ: dict[str, Any], start_response: Callable) -> Iterable[bytes]:
