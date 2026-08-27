@@ -4,9 +4,11 @@ on:
   push:
     branches:
       - final5/task3-global-continuation-r8
+      - final5/task3-global-continuation-partial-page-fix
   pull_request:
     branches:
       - work3/integration-release-candidate
+      - final5/task3-global-continuation-r8
     paths:
       - bridge/final5_global_search_r8.py
       - tests/test_final5_task3_global_search_r8.py
