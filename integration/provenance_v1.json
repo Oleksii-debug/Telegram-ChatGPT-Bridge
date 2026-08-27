@@ -223,6 +223,9 @@
         "tests/test_dev03_history_offset.py",
         "tests/test_dev03_swarm_read.py"
       ],
+      "canonical_adaptations": {
+        "bridge/backend.py": "6963e8c046efbf42e18ebfd31e9fbd54343bfb8d"
+      },
       "excluded_specialist_paths": [".github/workflows/dev03-read.yml"],
       "auditor_findings": ["A01-08", "A01-09"],
       "source_ci_run_id": 32642004555,
@@ -247,6 +250,13 @@
         "tests/test_dev04_migration_concurrency.py",
         "tests/test_dev04_private_serving.py"
       ],
+      "canonical_adaptations": {
+        "bridge/app.py": "751a9cbf281f3421dcfae3787dbbae1b910bb80b",
+        "bridge/file_access.py": "6963e8c046efbf42e18ebfd31e9fbd54343bfb8d",
+        "bridge/storage.py": "6963e8c046efbf42e18ebfd31e9fbd54343bfb8d",
+        "tests/test_dev04_migration_concurrency.py": "6963e8c046efbf42e18ebfd31e9fbd54343bfb8d",
+        "tests/test_dev04_private_serving.py": "6963e8c046efbf42e18ebfd31e9fbd54343bfb8d"
+      },
       "excluded_specialist_paths": [".github/workflows/dev04-media-storage-qa.yml"],
       "auditor_finding": "A01-06",
       "source_ci_run_id": 32641698071,

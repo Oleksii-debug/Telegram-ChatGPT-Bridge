@@ -19,6 +19,9 @@ EXACT_PATHS = {
     "tests/test_dev03_history_offset.py",
     "tests/test_dev03_swarm_read.py",
 }
+CANONICAL_ADAPTATIONS = {
+    "bridge/backend.py": "6963e8c046efbf42e18ebfd31e9fbd54343bfb8d",
+}
 EXCLUDED_WORKFLOW = ".github/workflows/dev03-read.yml"
 
 DEV07_SOURCE_SHA = "feff7ba8bf7bea74ac88b21002c0810ab7a1c8e2"
@@ -65,6 +68,7 @@ class Dev01Dev03PeerProvenanceTests(unittest.TestCase):
         self.assertEqual(MERGE_COMMIT, sync["merge_commit"])
         self.assertEqual(FIRST_PARENT, sync["first_parent"])
         self.assertEqual(EXACT_PATHS, set(sync["exact_blob_paths"]))
+        self.assertEqual(CANONICAL_ADAPTATIONS, sync["canonical_adaptations"])
         self.assertEqual([EXCLUDED_WORKFLOW], sync["excluded_specialist_paths"])
         self.assertEqual(["A01-08", "A01-09"], sync["auditor_findings"])
         self.assertEqual(32642004555, sync["source_ci_run_id"])
@@ -85,7 +89,18 @@ class Dev01Dev03PeerProvenanceTests(unittest.TestCase):
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
-        for path in sorted(EXACT_PATHS):
+        for path, commit in sorted(CANONICAL_ADAPTATIONS.items()):
+            with self.subTest(path=path, adaptation_commit=commit):
+                subprocess.run(
+                    ["git", "merge-base", "--is-ancestor", commit, "HEAD"],
+                    cwd=ROOT,
+                    check=True,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+                self.assertEqual(_blob("HEAD", path), _blob(commit, path))
+                self.assertNotEqual(_blob("HEAD", path), _blob(SOURCE_SHA, path))
+        for path in sorted(EXACT_PATHS - set(CANONICAL_ADAPTATIONS)):
             with self.subTest(path=path):
                 self.assertEqual(_blob("HEAD", path), _blob(SOURCE_SHA, path))
 

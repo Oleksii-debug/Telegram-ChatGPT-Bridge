@@ -29,6 +29,10 @@ EXACT_PATHS = {
 # silently treating all accepted paths as still byte-identical to DEV04.
 CANONICAL_ADAPTATIONS = {
     "bridge/app.py": "751a9cbf281f3421dcfae3787dbbae1b910bb80b",
+    "bridge/file_access.py": "6963e8c046efbf42e18ebfd31e9fbd54343bfb8d",
+    "bridge/storage.py": "6963e8c046efbf42e18ebfd31e9fbd54343bfb8d",
+    "tests/test_dev04_migration_concurrency.py": "6963e8c046efbf42e18ebfd31e9fbd54343bfb8d",
+    "tests/test_dev04_private_serving.py": "6963e8c046efbf42e18ebfd31e9fbd54343bfb8d",
 }
 EXCLUDED_WORKFLOW = ".github/workflows/dev04-media-storage-qa.yml"
 
@@ -68,6 +72,7 @@ class Dev01Dev04PeerProvenanceTests(unittest.TestCase):
         self.assertEqual(sync["merge_commit"], MERGE_COMMIT)
         self.assertEqual(sync["first_parent"], FIRST_PARENT)
         self.assertEqual(set(sync["exact_blob_paths"]), EXACT_PATHS)
+        self.assertEqual(sync["canonical_adaptations"], CANONICAL_ADAPTATIONS)
         self.assertEqual(sync["excluded_specialist_paths"], [EXCLUDED_WORKFLOW])
         self.assertEqual(sync["auditor_finding"], "A01-06")
         self.assertEqual(sync["source_ci_run_id"], 32641698071)
