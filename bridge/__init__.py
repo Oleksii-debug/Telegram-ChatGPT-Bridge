@@ -13,6 +13,7 @@ only by the lazy runtime builder after request dispatch begins.
 """
 
 import inspect
+from pathlib import Path
 from typing import Any
 
 from .app import BridgeApplication, ReadAppConfig
@@ -21,6 +22,7 @@ from .errors import BridgeError
 from .integrated_app import UnifiedBridgeApplication
 from .runtime_wsgi import application
 from . import app as _app_module
+from . import runtime as _runtime_module
 
 
 def _accepts_keyword(callable_obj: Any, parameter: str) -> bool:
@@ -84,11 +86,33 @@ async def _failclosed_iter_messages(
     return list(iterator)
 
 
+def _race_safe_validate_rate_sidecars(self: Any) -> None:
+    """Validate SQLite sidecars without leaking a legitimate unlink race.
+
+    WAL/SHM files are ephemeral and another Passenger worker may close the last
+    SQLite connection between a pathname observation and ``lstat``. Absence at
+    the actual validation point is therefore benign. Any object that *does*
+    exist is still passed through the canonical owner/mode/type/hardlink checks.
+    """
+
+    for suffix in ("-wal", "-shm"):
+        path = Path(str(self.database_path) + suffix)
+        try:
+            _runtime_module._validate_private_regular(path)
+        except FileNotFoundError:
+            continue
+
+
 # Canonical current-base repair for the W10 fail-open search finding. Patching
 # the class object here affects ``bridge.backend.TelethonReadBackend`` itself,
 # including direct imports and the Passenger runtime composition, while keeping
 # module import network-free and credential-free.
 TelethonReadBackend._iter_messages = _failclosed_iter_messages
+
+# SQLite WAL/SHM leaves are intentionally ephemeral. Remove the exists→lstat
+# TOCTOU that can surface a raw FileNotFoundError under concurrent Passenger
+# workers while retaining all fail-closed validation for leaves that exist.
+_runtime_module._SQLiteFixedWindowStore._validate_sidecars = _race_safe_validate_rate_sidecars
 
 # Preserve the authoritative recovered Passenger import target while switching
 # the exported callable to the unified, lazy, server-side runtime builder.
