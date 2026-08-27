@@ -188,14 +188,24 @@ class RollbackMatrixContractTests(unittest.TestCase):
 
 
 class ExactPredecessorCompatibilityTests(unittest.TestCase):
-    def test_write_rate_and_session_sources_are_byte_identical_at_evidence_predecessor(self):
-        for path in ("ops/write_safety.py", "bridge/runtime.py", "ops/telegram_session_lock.py"):
+    def test_write_source_identity_is_stable_but_hardened_runtime_sources_must_not_be_reverted(self):
+        self.assertEqual(
+            _git_blob(PREDECESSOR_EVIDENCE_SHA, "ops/write_safety.py"),
+            _git_blob(CANDIDATE_ANCHOR_SHA, "ops/write_safety.py"),
+        )
+        self.assertEqual(
+            _git_blob(CANDIDATE_ANCHOR_SHA, "ops/write_safety.py"),
+            _git_blob("HEAD", "ops/write_safety.py"),
+        )
+        for path in ("bridge/runtime.py", "ops/telegram_session_lock.py"):
             with self.subTest(path=path):
-                self.assertEqual(
+                self.assertNotEqual(
                     _git_blob(PREDECESSOR_EVIDENCE_SHA, path),
-                    _git_blob(CANDIDATE_ANCHOR_SHA, path),
+                    _git_blob("HEAD", path),
                 )
-                self.assertEqual(_git_blob(CANDIDATE_ANCHOR_SHA, path), _git_blob("HEAD", path))
+        # Source drift is not a compatibility PASS.  The contract above still
+        # requires exact live-LKG identity, target-specific compatibility,
+        # forced smoke, and an independently cleared rollback-target security gate.
 
     def test_predecessor_file_store_can_open_and_write_candidate_migrated_schema(self):
         name, predecessor = _load_predecessor_storage()
