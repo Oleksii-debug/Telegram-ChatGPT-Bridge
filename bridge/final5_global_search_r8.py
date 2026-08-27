@@ -136,12 +136,13 @@ class GlobalSearchR8Backend(TelethonReadBackend):
                                 continue
                         output.append(record)
                     state = next_state
-                    if len(raw) < remaining or state is None:
+                    if state is None:
                         exhausted = True
                         break
             # A page may legitimately contain zero locally-matching records while the
-            # bounded raw scan still has a valid Telegram continuation. Dropping the
-            # cursor in that case makes older matches unreachable and creates a gap.
+            # bounded raw scan still has a valid Telegram continuation. Likewise,
+            # Telegram may return a partial raw page with a valid continuation; the
+            # continuation itself, not len(raw) < requested_limit, is authoritative.
             next_cursor = None if exhausted or state is None else self._encode_global_cursor(signature, state)
             return Page(tuple(output), next_cursor, scanned)
 
