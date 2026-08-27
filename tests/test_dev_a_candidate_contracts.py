@@ -3,13 +3,14 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import stat
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 import bridge as bridge_package
-import bridge.runtime as runtime_module
 from bridge.runtime import RuntimeBootstrapError, _SQLiteFixedWindowStore
 from ops.acceptance_harness import CRITERIA
 from ops.candidate_contracts import (
@@ -109,23 +110,41 @@ class RateLimitSidecarRaceIntegrationTests(unittest.TestCase):
             wal = Path(str(store.database_path) + "-wal")
             wal.write_bytes(b"")
             os.chmod(wal, 0o600)
-            original = runtime_module._validate_private_regular
+            original = os.lstat
             observed = {"race": False}
 
-            def disappearing_sidecar(path, *, mode=0o600):
+            def disappearing_sidecar(path):
                 if Path(path) == wal and not observed["race"]:
                     observed["race"] = True
                     wal.unlink()
                     raise FileNotFoundError(str(wal))
-                return original(Path(path), mode=mode)
+                return original(path)
 
             with mock.patch.object(
-                runtime_module,
-                "_validate_private_regular",
+                bridge_package.os,
+                "lstat",
                 side_effect=disappearing_sidecar,
             ):
                 store._validate_sidecars()
             self.assertTrue(observed["race"])
+
+    def test_zero_link_ephemeral_sidecar_inode_is_treated_as_disappeared(self):
+        with tempfile.TemporaryDirectory() as td:
+            store = self._store(td)
+            wal = Path(str(store.database_path) + "-wal")
+            zero_link = SimpleNamespace(
+                st_mode=stat.S_IFREG | 0o600,
+                st_uid=os.geteuid() if hasattr(os, "geteuid") else 0,
+                st_nlink=0,
+            )
+
+            def unlinked_inode(path):
+                if Path(path) == wal:
+                    return zero_link
+                raise FileNotFoundError(str(path))
+
+            with mock.patch.object(bridge_package.os, "lstat", side_effect=unlinked_inode):
+                store._validate_sidecars()
 
     def test_existing_unsafe_sidecar_still_fails_closed(self):
         with tempfile.TemporaryDirectory() as td:
@@ -137,6 +156,18 @@ class RateLimitSidecarRaceIntegrationTests(unittest.TestCase):
             wal.symlink_to(target)
             with self.assertRaises(RuntimeBootstrapError):
                 store._validate_sidecars()
+
+    def test_existing_hardlinked_sidecar_still_fails_closed(self):
+        with tempfile.TemporaryDirectory() as td:
+            store = self._store(td)
+            target = Path(td) / "target"
+            target.write_bytes(b"x")
+            os.chmod(target, 0o600)
+            wal = Path(str(store.database_path) + "-wal")
+            os.link(target, wal)
+            with self.assertRaises(RuntimeBootstrapError) as caught:
+                store._validate_sidecars()
+            self.assertEqual("unsafe_rate_limit_database_hardlink", caught.exception.code)
 
     def test_wal_bootstrap_retries_only_numeric_lock_contention(self):
         failure = RuntimeBootstrapError("rate_limit_database_unavailable")
@@ -156,6 +187,56 @@ class RateLimitSidecarRaceIntegrationTests(unittest.TestCase):
                     self.assertIs(expected, bridge_package._race_safe_rate_connect(store))
         self.assertEqual(2, connect.call_count)
         sleep.assert_called_once_with(bridge_package._RATE_BOOTSTRAP_RETRY_SECONDS)
+
+    def test_wrapped_sidecar_disappearance_retries_then_succeeds(self):
+        failure = RuntimeBootstrapError("rate_limit_database_unavailable")
+        failure.__cause__ = FileNotFoundError("synthetic ephemeral sidecar")
+        expected = object()
+        store = object.__new__(_SQLiteFixedWindowStore)
+
+        with mock.patch.object(
+            bridge_package,
+            "_ORIGINAL_RATE_CONNECT",
+            side_effect=[failure, expected],
+        ) as connect:
+            with mock.patch.object(bridge_package.time, "monotonic", side_effect=[10.0, 10.1]):
+                with mock.patch.object(bridge_package.time, "sleep") as sleep:
+                    self.assertIs(expected, bridge_package._race_safe_rate_connect(store))
+        self.assertEqual(2, connect.call_count)
+        sleep.assert_called_once_with(bridge_package._RATE_BOOTSTRAP_RETRY_SECONDS)
+
+    def test_transient_post_open_sidecar_error_revalidates_before_retry(self):
+        failure = RuntimeBootstrapError("unsafe_rate_limit_database_sidecar")
+        expected = object()
+        store = object.__new__(_SQLiteFixedWindowStore)
+
+        with mock.patch.object(store, "_validate_sidecars") as validate:
+            with mock.patch.object(
+                bridge_package,
+                "_ORIGINAL_RATE_CONNECT",
+                side_effect=[failure, expected],
+            ) as connect:
+                with mock.patch.object(bridge_package.time, "monotonic", side_effect=[10.0, 10.1]):
+                    with mock.patch.object(bridge_package.time, "sleep"):
+                        self.assertIs(expected, bridge_package._race_safe_rate_connect(store))
+        validate.assert_called_once_with()
+        self.assertEqual(2, connect.call_count)
+
+    def test_persistent_unsafe_post_open_sidecar_never_retries(self):
+        failure = RuntimeBootstrapError("unsafe_rate_limit_database_sidecar")
+        unsafe = RuntimeBootstrapError("unsafe_rate_limit_database_hardlink")
+        store = object.__new__(_SQLiteFixedWindowStore)
+
+        with mock.patch.object(store, "_validate_sidecars", side_effect=unsafe):
+            with mock.patch.object(
+                bridge_package,
+                "_ORIGINAL_RATE_CONNECT",
+                side_effect=failure,
+            ) as connect:
+                with self.assertRaises(RuntimeBootstrapError) as caught:
+                    bridge_package._race_safe_rate_connect(store)
+        self.assertIs(unsafe, caught.exception)
+        connect.assert_called_once_with(store)
 
     def test_non_contention_failure_is_never_retried(self):
         failure = RuntimeBootstrapError("rate_limit_database_unavailable")

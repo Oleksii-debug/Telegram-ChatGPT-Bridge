@@ -13,7 +13,9 @@ only by the lazy runtime builder after request dispatch begins.
 """
 
 import inspect
+import os
 import sqlite3
+import stat
 import time
 import unicodedata
 from datetime import datetime
@@ -223,9 +225,24 @@ def _race_safe_validate_rate_sidecars(self: Any) -> None:
     for suffix in ("-wal", "-shm"):
         path = Path(str(self.database_path) + suffix)
         try:
-            _runtime_module._validate_private_regular(path)
+            st = os.lstat(path)
         except FileNotFoundError:
             continue
+        # A concurrent last-connection close can unlink a WAL/SHM inode while
+        # this process is resolving it. Linux may expose that dying inode with
+        # link count zero instead of returning ENOENT. It is no longer reachable
+        # through another hardlink and is equivalent to validation-point
+        # disappearance. A positive count other than one remains unsafe.
+        if st.st_nlink == 0:
+            continue
+        if stat.S_ISLNK(st.st_mode) or not stat.S_ISREG(st.st_mode):
+            raise _runtime_module.RuntimeBootstrapError("unsafe_rate_limit_database")
+        if hasattr(os, "geteuid") and st.st_uid != os.geteuid():
+            raise _runtime_module.RuntimeBootstrapError("unsafe_rate_limit_database_owner")
+        if st.st_nlink != 1:
+            raise _runtime_module.RuntimeBootstrapError("unsafe_rate_limit_database_hardlink")
+        if stat.S_IMODE(st.st_mode) != 0o600:
+            raise _runtime_module.RuntimeBootstrapError("unsafe_rate_limit_database_mode")
 
 
 def _race_safe_rate_connect(self: Any) -> Any:
@@ -237,12 +254,18 @@ def _race_safe_rate_connect(self: Any) -> Any:
             return _ORIGINAL_RATE_CONNECT(self)
         except _runtime_module.RuntimeBootstrapError as exc:
             cause = exc.__cause__
-            if (
-                exc.code != "rate_limit_database_unavailable"
-                or not isinstance(cause, sqlite3.OperationalError)
-                or not _sqlite_lock_contention(cause)
-                or time.monotonic() >= deadline
+            if time.monotonic() >= deadline:
+                raise
+            if exc.code == "unsafe_rate_limit_database_sidecar":
+                # Retry a post-open sidecar race only after the current leaves
+                # pass the complete fail-closed validation above.
+                self._validate_sidecars()
+            elif exc.code == "rate_limit_database_unavailable" and (
+                isinstance(cause, FileNotFoundError)
+                or (isinstance(cause, sqlite3.OperationalError) and _sqlite_lock_contention(cause))
             ):
+                pass
+            else:
                 raise
             time.sleep(_RATE_BOOTSTRAP_RETRY_SECONDS)
 
