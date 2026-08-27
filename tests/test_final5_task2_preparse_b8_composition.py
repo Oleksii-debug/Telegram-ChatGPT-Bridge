@@ -5,6 +5,7 @@ import io
 import json
 import os
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 
@@ -18,9 +19,11 @@ class _CountingLimiter:
     def __init__(self, *, reject_request: bool = False):
         self.operations: list[str] = []
         self.reject_request = reject_request
+        self._lock = threading.Lock()
 
     def consume(self, _actor_sha256: str, operation_id: str):
-        self.operations.append(operation_id)
+        with self._lock:
+            self.operations.append(operation_id)
         if self.reject_request and operation_id.startswith("request:"):
             raise EndpointPolicyError("rate_limit_exceeded", status=429, retry_after_seconds=7)
         return (9, 180)
@@ -112,6 +115,34 @@ class Final5Task2PreparseB8CompositionTests(unittest.TestCase):
         self.assertTrue(statuses and statuses[0].startswith("404 "), statuses)
         self.assertEqual([], limiter.operations)
         self.assertNotIn(b"wrong-reference", body)
+
+    def test_concurrent_valid_requests_do_not_share_dedup_state(self):
+        limiter = _CountingLimiter()
+        auth, app = self._application(limiter)
+        barrier = threading.Barrier(3)
+        failures: list[BaseException] = []
+
+        def worker(target: str) -> None:
+            try:
+                raw = json.dumps({"chat": target, "text": "synthetic draft"}).encode("utf-8")
+                statuses, _headers, start_response = _capture()
+                barrier.wait(timeout=5)
+                body = b"".join(app(self._environ(auth, raw), start_response))
+                if not statuses or not statuses[0].startswith("200 "):
+                    raise AssertionError((statuses, body))
+            except BaseException as exc:
+                failures.append(exc)
+
+        threads = [threading.Thread(target=worker, args=(f"@target_{idx}",)) for idx in range(2)]
+        for thread in threads:
+            thread.start()
+        barrier.wait(timeout=5)
+        for thread in threads:
+            thread.join(timeout=10)
+        self.assertFalse(failures, failures)
+        self.assertFalse(any(thread.is_alive() for thread in threads))
+        self.assertEqual(2, limiter.operations.count("request:previewTelegramSend"))
+        self.assertEqual(2, limiter.operations.count("previewTelegramSend"))
 
 
 if __name__ == "__main__":
