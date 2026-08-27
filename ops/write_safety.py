@@ -427,6 +427,9 @@ class PersistentWriteStore:
             if row is None or row["request_fingerprint"] != fingerprint:
                 con.rollback()
                 raise WriteSafetyError("idempotency_state_missing", status=409)
+            if row["state"] != TransactionState.CALLING.value:
+                con.rollback()
+                raise WriteSafetyError("illegal_write_state_transition", status=409)
             con.execute(
                 "UPDATE idempotency SET state=?, updated_at=? WHERE key_hash=?",
                 (TransactionState.FAILED_SAFE.value, now, key_hash),
@@ -441,11 +444,33 @@ class PersistentWriteStore:
             if row is None or row["request_fingerprint"] != fingerprint:
                 con.rollback()
                 raise WriteSafetyError("idempotency_state_missing", status=409)
+            state = row["state"]
+            if state == TransactionState.COMMITTED.value:
+                con.rollback()
+                return
+            if state != TransactionState.CALLING.value:
+                con.rollback()
+                raise WriteSafetyError("illegal_write_state_transition", status=409)
             con.execute(
                 "UPDATE idempotency SET state=?, updated_at=? WHERE key_hash=?",
                 (TransactionState.AMBIGUOUS.value, now, key_hash),
             )
             con.commit()
+
+    def _durable_committed_result(self, idempotency_key: str, fingerprint: str) -> dict[str, Any] | None:
+        """Return a matching durable COMMITTED receipt without changing state."""
+        key_hash = self._idempotency_hash(idempotency_key)
+        with self._connect() as con:
+            row = con.execute("SELECT * FROM idempotency WHERE key_hash=?", (key_hash,)).fetchone()
+            if row is None or row["request_fingerprint"] != fingerprint:
+                return None
+            if row["state"] != TransactionState.COMMITTED.value or not row["result_json"]:
+                return None
+            try:
+                result = json.loads(row["result_json"])
+            except (TypeError, ValueError, json.JSONDecodeError):
+                return None
+            return result if isinstance(result, dict) else None
 
     def commit(
         self,
@@ -485,6 +510,9 @@ class PersistentWriteStore:
         try:
             self._commit_result(idempotency_key, fingerprint, result, now=ts)
         except Exception:
+            durable_result = self._durable_committed_result(idempotency_key, fingerprint)
+            if durable_result is not None:
+                return CommitResult("COMMITTED", False, fingerprint, durable_result)
             try:
                 self._record_ambiguous(idempotency_key, fingerprint, now=ts)
             finally:
