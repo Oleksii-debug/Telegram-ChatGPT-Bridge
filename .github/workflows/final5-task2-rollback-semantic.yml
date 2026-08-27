@@ -1,0 +1,54 @@
+name: FINAL5 TASK2 Rollback Semantic Security
+
+on:
+  pull_request:
+    paths:
+      - 'tests/test_final5_task2_rollback_runtime_regression.py'
+      - 'tests/test_final5_task2_rollback_session_regression.py'
+      - '.github/workflows/final5-task2-rollback-semantic.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  rollback-semantic-security:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Checkout full history
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: '3.11'
+          check-latest: false
+
+      - name: Compile exact-history regressions
+        run: >-
+          python -m py_compile
+          tests/test_final5_task2_rollback_runtime_regression.py
+          tests/test_final5_task2_rollback_session_regression.py
+
+      - name: Exact predecessor runtime rollback semantics
+        run: python -m unittest tests.test_final5_task2_rollback_runtime_regression -v
+
+      - name: Exact predecessor session-lock security
+        run: python -m unittest tests.test_final5_task2_rollback_session_regression -v
+
+      - name: Current-tree secret scan
+        run: python tools/secret_scan.py --mode current
+
+      - name: Full-history secret scan
+        run: python tools/secret_scan.py --mode history
+
+      - name: Specialist overlay cannot arm deployment
+        run: |
+          test -f RECOVERY_BASELINE.md
+          grep -q 'DO NOT MERGE / DO NOT DEPLOY' RECOVERY_BASELINE.md
+          test ! -e .cpanel.yml
+          test ! -e ops/ENABLE_HOSTIQ_AUTO_DEPLOY
