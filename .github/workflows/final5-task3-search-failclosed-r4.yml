@@ -1,0 +1,41 @@
+name: FINAL5 TASK3 Search Fail-Closed R4
+
+on:
+  push:
+    branches:
+      - final5/task3-search-failclosed-r4
+  pull_request:
+    branches:
+      - work3/integration-release-candidate
+    paths:
+      - bridge/final5_search_failclosed_r4.py
+      - tests/test_final5_task3_search_failclosed_r4.py
+      - .github/workflows/final5-task3-search-failclosed-r4.yml
+
+permissions:
+  contents: read
+
+jobs:
+  task3-search-failclosed-r4:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Set up Python 3.11
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: '3.11'
+      - name: Compile focused candidate
+        run: python -m py_compile bridge/final5_search_failclosed_r4.py tests/test_final5_task3_search_failclosed_r4.py
+      - name: Run focused fail-closed search regressions
+        run: python -m unittest -v tests.test_final5_task3_search_failclosed_r4
+      - name: Current-tree secret scan
+        run: python tools/secret_scan.py --mode current
+      - name: Verify specialist overlay cannot arm deployment
+        run: |
+          test ! -e .cpanel.yml
+          test ! -e ops/ENABLE_HOSTIQ_AUTO_DEPLOY
+          test "${GITHUB_REF_NAME}" != "main"
