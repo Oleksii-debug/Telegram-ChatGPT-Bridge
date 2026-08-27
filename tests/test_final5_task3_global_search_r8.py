@@ -81,6 +81,46 @@ class Final5Task3GlobalSearchR8Tests(unittest.TestCase):
         self.assertEqual([item.id for item in page2.items], [9])
         self.assertEqual(page2.scanned, 1)
 
+    def test_partial_raw_page_with_valid_continuation_keeps_scanning(self) -> None:
+        first = SimpleNamespace(
+            id=20,
+            chat_id=300,
+            peer_id=SimpleNamespace(channel_id=300),
+            record=MessageRecord(id=20, chat_id="300", timestamp="2026-08-27T06:00:00Z", text="first", sender=None),
+        )
+        second = SimpleNamespace(
+            id=19,
+            chat_id=300,
+            peer_id=SimpleNamespace(channel_id=300),
+            record=MessageRecord(id=19, chat_id="300", timestamp="2026-08-27T05:59:00Z", text="second", sender=None),
+        )
+
+        class FakeBackend(GlobalSearchR8Backend):
+            @asynccontextmanager
+            async def _client_session(self):
+                yield object()
+
+            async def _search_global_chunk(self, client, *, query, limit, state, max_date):
+                if state is None:
+                    if limit != 2:
+                        raise AssertionError(f"expected first raw request limit=2, got {limit}")
+                    return [first], GlobalContinuation(20, "channel", 300, 5)
+                if state.offset_id == 20:
+                    if limit != 1:
+                        raise AssertionError(f"expected continuation request limit=1, got {limit}")
+                    return [second], GlobalContinuation(19, "channel", 300, 4)
+                return [], None
+
+            async def _message_record(self, msg, chat_id, *, require_sender_details=False):
+                return msg.record
+
+        backend = FakeBackend(client_factory=lambda: object())
+        dates = DateRange(start=None, end=None)
+        page = backend.search(chat=None, sender=None, text="", dates=dates, limit=2, cursor=None, scan_limit=2)
+        self.assertEqual([item.id for item in page.items], [20, 19])
+        self.assertEqual(page.scanned, 2)
+        self.assertIsNotNone(page.next_cursor, "continuation after the second consumed raw result must survive")
+
 
 if __name__ == "__main__":
     unittest.main()
