@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
+import bridge.runtime as runtime_module
+from bridge.runtime import RuntimeBootstrapError, _SQLiteFixedWindowStore
 from ops.acceptance_harness import CRITERIA
 from ops.candidate_contracts import (
     candidate_acceptance_coverage,
@@ -166,6 +170,45 @@ class StructuredCommitReceiptIntegrationTests(unittest.TestCase):
                     now=102,
                 )
             self.assertEqual(1, len(effects))
+
+
+class RateLimitSidecarRaceIntegrationTests(unittest.TestCase):
+    def _store(self, root: str) -> _SQLiteFixedWindowStore:
+        state = Path(root) / "state"
+        state.mkdir(mode=0o700)
+        os.chmod(state, 0o700)
+        return _SQLiteFixedWindowStore(state / "rate.sqlite3", clock=lambda: 120.0)
+
+    def test_ephemeral_sidecar_disappearance_does_not_escape_as_file_not_found(self):
+        with tempfile.TemporaryDirectory() as td:
+            store = self._store(td)
+            wal = Path(str(store.database_path) + "-wal")
+            wal.write_bytes(b"")
+            os.chmod(wal, 0o600)
+            original = runtime_module._validate_private_regular
+            observed = {"race": False}
+
+            def disappearing_sidecar(path, *, mode=0o600):
+                if Path(path) == wal and not observed["race"]:
+                    observed["race"] = True
+                    wal.unlink()
+                    raise FileNotFoundError(str(wal))
+                return original(Path(path), mode=mode)
+
+            with mock.patch.object(runtime_module, "_validate_private_regular", side_effect=disappearing_sidecar):
+                store._validate_sidecars()
+            self.assertTrue(observed["race"])
+
+    def test_existing_unsafe_sidecar_still_fails_closed(self):
+        with tempfile.TemporaryDirectory() as td:
+            store = self._store(td)
+            target = Path(td) / "target"
+            target.write_bytes(b"x")
+            os.chmod(target, 0o600)
+            wal = Path(str(store.database_path) + "-wal")
+            wal.symlink_to(target)
+            with self.assertRaises(RuntimeBootstrapError):
+                store._validate_sidecars()
 
 
 if __name__ == "__main__":
