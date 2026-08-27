@@ -81,6 +81,45 @@ class Final5Task3GlobalSearchR8Tests(unittest.TestCase):
         self.assertEqual([item.id for item in page2.items], [9])
         self.assertEqual(page2.scanned, 1)
 
+    def test_partial_raw_page_with_valid_continuation_is_not_exhausted(self) -> None:
+        first = SimpleNamespace(
+            id=20,
+            chat_id=300,
+            peer_id=SimpleNamespace(channel_id=300),
+            record=MessageRecord(id=20, chat_id="300", timestamp="2026-08-27T06:00:00Z", text="first", sender=None),
+        )
+        second = SimpleNamespace(
+            id=19,
+            chat_id=300,
+            peer_id=SimpleNamespace(channel_id=300),
+            record=MessageRecord(id=19, chat_id="300", timestamp="2026-08-27T05:59:00Z", text="second", sender=None),
+        )
+
+        class FakeBackend(GlobalSearchR8Backend):
+            @asynccontextmanager
+            async def _client_session(self):
+                yield object()
+
+            async def _search_global_chunk(self, client, *, query, limit, state, max_date):
+                if state is None:
+                    self.assertGreater(limit, 1)
+                    return [first], GlobalContinuation(20, "channel", 300, 5)
+                if state.offset_id == 20:
+                    return [second], GlobalContinuation(19, "channel", 300, 4)
+                return [], None
+
+            async def _message_record(self, msg, chat_id, *, require_sender_details=False):
+                return msg.record
+
+        backend = FakeBackend(client_factory=lambda: object())
+        dates = DateRange(start=None, end=None)
+        page1 = backend.search(chat=None, sender=None, text="", dates=dates, limit=2, cursor=None, scan_limit=1)
+        self.assertEqual([item.id for item in page1.items], [20])
+        self.assertIsNotNone(page1.next_cursor, "valid Telegram continuation must survive a partial raw page")
+
+        page2 = backend.search(chat=None, sender=None, text="", dates=dates, limit=2, cursor=page1.next_cursor, scan_limit=1)
+        self.assertEqual([item.id for item in page2.items], [19])
+
 
 if __name__ == "__main__":
     unittest.main()
