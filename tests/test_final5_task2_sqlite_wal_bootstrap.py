@@ -294,5 +294,52 @@ class StructuredWriteCommitReceiptTests(unittest.TestCase):
         self.assertEqual(1, len(effects))
 
 
+class WriteStoreSchemaBootstrapTests(unittest.TestCase):
+    def test_incompatible_schema_is_not_mutated_before_rejection(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            db_path = Path(td) / "writes.sqlite3"
+            con = sqlite3.connect(db_path)
+            try:
+                con.execute("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+                con.execute("INSERT INTO meta(key,value) VALUES('schema_version','999')")
+                con.commit()
+                before = con.execute("SELECT type,name,sql FROM sqlite_master ORDER BY type,name").fetchall()
+            finally:
+                con.close()
+
+            with self.assertRaisesRegex(RuntimeError, "unsupported write-store schema"):
+                PersistentWriteStore(db_path)
+
+            con = sqlite3.connect(db_path)
+            try:
+                after = con.execute("SELECT type,name,sql FROM sqlite_master ORDER BY type,name").fetchall()
+            finally:
+                con.close()
+            self.assertEqual(before, after, "unsupported DB must not be partially migrated")
+
+    def test_managed_tables_without_schema_metadata_fail_closed_without_more_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            db_path = Path(td) / "writes.sqlite3"
+            con = sqlite3.connect(db_path)
+            try:
+                con.execute("CREATE TABLE previews (legacy TEXT)")
+                con.commit()
+            finally:
+                con.close()
+
+            with self.assertRaisesRegex(RuntimeError, "write-store schema metadata missing"):
+                PersistentWriteStore(db_path)
+
+            con = sqlite3.connect(db_path)
+            try:
+                names = {
+                    row[0]
+                    for row in con.execute("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
+                }
+            finally:
+                con.close()
+            self.assertEqual({"previews"}, names)
+
+
 if __name__ == "__main__":
     unittest.main()
