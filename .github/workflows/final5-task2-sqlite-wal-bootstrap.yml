@@ -1,0 +1,33 @@
+name: FINAL5 Task2 SQLite WAL Bootstrap
+
+on:
+  pull_request:
+    branches:
+      - work3/integration-release-candidate
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  sqlite-wal-bootstrap:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout candidate
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Compile changed Python surfaces
+        run: python -m py_compile bridge/storage.py tests/test_dev04_migration_concurrency.py tests/test_final5_task2_sqlite_wal_bootstrap.py
+      - name: Focused SQLite WAL bootstrap regressions
+        run: python -m unittest -v tests.test_dev04_migration_concurrency tests.test_final5_task2_sqlite_wal_bootstrap
+      - name: Repeat fresh multiprocess bootstrap to detect flakiness
+        run: |
+          for attempt in $(seq 1 10); do
+            python -m unittest -v tests.test_dev04_migration_concurrency.ConcurrentFileRegistryMigrationTests.test_four_workers_share_fresh_file_registry_bootstrap
+          done
