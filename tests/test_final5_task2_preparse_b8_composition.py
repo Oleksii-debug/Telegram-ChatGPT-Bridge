@@ -65,7 +65,7 @@ class Final5Task2PreparseB8CompositionTests(unittest.TestCase):
     def _environ(auth: str, raw: bytes, *, body=None):
         return {
             "REQUEST_METHOD": "POST",
-            "PATH_INFO": "/api/v1/telegram/send/preview",
+            "PATH_INFO": "/api/v1/messages/send/preview",
             "HTTP_AUTHORIZATION": f"Bearer {auth}",
             "CONTENT_TYPE": "application/json",
             "CONTENT_LENGTH": str(len(raw)),
