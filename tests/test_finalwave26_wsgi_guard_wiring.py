@@ -121,7 +121,8 @@ class Finalwave26WsgiGuardWiringTests(unittest.TestCase):
             "CONTENT_LENGTH": "0",
             "wsgi.input": io.BytesIO(b""),
         }
-        with mock.patch("bridge.runtime_composition.build_production_application_from_env", return_value=sentinel) as builder:
+        with mock.patch("bridge.runtime_composition.build_production_application_from_env", return_value=sentinel) as builder, \
+             mock.patch.object(runtime_wsgi, "_observe_passenger_serving_request") as observe:
             body1 = b"".join(runtime_wsgi.application(environ, start_response))
             body2 = b"".join(runtime_wsgi.application(environ, start_response))
         self.assertEqual(b"", body1)
@@ -131,6 +132,7 @@ class Finalwave26WsgiGuardWiringTests(unittest.TestCase):
         self.assertIsInstance(runtime_wsgi._default_application, ActionRequestGuard)
         self.assertIs(runtime_wsgi._default_application.application, sentinel)
         self.assertEqual(2, sentinel.calls)
+        self.assertEqual(2, observe.call_count)
 
     def test_recovered_passenger_import_contract_still_resolves_guarded_runtime_wrapper(self):
         import bridge
