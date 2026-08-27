@@ -115,6 +115,7 @@ class ProcessSharedCommitGuard:
     def __init__(self, store: PersistentWriteStore, *, lock_root: str | Path | None = None) -> None:
         self.store = store
         self.lock_root = Path(lock_root) if lock_root is not None else store.db_path.parent / ".write-operation-locks"
+        self._lock_root_identity: tuple[int, int] | None = None
         self._prepare_lock_root()
         self._ensure_schema()
 
@@ -135,6 +136,34 @@ class ProcessSharedCommitGuard:
             or stat.S_IMODE(st.st_mode) != 0o700
         ):
             raise WriteSafetyError("write_guard_lock_root_unsafe", status=503)
+        self._lock_root_identity = (int(st.st_dev), int(st.st_ino))
+
+    def _open_lock_root(self) -> int:
+        nofollow = getattr(os, "O_NOFOLLOW", None)
+        directory = getattr(os, "O_DIRECTORY", None)
+        if nofollow is None or directory is None or self._lock_root_identity is None:
+            raise WriteSafetyError("write_guard_lock_root_unsafe", status=503)
+        flags = os.O_RDONLY | int(directory) | int(nofollow) | int(getattr(os, "O_CLOEXEC", 0))
+        try:
+            fd = os.open(self.lock_root, flags)
+        except OSError as exc:
+            raise WriteSafetyError("write_guard_lock_root_unavailable", status=503) from exc
+        try:
+            st = os.fstat(fd)
+            if (
+                not stat.S_ISDIR(st.st_mode)
+                or (hasattr(os, "geteuid") and st.st_uid != os.geteuid())
+                or stat.S_IMODE(st.st_mode) != 0o700
+                or (int(st.st_dev), int(st.st_ino)) != self._lock_root_identity
+            ):
+                raise WriteSafetyError("write_guard_lock_root_unsafe", status=503)
+            return fd
+        except Exception:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+            raise
 
     def _ensure_schema(self) -> None:
         with self.store._connect() as con:
@@ -165,12 +194,18 @@ class ProcessSharedCommitGuard:
 
     def _open_lock(self, key_hash: str, *, fail_busy: bool) -> int | None:
         key_hash = self._validate_key_hash(key_hash)
-        path = self.lock_root / f"{key_hash}.lock"
-        flags = os.O_RDWR | os.O_CREAT | int(getattr(os, "O_CLOEXEC", 0)) | int(getattr(os, "O_NOFOLLOW", 0))
+        root_fd = self._open_lock_root()
+        nofollow = getattr(os, "O_NOFOLLOW", None)
+        if nofollow is None:
+            os.close(root_fd)
+            raise WriteSafetyError("write_guard_lock_unsafe", status=503)
+        flags = os.O_RDWR | os.O_CREAT | int(getattr(os, "O_CLOEXEC", 0)) | int(nofollow)
         try:
-            fd = os.open(path, flags, 0o600)
+            fd = os.open(f"{key_hash}.lock", flags, 0o600, dir_fd=root_fd)
         except OSError as exc:
             raise WriteSafetyError("write_guard_lock_unavailable", status=503) from exc
+        finally:
+            os.close(root_fd)
         try:
             st = os.fstat(fd)
             if (

@@ -1,0 +1,40 @@
+name: FINAL5 TASK2 Write Guard TOCTOU
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  write-guard-toctou:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout full history
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Set up Python 3.11
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.11'
+      - name: Compile focused reliability surfaces
+        run: >-
+          python -m py_compile
+          ops/runtime_write_reliability.py
+          tests/test_final5_task2_write_guard_parent_toctou.py
+          tests/test_finalwave38_runtime_composition.py
+      - name: Run parent replacement adversarial regressions
+        run: python -m unittest -v tests.test_final5_task2_write_guard_parent_toctou
+      - name: Run adjacent production reliability composition regressions
+        run: python -m unittest -v tests.test_finalwave38_runtime_composition
+      - name: Current-tree secret scan
+        if: always()
+        run: python tools/secret_scan.py --mode current
+      - name: Full-history secret scan
+        if: always()
+        run: python tools/secret_scan.py --mode history
+      - name: Verify no active cPanel or auto-deploy arming file
+        if: always()
+        run: test ! -e .cpanel.yml && test ! -e ops/ENABLE_HOSTIQ_AUTO_DEPLOY
