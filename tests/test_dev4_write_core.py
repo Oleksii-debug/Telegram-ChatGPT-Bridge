@@ -1,6 +1,7 @@
 import copy, tempfile, threading, unittest
 from pathlib import Path
 from ops.openapi_registry import build_action_openapi, canonical_operation, validate_action_openapi, OpenAPIContractError
+from ops.structured_safe_write import StructuredSafePersistentWriteStore
 from ops.telegram_write_adapter import DeterministicFakeTelegramClient, TelegramContractError, TelegramRuntimeConfig, TelegramWriteAdapter, normalize_entity_ref
 from ops.write_safety import PersistentWriteStore, ReconciliationRequired, SafeNoSideEffectFailure, TransactionState, WriteSafetyError
 
@@ -10,6 +11,15 @@ def cfg(**kw):
     d=dict(application_id_ref=1,application_hash_ref='dummy',session_reference='dummy-ref',synthetic_test_mode=True,request_timeout_seconds=.2,max_flood_wait_seconds=60); d.update(kw); return TelegramRuntimeConfig(**d)
 
 def payload(text='draft'): return {'target':'@target_user','text':text}
+
+class _LateFaultAfterDurableStructuredStore(StructuredSafePersistentWriteStore):
+    def _commit_result(self, idempotency_key, fingerprint, result, *, now):
+        super()._commit_result(idempotency_key, fingerprint, result, now=now)
+        raise RuntimeError('synthetic late local fault after durable commit')
+
+class _FaultBeforeDurableStructuredStore(StructuredSafePersistentWriteStore):
+    def _commit_result(self, idempotency_key, fingerprint, result, *, now):
+        raise RuntimeError('synthetic local fault before durable commit')
 
 class AdapterCoreTests(unittest.TestCase):
     def test_numeric_target(self): self.assertEqual(normalize_entity_ref('123').value,123)
@@ -107,6 +117,29 @@ class WriteStoreTests(unittest.TestCase):
             self.assertEqual(self.s.transaction_state('idem-key-1'),'CALLING')
         finally: release.set(); t.join(2)
         self.assertEqual(calls,[1]); self.assertEqual(self.s.transaction_state('idem-key-1'),'COMMITTED')
+
+class StructuredWriteStoreRegressionTests(unittest.TestCase):
+    def test_late_local_fault_returns_matching_durable_committed_receipt(self):
+        with tempfile.TemporaryDirectory() as td:
+            store=_LateFaultAfterDurableStructuredStore(Path(td)/'writes.sqlite3',preview_ttl_seconds=30)
+            preview=store.create_preview('SEND',payload('safe test'),now=100)
+            effects=[]
+            result=store.commit(preview.token,expected_action='SEND',idempotency_key='idem-structured-0001',external_write=lambda x:(effects.append(dict(x)) or {'id':77}),now=101)
+            self.assertEqual(result.state,'COMMITTED'); self.assertFalse(result.idempotent_replay); self.assertEqual(result.result,{'id':77}); self.assertEqual(len(effects),1)
+            replay=store.commit(preview.token,expected_action='SEND',idempotency_key='idem-structured-0001',external_write=lambda x:self.fail('replay must not repeat external effect'),now=102)
+            self.assertTrue(replay.idempotent_replay); self.assertEqual(replay.result,{'id':77}); self.assertEqual(len(effects),1)
+
+    def test_precommit_fault_remains_ambiguous_and_replay_is_blocked(self):
+        with tempfile.TemporaryDirectory() as td:
+            store=_FaultBeforeDurableStructuredStore(Path(td)/'writes.sqlite3',preview_ttl_seconds=30)
+            preview=store.create_preview('SEND',payload('safe test'),now=100)
+            effects=[]
+            with self.assertRaises(ReconciliationRequired):
+                store.commit(preview.token,expected_action='SEND',idempotency_key='idem-structured-0002',external_write=lambda x:(effects.append(dict(x)) or {'id':88}),now=101)
+            self.assertEqual(len(effects),1); self.assertEqual(store.transaction_state('idem-structured-0002'),'AMBIGUOUS')
+            with self.assertRaises(ReconciliationRequired):
+                store.commit(preview.token,expected_action='SEND',idempotency_key='idem-structured-0002',external_write=lambda x:self.fail('ambiguous replay must not repeat external effect'),now=102)
+            self.assertEqual(len(effects),1)
 
 class OpenAPICoreTests(unittest.TestCase):
     def setUp(self): self.s=build_action_openapi('https://tg-api.rukadopomogy.org.ua')
