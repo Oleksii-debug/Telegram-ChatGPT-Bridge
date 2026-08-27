@@ -1,0 +1,171 @@
+"""Isolated FINAL5 Task3 candidate for deep Telethon dialog pagination.
+
+This module is intentionally not wired into the canonical runtime.  It provides
+an adaptation candidate for W01: use Telethon's native dialog continuation tuple
+without serializing peer access hashes, preserve Telegram's pinned/native order,
+and allow sparse local filters to advance beyond one bounded prefix.
+"""
+from __future__ import annotations
+
+import inspect
+from datetime import datetime
+from typing import Any
+
+from bridge.backend import TelethonReadBackend
+from bridge.errors import BridgeError
+from bridge.models import Page, canonical_timestamp, decode_cursor, encode_cursor
+from bridge.validation import normalize_search_text
+
+
+class DeepDialogTelethonReadBackend(TelethonReadBackend):
+    """Telethon read backend with restart-safe, bounded dialog continuation."""
+
+    @staticmethod
+    def _supports_dialog_offsets(method: Any) -> bool:
+        try:
+            params = inspect.signature(method).parameters
+        except (TypeError, ValueError):
+            return False
+        return all(name in params for name in ("offset_date", "offset_id", "offset_peer", "ignore_pinned"))
+
+    @classmethod
+    def _decode_dialog_server_cursor(cls, cursor: str | None, signature: str) -> tuple[str, int, int] | None:
+        decoded = decode_cursor(cursor)
+        if decoded is None:
+            return None
+        if set(decoded) != {"v", "scope", "sig", "offset"}:
+            raise cls._invalid_cursor()
+        if decoded.get("v") != 3 or decoded.get("scope") != "dialogs" or decoded.get("sig") != signature:
+            raise cls._invalid_cursor()
+        offset = decoded.get("offset")
+        if not isinstance(offset, list) or len(offset) != 3:
+            raise cls._invalid_cursor()
+        stamp, message_id, peer_id = offset
+        if not isinstance(stamp, str) or not stamp or len(stamp) > 64:
+            raise cls._invalid_cursor()
+        try:
+            if canonical_timestamp(stamp) != stamp:
+                raise ValueError
+        except Exception as exc:
+            raise cls._invalid_cursor(exc) from exc
+        if isinstance(message_id, bool) or not isinstance(message_id, int) or message_id < 0 or message_id > 2**63 - 1:
+            raise cls._invalid_cursor()
+        if isinstance(peer_id, bool) or not isinstance(peer_id, int) or peer_id == 0 or abs(peer_id) > 2**63 - 1:
+            raise cls._invalid_cursor()
+        return stamp, message_id, peer_id
+
+    @classmethod
+    def _dialog_server_offset(cls, dialog: Any) -> tuple[str, int, int]:
+        message = getattr(dialog, "message", None)
+        date = getattr(message, "date", None)
+        message_id = getattr(message, "id", None)
+        peer_id = getattr(dialog, "id", None)
+        if not isinstance(date, datetime):
+            raise BridgeError(
+                "Telegram dialog continuation lacks a message date",
+                status=502,
+                code="telegram_dialog_continuation_invalid",
+                details={"retryable": True},
+            )
+        if isinstance(message_id, bool) or not isinstance(message_id, int) or message_id < 0:
+            raise BridgeError(
+                "Telegram dialog continuation lacks a message id",
+                status=502,
+                code="telegram_dialog_continuation_invalid",
+                details={"retryable": True},
+            )
+        if isinstance(peer_id, bool) or not isinstance(peer_id, int) or peer_id == 0:
+            raise BridgeError(
+                "Telegram dialog continuation lacks a marked peer id",
+                status=502,
+                code="telegram_dialog_continuation_invalid",
+                details={"retryable": True},
+            )
+        return canonical_timestamp(date) or "1970-01-01T00:00:00Z", message_id, peer_id
+
+    @staticmethod
+    async def _collect_dialogs(iterator: Any) -> list[Any]:
+        if hasattr(iterator, "__aiter__"):
+            return [item async for item in iterator]
+        return list(iterator)
+
+    def list_dialogs(self, *, limit: int, cursor: str | None, query: str, unread_only: bool) -> Page:
+        async def work() -> Page:
+            needle = normalize_search_text(query.strip())
+            signature = self._cursor_signature("dialogs-v3", needle, "1" if unread_only else "0")
+            state = self._decode_dialog_server_cursor(cursor, signature)
+
+            async with self._client_session() as client:
+                method = client.iter_dialogs
+                if state is not None and not self._supports_dialog_offsets(method):
+                    raise BridgeError(
+                        "Telegram dialog continuation is unavailable",
+                        status=502,
+                        code="telegram_dialog_continuation_unsupported",
+                        details={"retryable": False},
+                    )
+
+                fetch_limit = self.config.dialog_scan_limit
+                kwargs: dict[str, Any] = {"limit": fetch_limit}
+                if state is not None:
+                    stamp, offset_id, peer_id = state
+                    try:
+                        offset_peer = await self._maybe_await(client.get_input_entity(peer_id))
+                    except Exception as exc:
+                        raise BridgeError(
+                            "Telegram dialog continuation peer is unavailable",
+                            status=502,
+                            code="telegram_dialog_continuation_peer_unavailable",
+                            details={"retryable": True},
+                        ) from exc
+                    kwargs.update(
+                        offset_date=datetime.fromisoformat(stamp.replace("Z", "+00:00")),
+                        offset_id=offset_id,
+                        offset_peer=offset_peer,
+                        ignore_pinned=True,
+                    )
+
+                raw = await self._collect_dialogs(method(**kwargs))
+                matches: list[tuple[Any, Any]] = []
+                seen: set[str] = set()
+                for dialog in raw:
+                    record = self._dialog_record(dialog)
+                    dedupe_key = str(getattr(dialog, "id", record.id))
+                    if dedupe_key in seen:
+                        continue
+                    seen.add(dedupe_key)
+                    if needle and needle not in normalize_search_text(f"{record.title} {record.username or ''} {record.id}"):
+                        continue
+                    if unread_only and record.unread_count <= 0:
+                        continue
+                    matches.append((record, dialog))
+
+                page_pairs = matches[:limit]
+                page = [record for record, _ in page_pairs]
+                cursor_dialog: Any | None = None
+                if len(matches) > limit and page_pairs:
+                    # Continue immediately after the last visible result. Raw
+                    # records already inspected below it may be re-read, which
+                    # is safe and prevents gaps.
+                    cursor_dialog = page_pairs[-1][1]
+                elif len(raw) >= fetch_limit and raw:
+                    # Sparse filters can return a short or empty visible page.
+                    # Advance by the last raw server dialog so a caller can keep
+                    # traversing instead of being trapped in one bounded prefix.
+                    cursor_dialog = raw[-1]
+
+                next_cursor = None
+                if cursor_dialog is not None:
+                    stamp, message_id, peer_id = self._dialog_server_offset(cursor_dialog)
+                    next_cursor = encode_cursor(
+                        {
+                            "v": 3,
+                            "scope": "dialogs",
+                            "sig": signature,
+                            "offset": [stamp, message_id, peer_id],
+                        }
+                    )
+
+                return Page(tuple(page), next_cursor, len(raw))
+
+        return self._run(work())
