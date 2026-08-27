@@ -29,6 +29,7 @@ from tests.test_audit_round9 import Round9Layout
 
 
 WRITE_TERMINAL_ADAPT_SHA = "e3e956d555ad12cceae1b7311a6a988c020db58b"
+WRITE_SCHEMA_BOOTSTRAP_ADAPT_SHA = "b4db4749fb0e36a967acd2a7740d463e8104c00f"
 
 LEGACY_FILES_SCHEMA = """
 CREATE TABLE files (
@@ -199,8 +200,12 @@ class ExactPredecessorCompatibilityTests(unittest.TestCase):
             _git_blob(CANDIDATE_ANCHOR_SHA, "ops/write_safety.py"),
             _git_blob("HEAD", "ops/write_safety.py"),
         )
-        self.assertEqual(
+        self.assertNotEqual(
             _git_blob(WRITE_TERMINAL_ADAPT_SHA, "ops/write_safety.py"),
+            _git_blob("HEAD", "ops/write_safety.py"),
+        )
+        self.assertEqual(
+            _git_blob(WRITE_SCHEMA_BOOTSTRAP_ADAPT_SHA, "ops/write_safety.py"),
             _git_blob("HEAD", "ops/write_safety.py"),
         )
         for path in ("bridge/runtime.py", "ops/telegram_session_lock.py"):
