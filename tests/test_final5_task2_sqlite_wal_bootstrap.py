@@ -7,6 +7,7 @@ from pathlib import Path
 from unittest import mock
 
 from bridge.storage import _configure_sqlite_connection, _sqlite_lock_contention
+from ops.structured_safe_write import StructuredSafePersistentWriteStore
 from ops.write_safety import PersistentWriteStore, ReconciliationRequired, TransactionState, WriteAction, WriteSafetyError
 
 
@@ -188,6 +189,109 @@ class WriteTerminalMonotonicityTests(unittest.TestCase):
             store._record_safe_failure("idem-terminal-004", envelope.request_fingerprint, now=102)
         self.assertEqual("illegal_write_state_transition", ctx.exception.code)
         self.assertEqual(TransactionState.COMMITTED.value, store.transaction_state("idem-terminal-004"))
+
+
+class StructuredWriteCommitReceiptTests(unittest.TestCase):
+    def _store(self):
+        td = tempfile.TemporaryDirectory()
+        self.addCleanup(td.cleanup)
+        return StructuredSafePersistentWriteStore(Path(td.name) / "writes.sqlite3")
+
+    def test_structured_late_fault_returns_durable_receipt_and_replay_is_effect_free(self) -> None:
+        store = self._store()
+        preview = store.create_preview(WriteAction.SEND, {"target": "peer:123", "text": "safe test only"}, now=100)
+        original_commit = store._commit_result
+        effects = []
+
+        def commit_then_raise(*args, **kwargs):
+            original_commit(*args, **kwargs)
+            raise RuntimeError("synthetic late local fault after durable commit")
+
+        with mock.patch.object(store, "_commit_result", side_effect=commit_then_raise):
+            result = store.commit(
+                preview.token,
+                expected_action=WriteAction.SEND,
+                idempotency_key="idem-structured-001",
+                external_write=lambda payload: (effects.append(dict(payload)) or {"message_id": 77, "peer_id": "peer:123"}),
+                now=101,
+            )
+
+        self.assertEqual("COMMITTED", result.state)
+        self.assertFalse(result.idempotent_replay)
+        self.assertEqual({"message_id": 77, "peer_id": "peer:123"}, result.result)
+        self.assertEqual(1, len(effects))
+        self.assertEqual(TransactionState.COMMITTED.value, store.transaction_state("idem-structured-001"))
+
+        replay = store.commit(
+            preview.token,
+            expected_action=WriteAction.SEND,
+            idempotency_key="idem-structured-001",
+            external_write=lambda payload: self.fail("replay must not repeat external effect"),
+            now=102,
+        )
+        self.assertTrue(replay.idempotent_replay)
+        self.assertEqual(result.result, replay.result)
+        self.assertEqual(1, len(effects))
+
+    def test_structured_precommit_fault_remains_ambiguous_and_replay_is_blocked(self) -> None:
+        store = self._store()
+        preview = store.create_preview(WriteAction.SEND, {"target": "peer:123", "text": "safe test only"}, now=100)
+        effects = []
+
+        with mock.patch.object(store, "_commit_result", side_effect=RuntimeError("synthetic local fault before durable commit")):
+            with self.assertRaises(ReconciliationRequired):
+                store.commit(
+                    preview.token,
+                    expected_action=WriteAction.SEND,
+                    idempotency_key="idem-structured-002",
+                    external_write=lambda payload: (effects.append(dict(payload)) or {"message_id": 88}),
+                    now=101,
+                )
+
+        self.assertEqual(1, len(effects))
+        self.assertEqual(TransactionState.AMBIGUOUS.value, store.transaction_state("idem-structured-002"))
+        with self.assertRaises(ReconciliationRequired):
+            store.commit(
+                preview.token,
+                expected_action=WriteAction.SEND,
+                idempotency_key="idem-structured-002",
+                external_write=lambda payload: self.fail("ambiguous replay must not repeat external effect"),
+                now=102,
+            )
+        self.assertEqual(1, len(effects))
+
+    def test_structured_missing_matching_receipt_fails_closed_without_terminal_downgrade(self) -> None:
+        store = self._store()
+        preview = store.create_preview(WriteAction.SEND, {"target": "peer:123", "text": "safe test only"}, now=100)
+        original_commit = store._commit_result
+        effects = []
+
+        def commit_then_raise(*args, **kwargs):
+            original_commit(*args, **kwargs)
+            raise RuntimeError("synthetic late local fault after durable commit")
+
+        with mock.patch.object(store, "_commit_result", side_effect=commit_then_raise), mock.patch.object(store, "_durable_committed_result", return_value=None):
+            with self.assertRaises(ReconciliationRequired):
+                store.commit(
+                    preview.token,
+                    expected_action=WriteAction.SEND,
+                    idempotency_key="idem-structured-003",
+                    external_write=lambda payload: (effects.append(dict(payload)) or {"message_id": 99}),
+                    now=101,
+                )
+
+        self.assertEqual(1, len(effects))
+        self.assertEqual(TransactionState.COMMITTED.value, store.transaction_state("idem-structured-003"))
+        replay = store.commit(
+            preview.token,
+            expected_action=WriteAction.SEND,
+            idempotency_key="idem-structured-003",
+            external_write=lambda payload: self.fail("durable COMMITTED replay must not repeat external effect"),
+            now=102,
+        )
+        self.assertTrue(replay.idempotent_replay)
+        self.assertEqual({"message_id": 99}, replay.result)
+        self.assertEqual(1, len(effects))
 
 
 if __name__ == "__main__":
