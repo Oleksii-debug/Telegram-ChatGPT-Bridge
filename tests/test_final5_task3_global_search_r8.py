@@ -102,10 +102,12 @@ class Final5Task3GlobalSearchR8Tests(unittest.TestCase):
 
             async def _search_global_chunk(self, client, *, query, limit, state, max_date):
                 if state is None:
-                    self.assertEqual(limit, 2)
+                    if limit != 2:
+                        raise AssertionError(f"expected first raw request limit=2, got {limit}")
                     return [first], GlobalContinuation(20, "channel", 300, 5)
                 if state.offset_id == 20:
-                    self.assertEqual(limit, 1)
+                    if limit != 1:
+                        raise AssertionError(f"expected continuation request limit=1, got {limit}")
                     return [second], GlobalContinuation(19, "channel", 300, 4)
                 return [], None
 
