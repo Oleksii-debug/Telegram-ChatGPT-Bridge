@@ -88,7 +88,10 @@ class PreparseRateLimitedActionGuard(ActionRequestGuard):
         token: Token | None = None
         try:
             token = self._limiter.consume_for_guard(context.actor_sha256, spec.operation_id)
-        except BaseException as exc:
+        except Exception as exc:
+            # Operational limiter failures are mapped through the bounded public
+            # write-error contract. Process-control BaseException subclasses must
+            # propagate so Passenger/process recovery semantics are not masked.
             request_id = self.application.read_app._request_id()
             return self.application._write_error(start_response, exc, request_id)
         try:
