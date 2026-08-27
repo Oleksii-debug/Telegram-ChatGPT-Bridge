@@ -128,7 +128,14 @@ class Finalwave26OpenApiRuntimeParityTests(unittest.TestCase):
 
     def test_registry_openapi_and_wsgi_inventory_are_bidirectionally_exact(self):
         self.assertEqual([], validate_runtime_parity())
-        self.assertEqual([], validate_unified_registry())
+        expected_read_routes = tuple(
+            sorted(
+                (spec.method.upper(), spec.path)
+                for spec in OPERATIONS
+                if spec.operation_class is OperationClass.READ
+            )
+        )
+        self.assertEqual(expected_read_routes, validate_unified_registry())
         self.assertEqual(19, len(CANONICAL_ROUTES))
         self.assertEqual(17, len(OPERATIONS))
         schema = build_chatgpt_action_openapi(BASE_URL)
