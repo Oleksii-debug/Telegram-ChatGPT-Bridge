@@ -1,8 +1,16 @@
 from __future__ import annotations
 
 import json
+import os
+import sqlite3
+import tempfile
 import unittest
+from pathlib import Path
+from unittest import mock
 
+import bridge as bridge_package
+import bridge.runtime as runtime_module
+from bridge.runtime import RuntimeBootstrapError, _SQLiteFixedWindowStore
 from ops.acceptance_harness import CRITERIA
 from ops.candidate_contracts import (
     candidate_acceptance_coverage,
@@ -85,6 +93,86 @@ class CandidateApiInventoryTests(unittest.TestCase):
         serialized = json.dumps(integrated_api_inventory(), ensure_ascii=False).casefold()
         for forbidden in ("setup-", "login-code", "session-string", "tg_api_hash", "bridge_token"):
             self.assertNotIn(forbidden, serialized)
+
+
+class RateLimitSidecarRaceIntegrationTests(unittest.TestCase):
+    @staticmethod
+    def _store(root: str) -> _SQLiteFixedWindowStore:
+        state = Path(root) / "state"
+        state.mkdir(mode=0o700)
+        os.chmod(state, 0o700)
+        return _SQLiteFixedWindowStore(state / "rate.sqlite3", clock=lambda: 120.0)
+
+    def test_ephemeral_sidecar_disappearance_does_not_escape_as_file_not_found(self):
+        with tempfile.TemporaryDirectory() as td:
+            store = self._store(td)
+            wal = Path(str(store.database_path) + "-wal")
+            wal.write_bytes(b"")
+            os.chmod(wal, 0o600)
+            original = runtime_module._validate_private_regular
+            observed = {"race": False}
+
+            def disappearing_sidecar(path, *, mode=0o600):
+                if Path(path) == wal and not observed["race"]:
+                    observed["race"] = True
+                    wal.unlink()
+                    raise FileNotFoundError(str(wal))
+                return original(Path(path), mode=mode)
+
+            with mock.patch.object(
+                runtime_module,
+                "_validate_private_regular",
+                side_effect=disappearing_sidecar,
+            ):
+                store._validate_sidecars()
+            self.assertTrue(observed["race"])
+
+    def test_existing_unsafe_sidecar_still_fails_closed(self):
+        with tempfile.TemporaryDirectory() as td:
+            store = self._store(td)
+            target = Path(td) / "target"
+            target.write_bytes(b"x")
+            os.chmod(target, 0o600)
+            wal = Path(str(store.database_path) + "-wal")
+            wal.symlink_to(target)
+            with self.assertRaises(RuntimeBootstrapError):
+                store._validate_sidecars()
+
+    def test_wal_bootstrap_retries_only_numeric_lock_contention(self):
+        failure = RuntimeBootstrapError("rate_limit_database_unavailable")
+        cause = sqlite3.OperationalError("synthetic")
+        cause.sqlite_errorcode = sqlite3.SQLITE_BUSY
+        failure.__cause__ = cause
+        expected = object()
+        store = object.__new__(_SQLiteFixedWindowStore)
+
+        with mock.patch.object(
+            bridge_package,
+            "_ORIGINAL_RATE_CONNECT",
+            side_effect=[failure, expected],
+        ) as connect:
+            with mock.patch.object(bridge_package.time, "monotonic", side_effect=[10.0, 10.1]):
+                with mock.patch.object(bridge_package.time, "sleep") as sleep:
+                    self.assertIs(expected, bridge_package._race_safe_rate_connect(store))
+        self.assertEqual(2, connect.call_count)
+        sleep.assert_called_once_with(bridge_package._RATE_BOOTSTRAP_RETRY_SECONDS)
+
+    def test_non_contention_failure_is_never_retried(self):
+        failure = RuntimeBootstrapError("rate_limit_database_unavailable")
+        cause = sqlite3.OperationalError("synthetic")
+        cause.sqlite_errorcode = sqlite3.SQLITE_ERROR
+        failure.__cause__ = cause
+        store = object.__new__(_SQLiteFixedWindowStore)
+
+        with mock.patch.object(
+            bridge_package,
+            "_ORIGINAL_RATE_CONNECT",
+            side_effect=failure,
+        ) as connect:
+            with self.assertRaises(RuntimeBootstrapError) as caught:
+                bridge_package._race_safe_rate_connect(store)
+        self.assertIs(failure, caught.exception)
+        connect.assert_called_once_with(store)
 
 
 if __name__ == "__main__":

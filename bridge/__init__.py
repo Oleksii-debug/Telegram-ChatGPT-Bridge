@@ -13,6 +13,9 @@ only by the lazy runtime builder after request dispatch begins.
 """
 
 import inspect
+import sqlite3
+import time
+from pathlib import Path
 from typing import Any
 
 from .app import BridgeApplication, ReadAppConfig
@@ -20,7 +23,13 @@ from .backend import ReadBackend, TelethonReadBackend, UnavailableReadBackend
 from .errors import BridgeError
 from .integrated_app import UnifiedBridgeApplication
 from .runtime_wsgi import application
+from .storage import _sqlite_lock_contention
 from . import app as _app_module
+from . import runtime as _runtime_module
+
+_ORIGINAL_RATE_CONNECT = _runtime_module._SQLiteFixedWindowStore._connect
+_RATE_BOOTSTRAP_RETRY_SECONDS = 0.025
+_RATE_BOOTSTRAP_TIMEOUT_SECONDS = 5.0
 
 
 def _accepts_keyword(callable_obj: Any, parameter: str) -> bool:
@@ -84,11 +93,61 @@ async def _failclosed_iter_messages(
     return list(iterator)
 
 
+def _race_safe_validate_rate_sidecars(self: Any) -> None:
+    """Validate SQLite sidecars while tolerating their legitimate removal.
+
+    WAL and SHM leaves are ephemeral.  Another Passenger worker may close the
+    last SQLite connection between observing a sidecar pathname and validating
+    its inode.  Absence at the validation point is therefore benign; every
+    sidecar that is still present continues through the canonical owner, mode,
+    type, symlink and hardlink checks.
+    """
+
+    for suffix in ("-wal", "-shm"):
+        path = Path(str(self.database_path) + suffix)
+        try:
+            _runtime_module._validate_private_regular(path)
+        except FileNotFoundError:
+            continue
+
+
+def _race_safe_rate_connect(self: Any) -> Any:
+    """Retry only numeric SQLite lock contention during concurrent cold start.
+
+    The canonical connection routine already fails closed for unsafe topology,
+    ownership, permissions, corruption and every non-contention SQLite error.
+    Multiple Passenger workers can nevertheless contend while the first one
+    switches a new database into WAL mode.  Retry that exact BUSY/LOCKED class
+    for a bounded interval; never classify by mutable exception text.
+    """
+
+    deadline = time.monotonic() + _RATE_BOOTSTRAP_TIMEOUT_SECONDS
+    while True:
+        try:
+            return _ORIGINAL_RATE_CONNECT(self)
+        except _runtime_module.RuntimeBootstrapError as exc:
+            cause = exc.__cause__
+            if (
+                exc.code != "rate_limit_database_unavailable"
+                or not isinstance(cause, sqlite3.OperationalError)
+                or not _sqlite_lock_contention(cause)
+                or time.monotonic() >= deadline
+            ):
+                raise
+            time.sleep(_RATE_BOOTSTRAP_RETRY_SECONDS)
+
+
 # Canonical current-base repair for the W10 fail-open search finding. Patching
 # the class object here affects ``bridge.backend.TelethonReadBackend`` itself,
 # including direct imports and the Passenger runtime composition, while keeping
 # module import network-free and credential-free.
 TelethonReadBackend._iter_messages = _failclosed_iter_messages
+
+# SQLite WAL/SHM leaves can disappear when another process closes the last
+# connection.  Remove the exists->lstat TOCTOU without weakening validation for
+# a sidecar inode that is present at the actual validation point.
+_runtime_module._SQLiteFixedWindowStore._validate_sidecars = _race_safe_validate_rate_sidecars
+_runtime_module._SQLiteFixedWindowStore._connect = _race_safe_rate_connect
 
 # Preserve the authoritative recovered Passenger import target while switching
 # the exported callable to the unified, lazy, server-side runtime builder.
