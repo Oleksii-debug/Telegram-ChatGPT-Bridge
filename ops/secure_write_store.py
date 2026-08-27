@@ -231,7 +231,7 @@ class SecurePersistentWriteStore(PersistentWriteStore):
                 self._validate_database_and_sidecars(strict_existing=False)
 
     def _init_schema(self) -> None:
-        """Serialize all fresh schema/version decisions under one writer txn."""
+        """Serialize bootstrap and never adopt unversioned managed state."""
         statements = (
             "CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY,value TEXT NOT NULL)",
             "CREATE TABLE IF NOT EXISTS previews (preview_id TEXT PRIMARY KEY,token_hash TEXT NOT NULL UNIQUE,action TEXT NOT NULL,request_fingerprint TEXT NOT NULL,payload_json TEXT NOT NULL,created_at INTEGER NOT NULL,expires_at INTEGER NOT NULL,consumed_at INTEGER)",
@@ -239,19 +239,34 @@ class SecurePersistentWriteStore(PersistentWriteStore):
             "CREATE INDEX IF NOT EXISTS idx_previews_expires ON previews(expires_at)",
             "CREATE INDEX IF NOT EXISTS idx_idempotency_state ON idempotency(state)",
         )
+        managed_tables = {"meta", "previews", "idempotency"}
         with self._connect() as con:
             con.execute("BEGIN IMMEDIATE")
             try:
+                existing = {
+                    str(row["name"])
+                    for row in con.execute(
+                        "SELECT name FROM sqlite_master WHERE type='table' AND name IN ('meta','previews','idempotency')"
+                    )
+                }
+                if "meta" in existing:
+                    row = con.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()
+                    if row is None or str(row["value"]) != str(self.SCHEMA_VERSION):
+                        raise RuntimeError("unsupported write-store schema")
+                elif existing & (managed_tables - {"meta"}):
+                    # A non-empty managed schema without authoritative version
+                    # metadata may be stale, partially restored or from another
+                    # implementation. Never bless it as current by inserting a
+                    # new version marker after the fact.
+                    raise RuntimeError("unsupported write-store schema")
+
                 for statement in statements:
                     con.execute(statement)
-                row = con.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()
-                if row is None:
+                if "meta" not in existing:
                     con.execute(
                         "INSERT INTO meta(key,value) VALUES('schema_version',?)",
                         (str(self.SCHEMA_VERSION),),
                     )
-                elif str(row["value"]) != str(self.SCHEMA_VERSION):
-                    raise RuntimeError("unsupported write-store schema")
                 con.commit()
             except Exception:
                 if con.in_transaction:
