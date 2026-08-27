@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import unicodedata
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from .backend import TelethonReadBackend
@@ -35,6 +35,32 @@ class GlobalSearchR8Backend(TelethonReadBackend):
             if isinstance(value, int) and value > 0:
                 return kind, value
         raise BridgeError("Telegram global result lacks a stable peer", status=502, code="telegram_global_peer_missing")
+
+    @staticmethod
+    def _next_offset_rate(result: Any, last_message: Any) -> int:
+        """Follow messages.searchGlobal pagination exactly.
+
+        Telegram specifies next_rate when available; otherwise the date of the last
+        returned message must be used as the next offset_rate.
+        """
+        rate = getattr(result, "next_rate", None)
+        if rate is not None:
+            if isinstance(rate, bool) or not isinstance(rate, int) or rate < 0:
+                raise BridgeError("Telegram global search returned an invalid continuation rate", status=502, code="telegram_global_rate_invalid")
+            return rate
+
+        stamp = getattr(last_message, "date", None)
+        if isinstance(stamp, datetime):
+            if stamp.tzinfo is None:
+                stamp = stamp.replace(tzinfo=timezone.utc)
+            value = int(stamp.timestamp())
+        elif isinstance(stamp, bool) or not isinstance(stamp, int):
+            raise BridgeError("Telegram global search continuation lacks a usable message date", status=502, code="telegram_global_rate_missing")
+        else:
+            value = stamp
+        if value < 0:
+            raise BridgeError("Telegram global search continuation has an invalid message date", status=502, code="telegram_global_rate_invalid")
+        return value
 
     @classmethod
     def _decode_global_cursor(cls, token: str | None, signature: str) -> GlobalContinuation | None:
@@ -96,8 +122,8 @@ class GlobalSearchR8Backend(TelethonReadBackend):
         if not messages:
             return [], None
         kind, peer_id = self._peer_parts(messages[-1])
-        next_rate = int(getattr(result, "next_rate", 0) or 0)
-        return messages, GlobalContinuation(int(getattr(messages[-1], "id", 0) or 0), kind, peer_id, max(0, next_rate))
+        next_rate = self._next_offset_rate(result, messages[-1])
+        return messages, GlobalContinuation(int(getattr(messages[-1], "id", 0) or 0), kind, peer_id, next_rate)
 
     def search(self, *, chat: str | None, sender: str | None, text: str, dates: DateRange, limit: int, cursor: str | None, scan_limit: int) -> Page:
         if chat:
@@ -124,7 +150,7 @@ class GlobalSearchR8Backend(TelethonReadBackend):
                         break
                     for msg in raw:
                         record = await self._message_record(msg, str(getattr(msg, "chat_id", None) or "global"), require_sender_details=bool(sender_cf and not sender_cf.lstrip("-").isdigit()))
-                        stamp = __import__("datetime").datetime.fromisoformat(record.timestamp.replace("Z", "+00:00"))
+                        stamp = datetime.fromisoformat(record.timestamp.replace("Z", "+00:00"))
                         if not dates.contains(stamp):
                             continue
                         if needle and needle not in normalize_search_text(record.text):
