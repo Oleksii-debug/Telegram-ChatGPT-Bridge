@@ -5,6 +5,12 @@ parses authenticated write bodies before UnifiedBridgeApplication reaches its
 own pre-parse request bucket. It consumes that request-attempt bucket first and
 uses request-local ContextVar state so the downstream canonical consume is a
 no-op exactly once, while semantic preview/commit quota remains unchanged.
+
+It also preserves process-control crash semantics across the canonical write
+handler. The current canonical handler catches BaseException before mapping a
+write error; this wrapper makes KeyboardInterrupt/SystemExit propagate instead
+of being converted into an HTTP response, so process restart/reconciliation is
+not masked if interruption happens after the write state crossed CALLING.
 """
 from __future__ import annotations
 
@@ -44,6 +50,29 @@ class _DeduplicatingRequestLimiter:
         return self.delegate.consume(actor_sha256, operation_id)
 
 
+def _install_process_control_passthrough(application: Any) -> None:
+    """Prevent canonical BaseException handling from swallowing process control.
+
+    This is deliberately a composition-layer compatibility repair for the
+    current canonical application. Ordinary Exception subclasses retain the
+    existing bounded public error mapping. BaseException subclasses outside
+    Exception (KeyboardInterrupt/SystemExit) are re-raised so process recovery
+    semantics remain real rather than being converted into a live 5xx response.
+    """
+
+    original = getattr(application, "_write_error", None)
+    if original is None or getattr(application, "_process_control_passthrough", False):
+        return
+
+    def process_safe_write_error(start_response: Callable, exc: BaseException, request_id: str):
+        if not isinstance(exc, Exception):
+            raise exc
+        return original(start_response, exc, request_id)
+
+    application._write_error = process_safe_write_error
+    application._process_control_passthrough = True
+
+
 class PreparseRateLimitedActionGuard(ActionRequestGuard):
     """Compose auth -> request-attempt quota -> strict Action parsing.
 
@@ -54,6 +83,7 @@ class PreparseRateLimitedActionGuard(ActionRequestGuard):
 
     def __init__(self, application: Any):
         super().__init__(application)
+        _install_process_control_passthrough(application)
         original = getattr(application, "_write_limiter", None)
         self._limiter: _DeduplicatingRequestLimiter | None = None
         if original is None:
