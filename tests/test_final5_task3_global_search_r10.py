@@ -30,7 +30,8 @@ class Final5Task3GlobalSearchR10Tests(unittest.TestCase):
                 scan_limit=100,
             )
         self.assertEqual(ctx.exception.code, "telegram_global_empty_query_unsupported")
-        self.assertEqual(ctx.exception.status, 422)
+        self.assertEqual(ctx.exception.status, 400)
+        self.assertEqual(ctx.exception.details, {"retryable": False})
         self.assertEqual(self.client_calls, 0)
 
     def test_empty_global_query_fails_before_rpc(self) -> None:
