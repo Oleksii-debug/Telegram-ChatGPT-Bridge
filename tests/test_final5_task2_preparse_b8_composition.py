@@ -123,6 +123,20 @@ class Final5Task2PreparseB8CompositionTests(unittest.TestCase):
         self.assertEqual(["request:previewTelegramSend"], limiter.operations)
         self.assertEqual([], statuses)
 
+    def test_inner_canonical_write_handler_cannot_swallow_process_control_exception(self):
+        limiter = _InterruptingLimiter()
+        auth, guarded = self._application(limiter)
+        statuses, _headers, start_response = _capture()
+        raw = json.dumps({"chat": "@target_user", "text": "synthetic draft"}).encode("utf-8")
+        # Bypass the outer preparse call deliberately. Construction of the guard
+        # installs the process-control passthrough on the canonical application,
+        # so the current canonical `except BaseException` cannot turn a real
+        # process-control interruption into an HTTP response.
+        with self.assertRaises(KeyboardInterrupt):
+            list(guarded.application(self._environ(auth, raw), start_response))
+        self.assertEqual(["request:previewTelegramSend"], limiter.operations)
+        self.assertEqual([], statuses)
+
     def test_wrong_bearer_does_not_consume_quota_or_read_body(self):
         limiter = _CountingLimiter()
         auth, app = self._application(limiter)
