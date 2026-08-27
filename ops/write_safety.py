@@ -251,10 +251,14 @@ class PersistentWriteStore:
                 CREATE INDEX IF NOT EXISTS idx_idempotency_state ON idempotency(state);
                 """
             )
+            con.execute(
+                "INSERT OR IGNORE INTO meta(key,value) VALUES('schema_version',?)",
+                (str(self.SCHEMA_VERSION),),
+            )
             existing = con.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()
             if existing is None:
-                con.execute("INSERT INTO meta(key,value) VALUES('schema_version',?)", (str(self.SCHEMA_VERSION),))
-            elif existing["value"] != str(self.SCHEMA_VERSION):
+                raise RuntimeError("write-store schema version could not be initialized")
+            if existing["value"] != str(self.SCHEMA_VERSION):
                 raise RuntimeError("unsupported write-store schema")
 
     @staticmethod
