@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import tempfile
 import unittest
+from pathlib import Path
 
 from ops.acceptance_harness import CRITERIA
 from ops.candidate_contracts import (
@@ -11,6 +13,19 @@ from ops.candidate_contracts import (
     validate_integrated_api_inventory,
 )
 from ops.openapi_registry import OPERATIONS, OperationClass
+from ops.structured_safe_write import StructuredSafePersistentWriteStore
+from ops.write_safety import ReconciliationRequired
+
+
+class _LateFaultAfterDurableStructuredStore(StructuredSafePersistentWriteStore):
+    def _commit_result(self, idempotency_key, fingerprint, result, *, now):
+        super()._commit_result(idempotency_key, fingerprint, result, now=now)
+        raise RuntimeError("synthetic late local fault after durable commit")
+
+
+class _FaultBeforeDurableStructuredStore(StructuredSafePersistentWriteStore):
+    def _commit_result(self, idempotency_key, fingerprint, result, *, now):
+        raise RuntimeError("synthetic local fault before durable commit")
 
 
 class CandidateAcceptanceCoverageTests(unittest.TestCase):
@@ -85,6 +100,72 @@ class CandidateApiInventoryTests(unittest.TestCase):
         serialized = json.dumps(integrated_api_inventory(), ensure_ascii=False).casefold()
         for forbidden in ("setup-", "login-code", "session-string", "tg_api_hash", "bridge_token"):
             self.assertNotIn(forbidden, serialized)
+
+
+class StructuredCommitReceiptIntegrationTests(unittest.TestCase):
+    def test_late_local_fault_returns_matching_durable_committed_receipt(self):
+        with tempfile.TemporaryDirectory() as td:
+            store = _LateFaultAfterDurableStructuredStore(Path(td) / "writes.sqlite3", preview_ttl_seconds=30)
+            preview = store.create_preview("SEND", {"target": "saved", "text": "safe test"}, now=100)
+            effects = []
+
+            def external_write(payload):
+                effects.append(dict(payload))
+                return {"id": 77}
+
+            result = store.commit(
+                preview.token,
+                expected_action="SEND",
+                idempotency_key="idem-structured-0001",
+                external_write=external_write,
+                now=101,
+            )
+            self.assertEqual("COMMITTED", result.state)
+            self.assertFalse(result.idempotent_replay)
+            self.assertEqual({"id": 77}, result.result)
+            self.assertEqual(1, len(effects))
+
+            replay = store.commit(
+                preview.token,
+                expected_action="SEND",
+                idempotency_key="idem-structured-0001",
+                external_write=lambda payload: self.fail("replay must not repeat external effect"),
+                now=102,
+            )
+            self.assertTrue(replay.idempotent_replay)
+            self.assertEqual({"id": 77}, replay.result)
+            self.assertEqual(1, len(effects))
+
+    def test_precommit_fault_remains_ambiguous_and_replay_is_blocked(self):
+        with tempfile.TemporaryDirectory() as td:
+            store = _FaultBeforeDurableStructuredStore(Path(td) / "writes.sqlite3", preview_ttl_seconds=30)
+            preview = store.create_preview("SEND", {"target": "saved", "text": "safe test"}, now=100)
+            effects = []
+
+            def external_write(payload):
+                effects.append(dict(payload))
+                return {"id": 88}
+
+            with self.assertRaises(ReconciliationRequired):
+                store.commit(
+                    preview.token,
+                    expected_action="SEND",
+                    idempotency_key="idem-structured-0002",
+                    external_write=external_write,
+                    now=101,
+                )
+            self.assertEqual(1, len(effects))
+            self.assertEqual("AMBIGUOUS", store.transaction_state("idem-structured-0002"))
+
+            with self.assertRaises(ReconciliationRequired):
+                store.commit(
+                    preview.token,
+                    expected_action="SEND",
+                    idempotency_key="idem-structured-0002",
+                    external_write=lambda payload: self.fail("ambiguous replay must not repeat external effect"),
+                    now=102,
+                )
+            self.assertEqual(1, len(effects))
 
 
 if __name__ == "__main__":
