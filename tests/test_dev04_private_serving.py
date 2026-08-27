@@ -44,6 +44,18 @@ class VerifiedPrivateFileTests(unittest.TestCase):
         finally:
             verified.close()
 
+    def test_verified_snapshot_survives_same_inode_same_size_mutation(self) -> None:
+        record, path = self.add(b"abc")
+        verified = open_verified_file(self.store, record.file_ref)
+        self.assertIsNotNone(verified)
+        assert verified is not None
+
+        path.write_bytes(b"XYZ")
+        try:
+            self.assertEqual(verified.handle.read(), b"abc")
+        finally:
+            verified.close()
+
     def test_verified_open_rejects_symlink_leaf(self) -> None:
         record, path = self.add()
         outside = Path(self.tmp.name) / "outside.txt"
@@ -137,6 +149,25 @@ class PrivateServingDescriptorTests(unittest.TestCase):
         self.assertEqual(served["raw"], b"abc")
         self.assertEqual(served["headers"]["Content-Length"], "3")
         self.assertNotIn(b"DO_NOT_SERVE_THIS", served["raw"])
+
+    def test_wsgi_stream_uses_snapshot_after_same_inode_mutation(self) -> None:
+        ref = self.downloaded_ref()
+        assert self.app.files is not None
+        original = open_verified_file
+
+        def open_then_mutate(store, file_ref):
+            verified = original(store, file_ref)
+            self.assertIsNotNone(verified)
+            assert verified is not None
+            Path(verified.record.path).write_bytes(b"XYZ")
+            return verified
+
+        with patch("bridge.app.open_verified_file", side_effect=open_then_mutate):
+            served = request(self.app, f"/api/v1/files/{ref}", method="GET", token=TOKEN, raw=b"")
+
+        self.assertTrue(served["status"].startswith("200"))
+        self.assertEqual(served["raw"], b"abc")
+        self.assertEqual(served["headers"]["Content-Length"], "3")
 
     def test_signed_wsgi_stream_uses_same_verified_descriptor_path(self) -> None:
         ref = self.downloaded_ref()
