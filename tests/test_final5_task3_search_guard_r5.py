@@ -59,13 +59,23 @@ class Final5Task3SearchGuardR5Tests(unittest.TestCase):
 
     def test_global_cursor_fails_closed_before_network_access(self) -> None:
         calls = 0
+
         def factory() -> object:
             nonlocal calls
             calls += 1
             return object()
+
         backend = GuardedTelethonReadBackend(client_factory=factory)
         with self.assertRaises(BridgeError) as caught:
-            backend.search(chat=None, sender=None, text="needle", dates=DateRange(), limit=20, cursor="synthetic-cursor", scan_limit=100)
+            backend.search(
+                chat=None,
+                sender=None,
+                text="needle",
+                dates=DateRange(start=None, end=None),
+                limit=20,
+                cursor="synthetic-cursor",
+                scan_limit=100,
+            )
         self.assertEqual(caught.exception.code, "telegram_global_search_continuation_unsupported")
         self.assertEqual(caught.exception.status, 503)
         self.assertEqual(calls, 0)
