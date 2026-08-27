@@ -1,0 +1,37 @@
+name: FINAL5 TASK2 History Secret Adjudication
+
+on:
+  pull_request:
+    paths:
+      - 'tools/history_secret_adjudication.py'
+      - 'tests/test_history_secret_adjudication.py'
+      - '.github/workflows/final5-task2-history-adjudication.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  history-secret-adjudication:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout full history without retained credentials
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Set up Python 3.11
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.11'
+      - name: Compile adjudication prototype and tests
+        run: python -m py_compile tools/history_secret_adjudication.py tests/test_history_secret_adjudication.py
+      - name: Run exact-blob fail-closed adjudication regressions
+        run: python -m unittest -v tests.test_history_secret_adjudication
+      - name: Prove existing secret scanner regressions remain green
+        run: python -m unittest -v tests.test_secret_scan
+      - name: Current-tree secret scan remains authoritative
+        if: always()
+        run: python tools/secret_scan.py --mode current
+      - name: Mandatory full-history scan remains fail-closed
+        if: always()
+        run: python tools/secret_scan.py --mode history
