@@ -287,7 +287,7 @@ class RuntimeBootstrapTests(unittest.TestCase):
             captured["status"] = status
             captured["headers"] = dict(headers)
 
-        with mock.patch("bridge.runtime.build_production_application_from_env", side_effect=RuntimeError("private-detail")):
+        with mock.patch("bridge.runtime_composition.build_production_application_from_env", side_effect=RuntimeError("private-detail")):
             body = b"".join(runtime_wsgi.application({}, start_response))
         self.assertEqual("500 Internal Server Error", captured["status"])
         self.assertNotIn(b"private-detail", body)
