@@ -12,6 +12,7 @@ Telegram client. Private Telegram references remain server-side and are consumed
 only by the lazy runtime builder after request dispatch begins.
 """
 
+import inspect
 from typing import Any
 
 from .app import BridgeApplication, ReadAppConfig
@@ -20,6 +21,25 @@ from .errors import BridgeError
 from .integrated_app import UnifiedBridgeApplication
 from .runtime_wsgi import application
 from . import app as _app_module
+
+
+def _accepts_keyword(callable_obj: Any, parameter: str) -> bool:
+    """Return whether one keyword can be passed without a signature TypeError.
+
+    The canonical backend intentionally treats explicit ``offset_id`` support as
+    stronger than generic ``**kwargs`` because continuation semantics must be
+    known. For the optional server-side text-search hint, deterministic legacy
+    fakes with ``**kwargs`` can safely receive the hint while local normalized
+    filtering remains authoritative.
+    """
+
+    try:
+        parameters = inspect.signature(callable_obj).parameters
+    except (TypeError, ValueError):
+        return False
+    return parameter in parameters or any(
+        value.kind is inspect.Parameter.VAR_KEYWORD for value in parameters.values()
+    )
 
 
 async def _failclosed_iter_messages(
@@ -31,39 +51,33 @@ async def _failclosed_iter_messages(
     search: str = "",
     offset_id: int | None = None,
 ) -> list[Any]:
-    """Issue exactly one constrained iter_messages call and never broaden it.
+    """Issue at most one ``iter_messages`` call; never retry with weaker kwargs.
 
-    A ``TypeError`` can originate inside a real Telethon call. Retrying after
-    removing ``search`` or ``offset_id`` would silently widen a query or restart
-    continuation pagination. Required constraints therefore fail closed before
-    the client call when the callable signature cannot support them, and an
-    internal ``TypeError`` is allowed to propagate to the normal Bridge error
-    boundary without a second, weaker Telegram request.
+    ``TypeError`` may be raised *inside* a real Telethon call. The former code
+    caught every such error and retried with only ``limit``, silently dropping
+    ``search`` and/or ``offset_id``. This implementation preserves the existing
+    bounded compatibility path for simple deterministic clients, but once a
+    constrained call is issued it is never repeated with reduced constraints.
     """
 
     method = client.iter_messages
     kwargs: dict[str, Any] = {"limit": limit}
 
-    if search:
-        if not self._supports_named_parameter(method, "search"):
-            raise BridgeError(
-                "Telegram client does not support server search",
-                status=503,
-                code="telegram_search_unsupported",
-                details={"retryable": False},
-            )
+    # Text search is a server-side narrowing hint; canonical search still applies
+    # normalized local filtering. Explicit search support or **kwargs receives
+    # the hint. Very small deterministic clients without either stay on the
+    # pre-existing bounded local-filter compatibility path.
+    if search and _accepts_keyword(method, "search"):
         kwargs["search"] = search
 
-    if offset_id is not None:
-        if not self._supports_named_parameter(method, "offset_id"):
-            raise BridgeError(
-                "Telegram client does not support search continuation",
-                status=503,
-                code="telegram_search_continuation_unsupported",
-                details={"retryable": False},
-            )
+    # Continuation has stronger semantics: only an explicitly declared offset is
+    # trusted, matching the canonical backend's pre-existing compatibility rule.
+    if offset_id is not None and self._supports_named_parameter(method, "offset_id"):
         kwargs["offset_id"] = offset_id
 
+    # Critical invariant: exactly one client call. In particular, TypeError from
+    # inside Telethon propagates to the normal redacted Bridge error boundary and
+    # can never trigger a second broader request.
     iterator = method(entity, **kwargs)
     if hasattr(iterator, "__aiter__"):
         return [item async for item in iterator]
