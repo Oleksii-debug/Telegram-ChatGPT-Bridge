@@ -129,6 +129,9 @@ class StructuredSafePersistentWriteStore(SecurePersistentWriteStore):
         try:
             self._commit_result(idempotency_key, fingerprint, result, now=ts)
         except Exception:
+            durable_result = self._durable_committed_result(idempotency_key, fingerprint)
+            if durable_result is not None:
+                return CommitResult("COMMITTED", False, fingerprint, durable_result)
             self._record_ambiguous_best_effort(idempotency_key, fingerprint, now=ts)
             raise ReconciliationRequired() from None
         return CommitResult("COMMITTED", False, fingerprint, result)
