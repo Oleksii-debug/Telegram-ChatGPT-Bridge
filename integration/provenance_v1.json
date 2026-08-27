@@ -158,6 +158,7 @@
     "bridge/filenames.py",
     "bridge/integrated_app.py",
     "bridge/phase_aware_write_app.py",
+    "bridge/preparse_rate_guard.py",
     "bridge/runtime_composition.py",
     "bridge/upload_snapshot.py",
     "docs/DEV03_SWARM_READ_HARDENING.md",
@@ -191,6 +192,7 @@
     "tests/test_dev_a_candidate_contracts.py",
     "tests/test_dev_a_integration.py",
     "tests/test_dev_a_provenance.py",
+    "tests/test_final5_task2_preparse_b8_composition.py",
     "tests/test_final5_task2_sqlite_wal_bootstrap.py",
     "tests/test_finalwave22_rate_limit_auth_failclosed.py",
     "tests/test_finalwave22_rate_limit_multiprocess.py",
@@ -333,6 +335,24 @@
         "tests/test_swarm10_global_search_integration.py"
       ],
       "empty_query_fail_closed": true,
+      "production_mutated": false,
+      "deployment_authorized": false
+    },
+    "SWARM10_PREPARSE_B8_COMPOSITION": {
+      "pr": 158,
+      "source_sha": "34ae5ba17cec8c4737fb5e5e4a0ddfebdb17f934",
+      "merge_commit": "bbd5aabcd22ccf9cab2450e81bd48a294f31560c",
+      "first_parent": "7084104a6dfa0e82cc959b1fd321ec63f079ca17",
+      "exact_blob_paths": [
+        "bridge/preparse_rate_guard.py",
+        "bridge/runtime_wsgi.py",
+        "tests/test_final5_task2_preparse_b8_composition.py"
+      ],
+      "excluded_specialist_paths": [
+        ".github/workflows/final5-task2-preparse-b8.yml"
+      ],
+      "source_ci_run_id": 33105270506,
+      "source_ci_job_id": 98633312893,
       "production_mutated": false,
       "deployment_authorized": false
     },
