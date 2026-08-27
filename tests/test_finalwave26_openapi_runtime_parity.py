@@ -16,7 +16,7 @@ from bridge.app import BridgeApplication, ReadAppConfig
 from bridge.integrated_app import UnifiedBridgeApplication, validate_unified_registry
 from bridge.models import Page
 from bridge.security import RateLimitDecision
-from ops.dev06_api_contracts import CANONICAL_ROUTES, build_chatgpt_action_openapi, validate_runtime_parity
+from ops.dev06_api_contracts import ApiExposure, CANONICAL_ROUTES, build_chatgpt_action_openapi, validate_runtime_parity
 from ops.openapi_registry import OPERATIONS, OperationClass
 from ops.telegram_write_adapter import (
     DeterministicFakeTelegramClient,
@@ -146,7 +146,7 @@ class Finalwave26OpenApiRuntimeParityTests(unittest.TestCase):
             if isinstance(operation, dict) and "operationId" in operation
         }
         self.assertEqual(
-            {(route.method, route.path) for route in CANONICAL_ROUTES if route.action_visible},
+            {(route.method, route.path) for route in CANONICAL_ROUTES if route.exposure is ApiExposure.ACTION},
             action_pairs,
         )
         lowered = json.dumps(schema, sort_keys=True).lower()
