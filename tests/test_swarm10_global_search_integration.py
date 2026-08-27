@@ -242,24 +242,22 @@ class _RaisesInsideConstrainedCall:
         raise TypeError("simulated TypeError inside client call")
 
 
-class _NoSearchSupport:
+class _LegacyNoSearchSupport:
     def __init__(self) -> None:
-        self.calls = 0
+        self.calls: list[dict[str, object]] = []
 
     def iter_messages(self, entity: object, *, limit: int) -> list[object]:
-        del entity, limit
-        self.calls += 1
-        return []
+        self.calls.append({"entity": entity, "limit": limit})
+        return ["legacy"]
 
 
-class _NoOffsetSupport:
+class _LegacyNoOffsetSupport:
     def __init__(self) -> None:
-        self.calls = 0
+        self.calls: list[dict[str, object]] = []
 
     def iter_messages(self, entity: object, *, limit: int, search: str = "") -> list[object]:
-        del entity, limit, search
-        self.calls += 1
-        return []
+        self.calls.append({"entity": entity, "limit": limit, "search": search})
+        return ["legacy"]
 
 
 class _SupportedConstraints:
@@ -291,19 +289,17 @@ class Swarm10FailClosedIterMessagesTests(unittest.TestCase):
             [{"entity": "peer", "limit": 25, "search": "needle", "offset_id": 77}],
         )
 
-    def test_missing_search_parameter_fails_before_broad_call(self) -> None:
-        client = _NoSearchSupport()
-        with self.assertRaises(BridgeError) as captured:
-            asyncio.run(self.backend._iter_messages(client, "peer", 25, search="needle"))
-        self.assertEqual(captured.exception.code, "telegram_search_unsupported")
-        self.assertEqual(client.calls, 0)
+    def test_legacy_client_without_search_parameter_is_called_only_once(self) -> None:
+        client = _LegacyNoSearchSupport()
+        result = asyncio.run(self.backend._iter_messages(client, "peer", 25, search="needle"))
+        self.assertEqual(result, ["legacy"])
+        self.assertEqual(client.calls, [{"entity": "peer", "limit": 25}])
 
-    def test_missing_offset_parameter_fails_before_rescan(self) -> None:
-        client = _NoOffsetSupport()
-        with self.assertRaises(BridgeError) as captured:
-            asyncio.run(self.backend._iter_messages(client, "peer", 25, search="needle", offset_id=77))
-        self.assertEqual(captured.exception.code, "telegram_search_continuation_unsupported")
-        self.assertEqual(client.calls, 0)
+    def test_legacy_client_without_offset_parameter_is_called_only_once(self) -> None:
+        client = _LegacyNoOffsetSupport()
+        result = asyncio.run(self.backend._iter_messages(client, "peer", 25, search="needle", offset_id=77))
+        self.assertEqual(result, ["legacy"])
+        self.assertEqual(client.calls, [{"entity": "peer", "limit": 25, "search": "needle"}])
 
     def test_supported_constraints_are_forwarded_exactly_once(self) -> None:
         client = _SupportedConstraints()
