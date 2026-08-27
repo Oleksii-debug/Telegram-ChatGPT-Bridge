@@ -226,6 +226,208 @@ class Swarm10GlobalFilterMergeTests(unittest.TestCase):
         self.assertEqual(captured.exception.code, "global_search_scan_limit_too_small")
 
 
+class _ScopedSearchEntity:
+    id = 300
+
+
+class _ScopedSearchMessage:
+    def __init__(self, message_id: int, text: str = "needle") -> None:
+        self.id = message_id
+        self.message = text
+        self.date = datetime(2026, 8, 27, 12, 0, message_id, tzinfo=timezone.utc)
+
+
+class _ScopedSearchClient:
+    def __init__(self, *, target_ids: set[int] | None = None) -> None:
+        self.calls: list[dict[str, object]] = []
+        self.messages = [_ScopedSearchMessage(message_id) for message_id in range(20, 0, -1)]
+        self.target_ids = set(target_ids or ())
+
+    async def connect(self) -> None:
+        return None
+
+    async def is_user_authorized(self) -> bool:
+        return True
+
+    async def disconnect(self) -> None:
+        return None
+
+    async def get_entity(self, _ref: object) -> _ScopedSearchEntity:
+        return _ScopedSearchEntity()
+
+    def iter_messages(
+        self,
+        entity: object,
+        *,
+        limit: int,
+        search: str = "",
+        offset_id: int | None = None,
+    ) -> list[_ScopedSearchMessage]:
+        self.calls.append(
+            {
+                "entity": entity,
+                "limit": limit,
+                "search": search,
+                "offset_id": offset_id,
+            }
+        )
+        rows = self.messages
+        if offset_id is not None:
+            rows = [row for row in rows if row.id < offset_id]
+        if search:
+            rows = [row for row in rows if search.casefold() in row.message.casefold()]
+        return rows[:limit]
+
+
+class _IgnoresScopedSearchOffset(_ScopedSearchClient):
+    def iter_messages(
+        self,
+        entity: object,
+        *,
+        limit: int,
+        search: str = "",
+        offset_id: int | None = None,
+    ) -> list[_ScopedSearchMessage]:
+        self.calls.append(
+            {
+                "entity": entity,
+                "limit": limit,
+                "search": search,
+                "offset_id": offset_id,
+            }
+        )
+        rows = self.messages
+        if search:
+            rows = [row for row in rows if search.casefold() in row.message.casefold()]
+        return rows[:limit]
+
+
+class _ScopedSearchBackend(TelethonReadBackend):
+    async def _message_record(
+        self,
+        message: _ScopedSearchMessage,
+        chat_id: str,
+        *,
+        require_sender_details: bool = False,
+    ) -> MessageRecord:
+        del require_sender_details
+        if message.id in self.client_factory().target_ids:
+            sender = EntityRef(id="42", kind="user", display_name="Target", username="target")
+        else:
+            sender = EntityRef(id="7", kind="user", display_name="Other", username="other")
+        return MessageRecord(
+            id=message.id,
+            chat_id=chat_id,
+            timestamp=message.date.isoformat().replace("+00:00", "Z"),
+            text=message.message,
+            sender=sender,
+            outgoing=False,
+            reply_to_message_id=None,
+            media=None,
+        )
+
+
+class Swarm10ScopedSearchContinuationTests(unittest.TestCase):
+    @staticmethod
+    def _backend(client: _ScopedSearchClient) -> _ScopedSearchBackend:
+        return _ScopedSearchBackend(
+            client_factory=lambda: client,
+            config=TelethonReadConfig(request_timeout_seconds=2, search_scan_limit=20),
+        )
+
+    def test_second_page_uses_exclusive_server_offset(self) -> None:
+        client = _ScopedSearchClient()
+        backend = self._backend(client)
+        first = backend.search(
+            chat="300",
+            sender=None,
+            text="needle",
+            dates=DateRange(None, None),
+            limit=2,
+            cursor=None,
+            scan_limit=2,
+        )
+        second = backend.search(
+            chat="300",
+            sender=None,
+            text="needle",
+            dates=DateRange(None, None),
+            limit=2,
+            cursor=first.next_cursor,
+            scan_limit=2,
+        )
+        self.assertEqual([20, 19], [item.id for item in first.items])
+        self.assertEqual([18, 17], [item.id for item in second.items])
+        self.assertEqual([None, 19], [call["offset_id"] for call in client.calls])
+
+    def test_cursor_traverses_beyond_the_original_bounded_prefix_without_duplicates(self) -> None:
+        client = _ScopedSearchClient()
+        backend = self._backend(client)
+        cursor = None
+        seen: list[int] = []
+        for _ in range(5):
+            page = backend.search(
+                chat="300",
+                sender=None,
+                text="needle",
+                dates=DateRange(None, None),
+                limit=2,
+                cursor=cursor,
+                scan_limit=2,
+            )
+            seen.extend(item.id for item in page.items)
+            cursor = page.next_cursor
+        self.assertEqual(list(range(20, 10, -1)), seen)
+        self.assertEqual(len(seen), len(set(seen)))
+        self.assertEqual([None, 19, 17, 15, 13], [call["offset_id"] for call in client.calls])
+
+    def test_empty_sparse_pages_keep_advancing_until_sender_match(self) -> None:
+        client = _ScopedSearchClient(target_ids={16})
+        backend = self._backend(client)
+        cursor = None
+        pages: list[list[int]] = []
+        for _ in range(3):
+            page = backend.search(
+                chat="300",
+                sender="@target",
+                text="",
+                dates=DateRange(None, None),
+                limit=1,
+                cursor=cursor,
+                scan_limit=2,
+            )
+            pages.append([item.id for item in page.items])
+            self.assertIsNotNone(page.next_cursor)
+            cursor = page.next_cursor
+        self.assertEqual([[], [], [16]], pages)
+        self.assertEqual([None, 19, 17], [call["offset_id"] for call in client.calls])
+
+    def test_nonadvancing_explicit_offset_fails_closed(self) -> None:
+        client = _IgnoresScopedSearchOffset()
+        backend = self._backend(client)
+        first = backend.search(
+            chat="300",
+            sender=None,
+            text="needle",
+            dates=DateRange(None, None),
+            limit=2,
+            cursor=None,
+            scan_limit=2,
+        )
+        with self.assertRaises(BridgeError) as captured:
+            backend.search(
+                chat="300",
+                sender=None,
+                text="needle",
+                dates=DateRange(None, None),
+                limit=2,
+                cursor=first.next_cursor,
+                scan_limit=2,
+            )
+        self.assertEqual(captured.exception.code, "telegram_search_continuation_not_advanced")
+        self.assertEqual([None, 19], [call["offset_id"] for call in client.calls])
+
+
 class _RaisesInsideConstrainedCall:
     def __init__(self) -> None:
         self.calls: list[dict[str, object]] = []
