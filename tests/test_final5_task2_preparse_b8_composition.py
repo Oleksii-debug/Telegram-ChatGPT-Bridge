@@ -29,6 +29,15 @@ class _CountingLimiter:
         return (9, 180)
 
 
+class _InterruptingLimiter(_CountingLimiter):
+    def consume(self, actor_sha256: str, operation_id: str):
+        with self._lock:
+            self.operations.append(operation_id)
+        if operation_id.startswith("request:"):
+            raise KeyboardInterrupt("synthetic process-control interruption")
+        return super().consume(actor_sha256, operation_id)
+
+
 class _BombInput:
     def read(self, *_args, **_kwargs):
         raise AssertionError("request body must not be read")
@@ -104,6 +113,15 @@ class Final5Task2PreparseB8CompositionTests(unittest.TestCase):
         self.assertEqual(["request:previewTelegramSend"], limiter.operations)
         retry_after = [value for name, value in headers[0] if name.lower() == "retry-after"]
         self.assertEqual(["7"], retry_after)
+
+    def test_process_control_exception_from_request_limiter_propagates(self):
+        limiter = _InterruptingLimiter()
+        auth, app = self._application(limiter)
+        statuses, _headers, start_response = _capture()
+        with self.assertRaises(KeyboardInterrupt):
+            list(app(self._environ(auth, b"xxxx", body=_BombInput()), start_response))
+        self.assertEqual(["request:previewTelegramSend"], limiter.operations)
+        self.assertEqual([], statuses)
 
     def test_wrong_bearer_does_not_consume_quota_or_read_body(self):
         limiter = _CountingLimiter()
