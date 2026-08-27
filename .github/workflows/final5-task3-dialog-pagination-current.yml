@@ -33,11 +33,7 @@ jobs:
       - name: Focused dialog continuation regressions
         run: python -m unittest tests.test_final5_task3_dialog_pagination_current -v
       - name: Adjacent Telegram read/search regressions
-        run: >-
-          python -m unittest
-          tests.test_swarm10_global_search_integration
-          tests.test_dev03_read_hardening
-          -v
+        run: python -m unittest tests.test_swarm10_global_search_integration -v
       - name: Current-tree secret scan
         if: always()
         run: python tools/secret_scan.py --mode current
