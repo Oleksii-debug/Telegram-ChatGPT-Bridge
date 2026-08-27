@@ -1,0 +1,44 @@
+name: FINAL5 TASK2 Terminal Monotonicity R2
+
+on:
+  pull_request:
+    branches:
+      - work3/integration-release-candidate
+    paths:
+      - 'ops/final5_task2_terminal_guard.py'
+      - 'tests/test_final5_task2_terminal_monotonicity_r2.py'
+      - '.github/workflows/final5-task2-terminal-monotonicity-r2.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  terminal-monotonicity-r2:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout full history
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Set up Python 3.11
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: '3.11'
+      - name: Compile focused files
+        run: python -m py_compile ops/write_safety.py ops/final5_task2_terminal_guard.py tests/test_final5_task2_terminal_monotonicity_r2.py tests/test_dev4_write_core.py
+      - name: Run focused terminal-state crash/replay tests
+        run: python -m unittest -v tests.test_final5_task2_terminal_monotonicity_r2
+      - name: Run adjacent canonical write-safety tests
+        run: python -m unittest -v tests.test_dev4_write_core
+      - name: Current-tree secret scan
+        if: always()
+        run: python tools/secret_scan.py --mode current
+      - name: Full-history secret scan
+        if: always()
+        run: python tools/secret_scan.py --mode history
+      - name: No deploy arming
+        if: always()
+        run: |
+          test ! -e .cpanel.yml
+          test ! -e ops/ENABLE_HOSTIQ_AUTO_DEPLOY
