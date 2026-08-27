@@ -1,0 +1,53 @@
+name: FINALWAVE47 Auth Signed File
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  auth-signed-file:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout full history
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+          clean: true
+          lfs: false
+          submodules: false
+      - name: Set up Python 3.11
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.11'
+      - name: Compile auth and private-file boundary
+        run: >-
+          python -m py_compile
+          bridge/security.py
+          bridge/app.py
+          tests/test_finalwave47_auth_signed_file_fuzz.py
+          tests/test_read_app.py
+          tests/test_dev04_private_serving.py
+          tests/test_validation_security.py
+      - name: FINALWAVE-47 adversarial auth and signed-file matrix
+        run: python -m unittest -v tests.test_finalwave47_auth_signed_file_fuzz
+      - name: Inherited auth, file-serving and validation regressions
+        run: >-
+          python -m unittest -v
+          tests.test_read_app
+          tests.test_dev04_private_serving
+          tests.test_validation_security
+          tests.test_dev5_round2_fuzz
+      - name: Validate Action schema remains unchanged
+        run: python tools/build_action_openapi.py --validate-only
+      - name: Current-tree secret scan
+        if: always()
+        run: python tools/secret_scan.py --mode current
+      - name: Full-history secret scan
+        if: always()
+        run: python tools/secret_scan.py --mode history
+      - name: Verify non-deploy specialist boundary
+        if: always()
+        run: test ! -e .cpanel.yml && test ! -e ops/ENABLE_HOSTIQ_AUTO_DEPLOY
