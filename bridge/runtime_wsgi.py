@@ -18,7 +18,7 @@ def application(environ: dict[str, Any], start_response: Callable) -> Iterable[b
     if _default_application is None:
         try:
             from .action_request_guard import ActionRequestGuard
-            from .runtime_composition import build_production_application_from_env
+            from .final5_search_backend import build_production_application_from_env
 
             _default_application = ActionRequestGuard(build_production_application_from_env())
         except Exception:
