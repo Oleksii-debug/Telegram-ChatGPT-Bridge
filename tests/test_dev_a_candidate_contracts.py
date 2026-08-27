@@ -4,6 +4,7 @@ import json
 import os
 import tempfile
 import unittest
+from contextlib import contextmanager
 from pathlib import Path
 from unittest import mock
 
@@ -18,7 +19,7 @@ from ops.candidate_contracts import (
 )
 from ops.openapi_registry import OPERATIONS, OperationClass
 from ops.structured_safe_write import StructuredSafePersistentWriteStore
-from ops.write_safety import ReconciliationRequired
+from ops.write_safety import PersistentWriteStore, ReconciliationRequired
 
 
 class _LateFaultAfterDurableStructuredStore(StructuredSafePersistentWriteStore):
@@ -30,6 +31,32 @@ class _LateFaultAfterDurableStructuredStore(StructuredSafePersistentWriteStore):
 class _FaultBeforeDurableStructuredStore(StructuredSafePersistentWriteStore):
     def _commit_result(self, idempotency_key, fingerprint, result, *, now):
         raise RuntimeError("synthetic local fault before durable commit")
+
+
+class _SeedRow(dict):
+    pass
+
+
+class _SeedConnection:
+    def __init__(self) -> None:
+        self.statements: list[str] = []
+        self.seeded = False
+
+    def executescript(self, script: str) -> None:
+        self.statements.append(script)
+
+    def execute(self, sql: str, parameters=()):
+        normalized = " ".join(sql.split())
+        self.statements.append(normalized)
+        if normalized.startswith("INSERT OR IGNORE INTO meta"):
+            self.seeded = True
+            return self
+        if normalized.startswith("SELECT value FROM meta"):
+            return self
+        raise AssertionError(f"unexpected SQL: {normalized}")
+
+    def fetchone(self):
+        return _SeedRow(value="1") if self.seeded else None
 
 
 class CandidateAcceptanceCoverageTests(unittest.TestCase):
@@ -209,6 +236,23 @@ class RateLimitSidecarRaceIntegrationTests(unittest.TestCase):
             wal.symlink_to(target)
             with self.assertRaises(RuntimeBootstrapError):
                 store._validate_sidecars()
+
+
+class WriteStoreSchemaBootstrapIntegrationTests(unittest.TestCase):
+    def test_schema_version_seed_is_conflict_safe_and_read_back(self):
+        store = object.__new__(PersistentWriteStore)
+        connection = _SeedConnection()
+
+        @contextmanager
+        def connect():
+            yield connection
+
+        store._connect = connect  # type: ignore[method-assign]
+        store._init_schema()
+        inserts = [statement for statement in connection.statements if statement.startswith("INSERT")]
+        self.assertEqual(1, len(inserts))
+        self.assertIn("INSERT OR IGNORE INTO meta", inserts[0])
+        self.assertTrue(any(statement.startswith("SELECT value FROM meta") for statement in connection.statements))
 
 
 if __name__ == "__main__":
