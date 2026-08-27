@@ -30,6 +30,7 @@ from tests.test_audit_round9 import Round9Layout
 
 WRITE_TERMINAL_ADAPT_SHA = "e3e956d555ad12cceae1b7311a6a988c020db58b"
 WRITE_SCHEMA_BOOTSTRAP_ADAPT_SHA = "b4db4749fb0e36a967acd2a7740d463e8104c00f"
+CURRENT_DYNAMIC_CANDIDATE_SHA = "3e7763e99550373e830924e72d58388c23a7caa1"
 
 LEGACY_FILES_SCHEMA = """
 CREATE TABLE files (
@@ -134,6 +135,7 @@ class RollbackMatrixContractTests(unittest.TestCase):
     def _decision(self, **overrides):
         values = dict(
             candidate_sha=CANDIDATE_ANCHOR_SHA,
+            approved_candidate_sha=CANDIDATE_ANCHOR_SHA,
             rollback_target_sha=PREDECESSOR_EVIDENCE_SHA,
             observed_live_previous_sha=PREDECESSOR_EVIDENCE_SHA,
             compatibility_reference_sha=PREDECESSOR_EVIDENCE_SHA,
@@ -176,6 +178,36 @@ class RollbackMatrixContractTests(unittest.TestCase):
     def test_evidence_predecessor_is_blocked_until_audit_security_regression_is_cleared(self):
         decision = self._decision(rollback_target_security_regression_cleared=False)
         self.assertEqual("BLOCKED_ROLLBACK_TARGET_SECURITY_REGRESSION", decision.action)
+
+    def test_any_actual_target_is_blocked_until_security_regression_is_cleared(self):
+        live = "f" * 40
+        decision = self._decision(
+            rollback_target_sha=live,
+            observed_live_previous_sha=live,
+            compatibility_reference_sha=live,
+            target_specific_compatibility_proven=True,
+            rollback_target_security_regression_cleared=False,
+        )
+        self.assertEqual("BLOCKED_ROLLBACK_TARGET_SECURITY_REGRESSION", decision.action)
+
+    def test_current_candidate_binding_is_dynamic_not_module_anchor(self):
+        self.assertNotEqual(CANDIDATE_ANCHOR_SHA, CURRENT_DYNAMIC_CANDIDATE_SHA)
+        decision = self._decision(
+            candidate_sha=CURRENT_DYNAMIC_CANDIDATE_SHA,
+            approved_candidate_sha=CURRENT_DYNAMIC_CANDIDATE_SHA,
+        )
+        self.assertEqual("AUDITOR_GATE_REQUIRED", decision.action)
+
+    def test_wrong_but_well_formed_candidate_sha_is_rejected(self):
+        decision = self._decision(
+            candidate_sha="f" * 40,
+            approved_candidate_sha=CURRENT_DYNAMIC_CANDIDATE_SHA,
+        )
+        self.assertEqual("BLOCKED_CANDIDATE_IDENTITY_MISMATCH", decision.action)
+
+    def test_malformed_approved_candidate_sha_is_rejected(self):
+        with self.assertRaises(RollbackStateContractError):
+            self._decision(approved_candidate_sha="not-a-sha")
 
     def test_complete_nonlive_contract_still_requires_auditor_and_live_evidence(self):
         decision = self._decision(independent_auditor_gate=False)

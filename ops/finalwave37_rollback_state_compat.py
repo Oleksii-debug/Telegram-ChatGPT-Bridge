@@ -16,6 +16,9 @@ from dataclasses import dataclass
 from typing import Iterable
 
 
+# Historical evidence anchor only. It must never be used as the current
+# candidate identity. Current rollback adjudication requires an explicit,
+# independently approved candidate SHA supplied to the decision function.
 CANDIDATE_ANCHOR_SHA = "84691967e5363bc4b88dfae97371d7bf329c105d"
 PREDECESSOR_EVIDENCE_SHA = "00684e834a523f55ea3b61c1a12cb9dc54cfd947"
 FULL_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
@@ -166,6 +169,7 @@ def classify_restore_request(domains: Iterable[str]) -> RollbackPlanDecision:
 def assess_exact_sha_rollback_plan(
     *,
     candidate_sha: str,
+    approved_candidate_sha: str,
     rollback_target_sha: str,
     observed_live_previous_sha: str | None,
     compatibility_reference_sha: str,
@@ -175,10 +179,11 @@ def assess_exact_sha_rollback_plan(
     rollback_target_security_regression_cleared: bool,
     independent_auditor_gate: bool,
 ) -> RollbackPlanDecision:
-    """Fail closed until the exact live predecessor and state contract are proven.
+    """Fail closed until exact candidate, live predecessor and state contract are proven.
 
-    Even a complete result never authorizes production.  Independent Auditor
-    approval and live deployment evidence remain external gates.
+    ``approved_candidate_sha`` must come from the independent source/release gate,
+    not from a mutable module constant or caller-selected label. This function
+    still never authorizes production: live rollback evidence remains external.
     """
     bools = (
         target_specific_compatibility_proven,
@@ -189,11 +194,14 @@ def assess_exact_sha_rollback_plan(
     )
     if any(type(value) is not bool for value in bools):
         raise RollbackStateContractError("rollback evidence flags must be booleans")
-    for value in (candidate_sha, rollback_target_sha, compatibility_reference_sha):
+    for value in (candidate_sha, approved_candidate_sha, rollback_target_sha, compatibility_reference_sha):
         if not isinstance(value, str) or not FULL_SHA_RE.fullmatch(value):
-            raise RollbackStateContractError("candidate/rollback/reference identities must be exact full Git SHAs")
-    if candidate_sha != CANDIDATE_ANCHOR_SHA:
-        return RollbackPlanDecision("BLOCKED_CANDIDATE_IDENTITY_MISMATCH", "plan_not_bound_to_finalwave37_candidate")
+            raise RollbackStateContractError("candidate/approved/rollback/reference identities must be exact full Git SHAs")
+    if candidate_sha != approved_candidate_sha:
+        return RollbackPlanDecision(
+            "BLOCKED_CANDIDATE_IDENTITY_MISMATCH",
+            "plan_candidate_does_not_match_independently_approved_candidate",
+        )
     if observed_live_previous_sha is None:
         return RollbackPlanDecision("BLOCKED_LKG_IDENTITY_REQUIRED", "live_last_known_good_sha_not_observed")
     if not isinstance(observed_live_previous_sha, str) or not FULL_SHA_RE.fullmatch(observed_live_previous_sha):
@@ -217,10 +225,10 @@ def assess_exact_sha_rollback_plan(
         )
     if not forced_smoke_passed:
         return RollbackPlanDecision("BLOCKED_FORCED_SMOKE_REQUIRED", "rollback_forced_smoke_matrix_not_proven")
-    if rollback_target_sha == PREDECESSOR_EVIDENCE_SHA and not rollback_target_security_regression_cleared:
+    if not rollback_target_security_regression_cleared:
         return RollbackPlanDecision(
             "BLOCKED_ROLLBACK_TARGET_SECURITY_REGRESSION",
-            "evidence_predecessor_audit_writer_lacks_current_fail_closed_topology_hardening",
+            "actual_rollback_target_must_clear_current_security_regression_gate",
         )
     if not independent_auditor_gate:
         return RollbackPlanDecision(
