@@ -3,8 +3,10 @@ from __future__ import annotations
 import asyncio
 import unittest
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
+from bridge.errors import BridgeError
 from bridge.final5_global_search_r8 import GlobalContinuation, GlobalSearchR8Backend
 from bridge.models import EntityRef, MessageRecord
 from bridge.validation import DateRange
@@ -38,6 +40,22 @@ class Final5Task3GlobalSearchR8Tests(unittest.TestCase):
                 return ("resolved", peer)
 
         self.assertEqual(asyncio.run(self.backend._input_peer(Client(), fake_types, state)), ("resolved", ("channel", 123)))
+
+    def test_next_offset_rate_prefers_telegram_next_rate(self) -> None:
+        result = SimpleNamespace(next_rate=77)
+        message = SimpleNamespace(date=datetime(2026, 8, 27, 8, 0, tzinfo=timezone.utc))
+        self.assertEqual(self.backend._next_offset_rate(result, message), 77)
+
+    def test_next_offset_rate_falls_back_to_last_message_date(self) -> None:
+        stamp = datetime(2026, 8, 27, 8, 0, tzinfo=timezone.utc)
+        result = SimpleNamespace()
+        message = SimpleNamespace(date=stamp)
+        self.assertEqual(self.backend._next_offset_rate(result, message), int(stamp.timestamp()))
+
+    def test_next_offset_rate_fails_closed_without_rate_or_date(self) -> None:
+        with self.assertRaises(BridgeError) as ctx:
+            self.backend._next_offset_rate(SimpleNamespace(), SimpleNamespace(date=None))
+        self.assertEqual(ctx.exception.code, "telegram_global_rate_missing")
 
     def test_filtered_empty_page_keeps_cursor_and_reaches_older_match(self) -> None:
         other = EntityRef(id="1", kind="user", display_name="Other", username="other")
