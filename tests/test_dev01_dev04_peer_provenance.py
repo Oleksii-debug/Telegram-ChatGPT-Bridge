@@ -23,6 +23,13 @@ EXACT_PATHS = {
     "tests/test_dev04_migration_concurrency.py",
     "tests/test_dev04_private_serving.py",
 }
+# bridge/app.py was intentionally adapted later by the reviewed canonical
+# request-parser hardening commit. Preserve the original DEV04 source set while
+# proving the one later mutation by exact commit/blob identity instead of
+# silently treating all accepted paths as still byte-identical to DEV04.
+CANONICAL_ADAPTATIONS = {
+    "bridge/app.py": "751a9cbf281f3421dcfae3787dbbae1b910bb80b",
+}
 EXCLUDED_WORKFLOW = ".github/workflows/dev04-media-storage-qa.yml"
 
 REPOSITORY_GIT_AVAILABLE = (ROOT / ".git").exists()
@@ -80,8 +87,21 @@ class Dev01Dev04PeerProvenanceTests(unittest.TestCase):
         )
 
     @requires_repository_git
-    def test_all_accepted_paths_are_byte_exact_to_reviewed_dev04_checkpoint(self):
-        for path in sorted(EXACT_PATHS):
+    def test_all_accepted_paths_are_byte_exact_or_exactly_accounted_canonical_adaptations(self):
+        self.assertTrue(set(CANONICAL_ADAPTATIONS).issubset(EXACT_PATHS))
+        for path, commit in sorted(CANONICAL_ADAPTATIONS.items()):
+            with self.subTest(path=path, adaptation_commit=commit):
+                subprocess.run(
+                    ["git", "merge-base", "--is-ancestor", commit, "HEAD"],
+                    cwd=ROOT,
+                    check=True,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+                self.assertEqual(_blob("HEAD", path), _blob(commit, path))
+                self.assertNotEqual(_blob("HEAD", path), _blob(SOURCE_SHA, path))
+
+        for path in sorted(EXACT_PATHS - set(CANONICAL_ADAPTATIONS)):
             with self.subTest(path=path):
                 self.assertEqual(_blob("HEAD", path), _blob(SOURCE_SHA, path))
 
