@@ -25,7 +25,7 @@ class _CountingLimiter:
         with self._lock:
             self.operations.append(operation_id)
         if self.reject_request and operation_id.startswith("request:"):
-            raise EndpointPolicyError("rate_limit_exceeded", status=429, retry_after_seconds=7)
+            raise EndpointPolicyError("rate_limited", status=429, retry_after_seconds=7)
         return (9, 180)
 
 
@@ -100,7 +100,7 @@ class Final5Task2PreparseB8CompositionTests(unittest.TestCase):
         statuses, headers, start_response = _capture()
         body = b"".join(app(self._environ(auth, b"xxxx", body=_BombInput()), start_response))
         self.assertTrue(statuses and statuses[0].startswith("429 "), statuses)
-        self.assertIn(b"rate_limit_exceeded", body)
+        self.assertIn(b"rate_limited", body)
         self.assertEqual(["request:previewTelegramSend"], limiter.operations)
         retry_after = [value for name, value in headers[0] if name.lower() == "retry-after"]
         self.assertEqual(["7"], retry_after)
