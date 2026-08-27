@@ -220,46 +220,75 @@ class PersistentWriteStore:
             con.close()
 
     def _init_schema(self) -> None:
+        managed_data_tables = {"previews", "idempotency"}
         with self._connect() as con:
-            con.executescript(
-                """
-                CREATE TABLE IF NOT EXISTS meta (
-                    key TEXT PRIMARY KEY,
-                    value TEXT NOT NULL
-                );
-                CREATE TABLE IF NOT EXISTS previews (
-                    preview_id TEXT PRIMARY KEY,
-                    token_hash TEXT NOT NULL UNIQUE,
-                    action TEXT NOT NULL,
-                    request_fingerprint TEXT NOT NULL,
-                    payload_json TEXT NOT NULL,
-                    created_at INTEGER NOT NULL,
-                    expires_at INTEGER NOT NULL,
-                    consumed_at INTEGER
-                );
-                CREATE TABLE IF NOT EXISTS idempotency (
-                    key_hash TEXT PRIMARY KEY,
-                    request_fingerprint TEXT NOT NULL,
-                    preview_id TEXT NOT NULL,
-                    state TEXT NOT NULL,
-                    result_json TEXT,
-                    created_at INTEGER NOT NULL,
-                    updated_at INTEGER NOT NULL,
-                    FOREIGN KEY(preview_id) REFERENCES previews(preview_id)
-                );
-                CREATE INDEX IF NOT EXISTS idx_previews_expires ON previews(expires_at);
-                CREATE INDEX IF NOT EXISTS idx_idempotency_state ON idempotency(state);
-                """
-            )
-            con.execute(
-                "INSERT OR IGNORE INTO meta(key,value) VALUES('schema_version',?)",
-                (str(self.SCHEMA_VERSION),),
-            )
-            existing = con.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()
-            if existing is None:
-                raise RuntimeError("write-store schema version could not be initialized")
-            if existing["value"] != str(self.SCHEMA_VERSION):
-                raise RuntimeError("unsupported write-store schema")
+            con.execute("BEGIN IMMEDIATE")
+            try:
+                preexisting_objects = {
+                    (row["name"], row["type"])
+                    for row in con.execute(
+                        "SELECT name, type FROM sqlite_master WHERE name IN ('meta','previews','idempotency','idx_previews_expires','idx_idempotency_state')"
+                    ).fetchall()
+                }
+                preexisting_names = {name for name, _ in preexisting_objects}
+
+                con.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS meta (
+                        key TEXT PRIMARY KEY,
+                        value TEXT NOT NULL
+                    )
+                    """
+                )
+                existing = con.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()
+                if existing is None:
+                    if preexisting_names & managed_data_tables:
+                        raise RuntimeError("write-store schema metadata missing")
+                    con.execute(
+                        "INSERT OR IGNORE INTO meta(key,value) VALUES('schema_version',?)",
+                        (str(self.SCHEMA_VERSION),),
+                    )
+                    existing = con.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()
+                if existing is None:
+                    raise RuntimeError("write-store schema version could not be initialized")
+                if existing["value"] != str(self.SCHEMA_VERSION):
+                    raise RuntimeError("unsupported write-store schema")
+
+                con.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS previews (
+                        preview_id TEXT PRIMARY KEY,
+                        token_hash TEXT NOT NULL UNIQUE,
+                        action TEXT NOT NULL,
+                        request_fingerprint TEXT NOT NULL,
+                        payload_json TEXT NOT NULL,
+                        created_at INTEGER NOT NULL,
+                        expires_at INTEGER NOT NULL,
+                        consumed_at INTEGER
+                    )
+                    """
+                )
+                con.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS idempotency (
+                        key_hash TEXT PRIMARY KEY,
+                        request_fingerprint TEXT NOT NULL,
+                        preview_id TEXT NOT NULL,
+                        state TEXT NOT NULL,
+                        result_json TEXT,
+                        created_at INTEGER NOT NULL,
+                        updated_at INTEGER NOT NULL,
+                        FOREIGN KEY(preview_id) REFERENCES previews(preview_id)
+                    )
+                    """
+                )
+                con.execute("CREATE INDEX IF NOT EXISTS idx_previews_expires ON previews(expires_at)")
+                con.execute("CREATE INDEX IF NOT EXISTS idx_idempotency_state ON idempotency(state)")
+                con.commit()
+            except Exception:
+                if con.in_transaction:
+                    con.rollback()
+                raise
 
     @staticmethod
     def _token_hash(token: str) -> str:
