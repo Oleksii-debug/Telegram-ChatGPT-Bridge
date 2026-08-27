@@ -417,6 +417,11 @@ class _ReadSessionLockedClient:
         finally:
             self._release_lock()
 
+    async def __call__(self, request: Any) -> Any:
+        """Forward raw Telethon requests while retaining the session lock."""
+
+        return await self._client(request)
+
     def _release_lock(self) -> None:
         lock, self._lock = self._lock, None
         if lock is not None:

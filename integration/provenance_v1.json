@@ -151,6 +151,7 @@
     ".github/workflows/finalwave37-rollback-state.yml",
     ".github/workflows/finalwave38-runtime-composition.yml",
     ".github/workflows/finalwave42.yml",
+    ".secret-history-adjudications.json",
     "bridge/__init__.py",
     "bridge/action_request_guard.py",
     "bridge/file_access.py",
@@ -190,6 +191,7 @@
     "tests/test_dev_a_candidate_contracts.py",
     "tests/test_dev_a_integration.py",
     "tests/test_dev_a_provenance.py",
+    "tests/test_final5_task2_sqlite_wal_bootstrap.py",
     "tests/test_finalwave22_rate_limit_auth_failclosed.py",
     "tests/test_finalwave22_rate_limit_multiprocess.py",
     "tests/test_finalwave26_deploy_recovery_diagnostics.py",
@@ -201,6 +203,10 @@
     "tests/test_finalwave42_public_error_privacy.py",
     "tests/test_finalwave46_request_parser_fuzz.py",
     "tests/test_finalwave46_request_parser_resilience.py",
+    "tests/test_history_secret_adjudication.py",
+    "tests/test_swarm10_global_search_integration.py",
+    "tools/history_secret_adjudication.py",
+    "tools/secret_scan.py",
     "tools/verify_integration_provenance.py"
   ],
   "swarm_integrations": {
@@ -289,6 +295,57 @@
       ],
       "production_runtime_modified": false,
       "canonical_runtime_modified": true,
+      "production_mutated": false,
+      "deployment_authorized": false
+    },
+    "SWARM10_HISTORY_SECRET_ADJUDICATION": {
+      "pr": 111,
+      "source_sha": "5b053f4ff291b827fede302373b82d32a53a389a",
+      "disposition": "ADAPTED_FAIL_CLOSED",
+      "adapted_paths": [
+        ".secret-history-adjudications.json",
+        "tests/test_history_secret_adjudication.py",
+        "tools/history_secret_adjudication.py",
+        "tools/secret_scan.py"
+      ],
+      "exact_historical_blob_count": 7,
+      "private_values_recorded": false,
+      "production_mutated": false,
+      "deployment_authorized": false
+    },
+    "SWARM10_GLOBAL_SEARCH_CONTINUATION": {
+      "pr": 127,
+      "source_sha": "935baaf95d43623c5f3a1b24ad574f8e98a54359",
+      "disposition": "ADAPTED_AND_PRODUCTION_WIRED",
+      "adapted_paths": [
+        "bridge/backend.py",
+        "bridge/runtime.py",
+        "tests/test_swarm10_global_search_integration.py"
+      ],
+      "empty_query_fail_closed": true,
+      "production_mutated": false,
+      "deployment_authorized": false
+    },
+    "SWARM10_PRIVATE_FILE_SNAPSHOT": {
+      "pr": 124,
+      "source_sha": "dad2b559358a5c7374308a68cd8919d3732cd921",
+      "disposition": "ADAPTED",
+      "adapted_paths": [
+        "bridge/file_access.py",
+        "tests/test_dev04_private_serving.py"
+      ],
+      "production_mutated": false,
+      "deployment_authorized": false
+    },
+    "SWARM10_SQLITE_WAL_BOOTSTRAP": {
+      "pr": 125,
+      "source_sha": "a9c3a660b34f0541bf6f80ab3b1813a5bfbc5285",
+      "disposition": "ADAPTED",
+      "adapted_paths": [
+        "bridge/storage.py",
+        "tests/test_dev04_migration_concurrency.py",
+        "tests/test_final5_task2_sqlite_wal_bootstrap.py"
+      ],
       "production_mutated": false,
       "deployment_authorized": false
     }

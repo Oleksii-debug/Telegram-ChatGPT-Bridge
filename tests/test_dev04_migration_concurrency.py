@@ -49,8 +49,7 @@ class ConcurrentFileRegistryMigrationTests(unittest.TestCase):
             )
             connection.commit()
 
-    def test_two_workers_serialize_legacy_origin_key_migration(self) -> None:
-        self._create_legacy_schema()
+    def _run_workers(self, count: int) -> tuple[list[str], list[int | None]]:
         context = multiprocessing.get_context("fork") if "fork" in multiprocessing.get_all_start_methods() else multiprocessing.get_context("spawn")
         start_event = context.Event()
         result_queue = context.Queue()
@@ -59,7 +58,7 @@ class ConcurrentFileRegistryMigrationTests(unittest.TestCase):
                 target=_open_store_worker,
                 args=(str(self.db_path), str(self.root), start_event, result_queue),
             )
-            for _ in range(2)
+            for _ in range(count)
         ]
         for worker in workers:
             worker.start()
@@ -68,12 +67,32 @@ class ConcurrentFileRegistryMigrationTests(unittest.TestCase):
             worker.join(15)
 
         results = [result_queue.get(timeout=3) for _ in workers]
+        return results, [worker.exitcode for worker in workers]
+
+    def test_two_workers_serialize_legacy_origin_key_migration(self) -> None:
+        self._create_legacy_schema()
+        results, exitcodes = self._run_workers(2)
+
         self.assertEqual(results.count("ok"), 2, results)
-        self.assertTrue(all(worker.exitcode == 0 for worker in workers), [worker.exitcode for worker in workers])
+        self.assertTrue(all(code == 0 for code in exitcodes), exitcodes)
 
         with sqlite3.connect(str(self.db_path)) as connection:
             columns = [str(row[1]) for row in connection.execute("PRAGMA table_info(files)")]
             indexes = [str(row[1]) for row in connection.execute("PRAGMA index_list(files)")]
+        self.assertEqual(columns.count("origin_key"), 1)
+        self.assertIn("files_origin_key_unique", indexes)
+
+    def test_four_workers_share_fresh_file_registry_bootstrap(self) -> None:
+        results, exitcodes = self._run_workers(4)
+
+        self.assertEqual(results.count("ok"), 4, results)
+        self.assertTrue(all(code == 0 for code in exitcodes), exitcodes)
+
+        with sqlite3.connect(str(self.db_path)) as connection:
+            mode = connection.execute("PRAGMA journal_mode").fetchone()
+            columns = [str(row[1]) for row in connection.execute("PRAGMA table_info(files)")]
+            indexes = [str(row[1]) for row in connection.execute("PRAGMA index_list(files)")]
+        self.assertEqual(str(mode[0]).lower(), "wal")
         self.assertEqual(columns.count("origin_key"), 1)
         self.assertIn("files_origin_key_unique", indexes)
 

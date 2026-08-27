@@ -1,8 +1,8 @@
 """Descriptor-bound access to registered private files.
 
 The file registry intentionally exposes opaque references, not filesystem paths.
-This module closes the remaining path time-of-check/time-of-use gap for callers
-that must stream a registered file after its registry metadata has been checked.
+This module closes path time-of-check/time-of-use gaps for callers that must
+stream a registered file after its registry metadata has been checked.
 """
 
 from __future__ import annotations
@@ -11,6 +11,7 @@ import hashlib
 import os
 import secrets
 import stat
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import BinaryIO
@@ -20,7 +21,7 @@ from .storage import FileRecord, FileRecordStore
 
 @dataclass
 class VerifiedPrivateFile:
-    """A registry record pinned to one already-verified open file descriptor."""
+    """A registry record pinned to one immutable-by-path verified byte snapshot."""
 
     record: FileRecord
     handle: BinaryIO
@@ -84,32 +85,53 @@ def _open_beneath_private_root(root: Path, relative: Path) -> int:
         os.close(current_fd)
 
 
-def _hash_handle(handle: BinaryIO, *, expected_size: int) -> str | None:
+def _snapshot_verified_handle(
+    source: BinaryIO,
+    *,
+    expected_size: int,
+    expected_sha256: str,
+    snapshot_dir: Path,
+) -> BinaryIO | None:
+    """Copy and verify source bytes into an unlinked private snapshot."""
+
     digest = hashlib.sha256()
     total = 0
-    handle.seek(0)
-    while True:
-        chunk = handle.read(1024 * 1024)
-        if not chunk:
-            break
-        total += len(chunk)
-        if total > expected_size:
+    snapshot: BinaryIO | None = None
+    try:
+        snapshot = tempfile.TemporaryFile(mode="w+b", dir=snapshot_dir)
+        source.seek(0)
+        while True:
+            chunk = source.read(1024 * 1024)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > expected_size:
+                snapshot.close()
+                return None
+            digest.update(chunk)
+            snapshot.write(chunk)
+        if total != expected_size or not secrets.compare_digest(digest.hexdigest(), expected_sha256):
+            snapshot.close()
             return None
-        digest.update(chunk)
-    if total != expected_size:
+        snapshot.flush()
+        os.fsync(snapshot.fileno())
+        snapshot.seek(0)
+        return snapshot
+    except (OSError, ValueError):
+        if snapshot is not None and not snapshot.closed:
+            snapshot.close()
         return None
-    handle.seek(0)
-    return digest.hexdigest()
 
 
 def open_verified_file(store: FileRecordStore, file_ref: str) -> VerifiedPrivateFile | None:
-    """Return an open descriptor that remains bound to the verified file inode.
+    """Return a verified private byte snapshot for streaming.
 
     ``FileRecordStore.get`` revalidates registry topology/hash first. We then
     open the recorded path through owner-private directory descriptors with
-    ``O_NOFOLLOW`` where available and independently revalidate topology,
-    size and SHA-256 on that exact descriptor. Callers must stream from the
-    returned handle rather than reopen ``record.path``.
+    ``O_NOFOLLOW`` where available and independently validate topology and
+    identity on that exact descriptor. Bytes are copied while hashing into an
+    unlinked private temporary file, so later writes to the registered inode
+    cannot alter the returned stream.
     """
 
     record = store.get(file_ref)
@@ -121,7 +143,8 @@ def open_verified_file(store: FileRecordStore, file_ref: str) -> VerifiedPrivate
         return None
 
     fd: int | None = None
-    handle: BinaryIO | None = None
+    source: BinaryIO | None = None
+    snapshot: BinaryIO | None = None
     try:
         fd = _open_beneath_private_root(store.root, relative)
         info_before = os.fstat(fd)
@@ -132,28 +155,36 @@ def open_verified_file(store: FileRecordStore, file_ref: str) -> VerifiedPrivate
         if info_before.st_size != record.size:
             return None
 
-        handle = os.fdopen(fd, "rb", closefd=True)
+        source = os.fdopen(fd, "rb", closefd=True)
         fd = None
-        digest = _hash_handle(handle, expected_size=record.size)
-        if digest is None or not secrets.compare_digest(digest, record.sha256):
-            handle.close()
+        snapshot = _snapshot_verified_handle(
+            source,
+            expected_size=record.size,
+            expected_sha256=record.sha256,
+            snapshot_dir=store.root,
+        )
+        if snapshot is None:
             return None
 
-        info_after = os.fstat(handle.fileno())
+        info_after = os.fstat(source.fileno())
         if (
             info_after.st_dev != info_before.st_dev
             or info_after.st_ino != info_before.st_ino
             or info_after.st_nlink != 1
             or info_after.st_size != record.size
         ):
-            handle.close()
+            snapshot.close()
             return None
-        return VerifiedPrivateFile(record=record, handle=handle)
+        source.close()
+        source = None
+        return VerifiedPrivateFile(record=record, handle=snapshot)
     except (OSError, ValueError):
-        if handle is not None and not handle.closed:
-            handle.close()
+        if snapshot is not None and not snapshot.closed:
+            snapshot.close()
         return None
     finally:
+        if source is not None and not source.closed:
+            source.close()
         if fd is not None:
             try:
                 os.close(fd)

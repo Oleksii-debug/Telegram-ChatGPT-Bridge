@@ -59,7 +59,13 @@ def _category(path: str, size: int) -> str:
         and name.endswith((".json", ".md"))
     ):
         return "sanitized_metadata"
-    if name in {"readme.md", "recovery_baseline.md", ".gitignore", ".secret-scan-allowlist.json"}:
+    if name in {
+        "readme.md",
+        "recovery_baseline.md",
+        ".gitignore",
+        ".secret-scan-allowlist.json",
+        ".secret-history-adjudications.json",
+    }:
         return "sanitized_metadata"
     raise SafetyError("unreviewed application-root file class")
 

@@ -22,6 +22,37 @@ _JOB_ID_RE = re.compile(r"^[A-Za-z0-9_-]{16,128}$")
 _ITEM_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 _CODE_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 _ORIGIN_KEY_RE = re.compile(r"^dl_[0-9a-f]{64}$")
+_SQLITE_TIMEOUT_SECONDS = 8.0
+_SQLITE_BUSY_RETRY_SECONDS = 0.025
+_SQLITE_BUSY_CODES = {
+    getattr(sqlite3, "SQLITE_BUSY", 5),
+    getattr(sqlite3, "SQLITE_LOCKED", 6),
+}
+
+
+def _sqlite_lock_contention(exc: sqlite3.OperationalError) -> bool:
+    """Recognize SQLite busy/locked errors by numeric code, never message text."""
+
+    code = getattr(exc, "sqlite_errorcode", None)
+    return isinstance(code, int) and (code & 0xFF) in _SQLITE_BUSY_CODES
+
+
+def _configure_sqlite_connection(connection: sqlite3.Connection) -> None:
+    """Enable WAL with a bounded retry during concurrent cold bootstrap."""
+
+    connection.execute(f"PRAGMA busy_timeout={int(_SQLITE_TIMEOUT_SECONDS * 1000)}")
+    deadline = time.monotonic() + _SQLITE_TIMEOUT_SECONDS
+    while True:
+        try:
+            row = connection.execute("PRAGMA journal_mode=WAL").fetchone()
+            if not row or str(row[0]).lower() != "wal":
+                raise sqlite3.OperationalError("SQLite WAL mode was not enabled")
+            break
+        except sqlite3.OperationalError as exc:
+            if not _sqlite_lock_contention(exc) or time.monotonic() >= deadline:
+                raise
+            time.sleep(_SQLITE_BUSY_RETRY_SECONDS)
+    connection.execute("PRAGMA synchronous=FULL")
 
 
 @dataclass(frozen=True)
@@ -86,10 +117,9 @@ class FileRecordStore:
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
-        connection = sqlite3.connect(str(self.db_path), timeout=8.0)
+        connection = sqlite3.connect(str(self.db_path), timeout=_SQLITE_TIMEOUT_SECONDS)
         try:
-            connection.execute("PRAGMA journal_mode=WAL")
-            connection.execute("PRAGMA synchronous=FULL")
+            _configure_sqlite_connection(connection)
             yield connection
         finally:
             connection.close()
@@ -255,10 +285,9 @@ class CheckpointStore:
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
-        connection = sqlite3.connect(str(self.db_path), timeout=8.0)
+        connection = sqlite3.connect(str(self.db_path), timeout=_SQLITE_TIMEOUT_SECONDS)
         try:
-            connection.execute("PRAGMA journal_mode=WAL")
-            connection.execute("PRAGMA synchronous=FULL")
+            _configure_sqlite_connection(connection)
             yield connection
         finally:
             connection.close()

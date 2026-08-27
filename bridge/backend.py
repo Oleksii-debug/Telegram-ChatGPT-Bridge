@@ -14,7 +14,7 @@ import inspect
 import unicodedata
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, AsyncIterator, Awaitable, Callable, Protocol
 
 from .errors import BridgeError
@@ -94,6 +94,16 @@ class TelethonReadConfig:
         ):
             if isinstance(value, bool) or not isinstance(value, int) or not low <= value <= high:
                 raise ValueError(f"{name} is outside the safe range")
+
+
+@dataclass(frozen=True)
+class _GlobalSearchContinuation:
+    """Restart-safe, non-secret messages.searchGlobal continuation state."""
+
+    offset_id: int
+    peer_kind: str
+    peer_id: int
+    offset_rate: int
 
 
 class TelethonReadBackend:
@@ -589,6 +599,535 @@ class TelethonReadBackend:
 
         return self._run(work())
 
+    @staticmethod
+    def _looks_like_username(ref: str) -> bool:
+        candidate = ref.lstrip("@")
+        return bool(candidate) and len(candidate) <= 32 and all(
+            character.isascii() and (character.isalnum() or character == "_")
+            for character in candidate
+        )
+
+    async def _resolve_search_sender(
+        self,
+        client: Any,
+        ref: str,
+        *,
+        dialogs: list[Any] | None = None,
+    ) -> Any:
+        """Resolve a person once so bounded scans cannot silently lose identity."""
+
+        raw = ref.strip()
+        needle = normalize_search_text(raw.lstrip("@"))
+        if not needle:
+            raise BridgeError("Sender is required", code="invalid_sender")
+
+        direct_hint = raw.startswith("@") or raw.lstrip("-").isdigit() or self._looks_like_username(raw)
+        if direct_hint:
+            target: Any = int(raw) if raw.lstrip("-").isdigit() else raw.lstrip("@")
+            getter = getattr(client, "get_entity", None)
+            if callable(getter):
+                try:
+                    entity = await self._maybe_await(getter(target))
+                except Exception as exc:
+                    if not (isinstance(exc, ValueError) or exc.__class__.__name__ in self._ENTITY_NOT_FOUND_ERRORS):
+                        raise
+                else:
+                    if self._entity_kind(entity) != "user":
+                        raise BridgeError("Sender reference is not a person", code="sender_not_person")
+                    return entity
+
+        source_dialogs = dialogs
+        if source_dialogs is None:
+            source_dialogs = await self._iter_dialogs(client, self.config.dialog_scan_limit + 1)
+            if len(source_dialogs) > self.config.dialog_scan_limit:
+                raise BridgeError(
+                    "Sender lookup exceeds the configured dialog bound",
+                    status=400,
+                    code="sender_lookup_limit_exceeded",
+                    details={"retryable": False},
+                )
+
+        ranked: dict[str, tuple[int, Any]] = {}
+        for dialog in source_dialogs:
+            entity = getattr(dialog, "entity", dialog)
+            if self._entity_kind(entity) != "user":
+                continue
+            entity_id = str(getattr(entity, "id", ""))
+            username = normalize_search_text(str(getattr(entity, "username", None) or ""))
+            display_name = normalize_search_text(self._entity_title(entity))
+            exact = needle in {normalize_search_text(entity_id), username, display_name}
+            combined = normalize_search_text(
+                f"{entity_id} {getattr(entity, 'username', None) or ''} {self._entity_title(entity)}"
+            )
+            score = 2 if exact else 1 if needle in combined else 0
+            if score:
+                key = entity_id or f"object:{id(entity)}"
+                previous = ranked.get(key)
+                if previous is None or score > previous[0]:
+                    ranked[key] = (score, entity)
+
+        if ranked:
+            best_score = max(score for score, _ in ranked.values())
+            best = [entity for score, entity in ranked.values() if score == best_score]
+            if len(best) == 1:
+                return best[0]
+            raise BridgeError(
+                "Sender reference is ambiguous",
+                code="sender_ambiguous",
+                details={"match_count": len(best)},
+            )
+        raise BridgeError("Sender not found", status=404, code="sender_not_found")
+
+    @classmethod
+    def _bind_resolved_sender(cls, record: MessageRecord, sender_entity: Any) -> MessageRecord | None:
+        expected_id = str(getattr(sender_entity, "id", ""))
+        if not expected_id:
+            raise BridgeError(
+                "Resolved sender has no stable identifier",
+                status=502,
+                code="telegram_sender_identity_invalid",
+            )
+        if record.sender is not None and record.sender.id and record.sender.id != expected_id:
+            return None
+        return MessageRecord(
+            id=record.id,
+            chat_id=record.chat_id,
+            timestamp=record.timestamp,
+            text=record.text,
+            sender=EntityRef(
+                id=expected_id,
+                kind=cls._entity_kind(sender_entity),
+                display_name=cls._entity_title(sender_entity),
+                username=cls._optional_text(getattr(sender_entity, "username", None)),
+            ),
+            outgoing=record.outgoing,
+            reply_to_message_id=record.reply_to_message_id,
+            media=record.media,
+        )
+
+    @staticmethod
+    def _global_peer_parts(message: Any) -> tuple[str, int]:
+        peer = getattr(message, "peer_id", None)
+        for kind, attribute in (("user", "user_id"), ("chat", "chat_id"), ("channel", "channel_id")):
+            value = getattr(peer, attribute, None)
+            if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+                return kind, value
+        raise BridgeError(
+            "Telegram global result lacks a stable peer",
+            status=502,
+            code="telegram_global_peer_missing",
+        )
+
+    @staticmethod
+    def _next_global_offset_rate(result: Any, last_message: Any) -> int:
+        rate = getattr(result, "next_rate", None)
+        if rate is not None:
+            if isinstance(rate, bool) or not isinstance(rate, int) or rate < 0:
+                raise BridgeError(
+                    "Telegram global search returned an invalid continuation rate",
+                    status=502,
+                    code="telegram_global_rate_invalid",
+                )
+            return rate
+
+        stamp = getattr(last_message, "date", None)
+        if isinstance(stamp, datetime):
+            if stamp.tzinfo is None:
+                stamp = stamp.replace(tzinfo=timezone.utc)
+            value = int(stamp.timestamp())
+        elif isinstance(stamp, bool) or not isinstance(stamp, int):
+            raise BridgeError(
+                "Telegram global search continuation lacks a usable message date",
+                status=502,
+                code="telegram_global_rate_missing",
+            )
+        else:
+            value = stamp
+        if value < 0:
+            raise BridgeError(
+                "Telegram global search continuation has an invalid message date",
+                status=502,
+                code="telegram_global_rate_invalid",
+            )
+        return value
+
+    @classmethod
+    def _decode_global_cursor(
+        cls,
+        token: str | None,
+        signature: str,
+    ) -> _GlobalSearchContinuation | None:
+        decoded = decode_cursor(token)
+        if decoded is None:
+            return None
+        if (
+            set(decoded) != {"v", "scope", "sig", "tg"}
+            or decoded.get("v") != 3
+            or decoded.get("scope") != "search-global"
+            or decoded.get("sig") != signature
+        ):
+            raise cls._invalid_cursor()
+        tg = decoded.get("tg")
+        if not isinstance(tg, dict) or set(tg) != {"offset_id", "peer_kind", "peer_id", "offset_rate"}:
+            raise cls._invalid_cursor()
+        offset_id = tg["offset_id"]
+        peer_kind = tg["peer_kind"]
+        peer_id = tg["peer_id"]
+        offset_rate = tg["offset_rate"]
+        if isinstance(offset_id, bool) or not isinstance(offset_id, int) or offset_id <= 0:
+            raise cls._invalid_cursor()
+        if peer_kind not in {"user", "chat", "channel"}:
+            raise cls._invalid_cursor()
+        if isinstance(peer_id, bool) or not isinstance(peer_id, int) or peer_id <= 0:
+            raise cls._invalid_cursor()
+        if isinstance(offset_rate, bool) or not isinstance(offset_rate, int) or offset_rate < 0:
+            raise cls._invalid_cursor()
+        return _GlobalSearchContinuation(offset_id, peer_kind, peer_id, offset_rate)
+
+    @staticmethod
+    def _encode_global_cursor(signature: str, state: _GlobalSearchContinuation) -> str:
+        return encode_cursor(
+            {
+                "v": 3,
+                "scope": "search-global",
+                "sig": signature,
+                "tg": {
+                    "offset_id": state.offset_id,
+                    "peer_kind": state.peer_kind,
+                    "peer_id": state.peer_id,
+                    "offset_rate": state.offset_rate,
+                },
+            }
+        )
+
+    @staticmethod
+    async def _restore_global_input_peer(
+        client: Any,
+        types: Any,
+        state: _GlobalSearchContinuation | None,
+    ) -> Any:
+        if state is None:
+            return types.InputPeerEmpty()
+        constructor = {
+            "user": types.PeerUser,
+            "chat": types.PeerChat,
+            "channel": types.PeerChannel,
+        }[state.peer_kind]
+        resolver = getattr(client, "get_input_entity", None)
+        if not callable(resolver):
+            raise BridgeError(
+                "Telegram client cannot restore the global continuation peer",
+                status=503,
+                code="telegram_global_peer_restore_unsupported",
+            )
+        return await TelethonReadBackend._maybe_await(resolver(constructor(state.peer_id)))
+
+    async def _search_global_chunk(
+        self,
+        client: Any,
+        *,
+        query: str,
+        limit: int,
+        state: _GlobalSearchContinuation | None,
+        max_date: datetime | None,
+    ) -> tuple[list[Any], _GlobalSearchContinuation | None]:
+        if not query:
+            raise BridgeError(
+                "Telegram global text search requires a non-empty query",
+                status=400,
+                code="telegram_global_query_empty",
+            )
+        try:
+            from telethon import functions, types
+        except Exception as exc:
+            raise BridgeError(
+                "Telethon global search support is unavailable",
+                status=503,
+                code="telegram_global_search_unsupported",
+            ) from exc
+        peer = await self._restore_global_input_peer(client, types, state)
+        request = functions.messages.SearchGlobalRequest(
+            q=query,
+            filter=types.InputMessagesFilterEmpty(),
+            min_date=None,
+            max_date=max_date,
+            offset_rate=0 if state is None else state.offset_rate,
+            offset_peer=peer,
+            offset_id=0 if state is None else state.offset_id,
+            limit=limit,
+        )
+        caller = getattr(client, "__call__", None)
+        if not callable(caller):
+            raise BridgeError(
+                "Telegram client does not support raw global search",
+                status=503,
+                code="telegram_global_search_unsupported",
+            )
+        result = await self._maybe_await(client(request))
+        messages = list(getattr(result, "messages", ()) or ())
+        if not messages:
+            return [], None
+        last = messages[-1]
+        message_id = getattr(last, "id", None)
+        if isinstance(message_id, bool) or not isinstance(message_id, int) or message_id <= 0:
+            raise BridgeError(
+                "Telegram global result lacks a stable message identifier",
+                status=502,
+                code="telegram_global_message_id_invalid",
+            )
+        peer_kind, peer_id = self._global_peer_parts(last)
+        return messages, _GlobalSearchContinuation(
+            message_id,
+            peer_kind,
+            peer_id,
+            self._next_global_offset_rate(result, last),
+        )
+
+    async def _global_text_search(
+        self,
+        client: Any,
+        *,
+        sender_entity: Any | None,
+        sender_cf: str,
+        needle: str,
+        server_query: str,
+        dates: DateRange,
+        limit: int,
+        cursor: str | None,
+        scan_limit: int,
+    ) -> Page:
+        signature = self._cursor_signature(
+            "search-global-v3",
+            sender_cf,
+            needle,
+            canonical_timestamp(dates.start) or "",
+            canonical_timestamp(dates.end) or "",
+            str(scan_limit),
+        )
+        state = self._decode_global_cursor(cursor, signature)
+        budget = min(scan_limit, self.config.search_scan_limit)
+        max_date = dates.end + timedelta(seconds=1) if dates.end is not None else None
+        scanned = 0
+        output: list[MessageRecord] = []
+        exhausted = False
+        while len(output) < limit and scanned < budget:
+            remaining = min(limit - len(output), budget - scanned, 100)
+            raw, next_state = await self._search_global_chunk(
+                client,
+                query=server_query,
+                limit=remaining,
+                state=state,
+                max_date=max_date,
+            )
+            scanned += len(raw)
+            if not raw:
+                exhausted = True
+                state = None
+                break
+            for message in raw:
+                record = await self._message_record(
+                    message,
+                    str(getattr(message, "chat_id", None) or "global"),
+                )
+                if sender_entity is not None:
+                    bound = self._bind_resolved_sender(record, sender_entity)
+                    if bound is None:
+                        continue
+                    record = bound
+                stamp = datetime.fromisoformat(record.timestamp.replace("Z", "+00:00"))
+                if not dates.contains(stamp):
+                    continue
+                if needle and needle not in normalize_search_text(record.text):
+                    continue
+                output.append(record)
+            state = next_state
+            if state is None:
+                exhausted = True
+                break
+        next_cursor = None if exhausted or state is None else self._encode_global_cursor(signature, state)
+        return Page(tuple(output), next_cursor, scanned)
+
+    async def _iter_dialog_search_one(
+        self,
+        client: Any,
+        entity: Any,
+        *,
+        sender_entity: Any | None,
+        offset_id: int | None,
+        offset_date: datetime | None,
+    ) -> list[Any]:
+        method = client.iter_messages
+        kwargs: dict[str, Any] = {"limit": 1}
+        if sender_entity is not None:
+            if not self._supports_named_parameter(method, "from_user"):
+                raise BridgeError(
+                    "Telegram client does not support person-constrained search",
+                    status=503,
+                    code="telegram_global_sender_unsupported",
+                )
+            kwargs["from_user"] = sender_entity
+        if offset_id is not None:
+            if not self._supports_named_parameter(method, "offset_id"):
+                raise BridgeError(
+                    "Telegram client does not support search continuation",
+                    status=503,
+                    code="telegram_search_continuation_unsupported",
+                )
+            kwargs["offset_id"] = offset_id
+        if offset_date is not None:
+            if not self._supports_named_parameter(method, "offset_date"):
+                raise BridgeError(
+                    "Telegram client does not support date-bounded search",
+                    status=503,
+                    code="telegram_search_date_unsupported",
+                )
+            kwargs["offset_date"] = offset_date
+        iterator = method(entity, **kwargs)
+        if hasattr(iterator, "__aiter__"):
+            return [message async for message in iterator]
+        return list(iterator)
+
+    async def _global_filter_search(
+        self,
+        client: Any,
+        *,
+        dialogs: list[Any],
+        sender_entity: Any | None,
+        sender_cf: str,
+        dates: DateRange,
+        limit: int,
+        cursor: str | None,
+        scan_limit: int,
+    ) -> Page:
+        """Merge one bounded per-dialog stream when searchGlobal cannot accept q=""."""
+
+        signature = self._cursor_signature(
+            "search-global-dialogs-v1",
+            sender_cf,
+            canonical_timestamp(dates.start) or "",
+            canonical_timestamp(dates.end) or "",
+            str(scan_limit),
+        )
+        boundary = self._message_boundary(cursor, "search-global-dialogs", signature)
+        budget = min(scan_limit, self.config.search_scan_limit)
+        entities: list[Any] = []
+        seen: set[tuple[str, str]] = set()
+        for dialog in dialogs:
+            entity = getattr(dialog, "entity", dialog)
+            identity = (self._entity_kind(entity), str(getattr(entity, "id", "")))
+            if not identity[1] or identity in seen:
+                continue
+            last_date = getattr(getattr(dialog, "message", None), "date", None)
+            if dates.start is not None and isinstance(last_date, datetime):
+                normalized = last_date if last_date.tzinfo else last_date.replace(tzinfo=timezone.utc)
+                if normalized.astimezone(timezone.utc) < dates.start:
+                    continue
+            seen.add(identity)
+            entities.append(entity)
+
+        if len(entities) > budget:
+            raise BridgeError(
+                "Global filter search needs a larger scan_limit to cover every dialog truthfully",
+                status=400,
+                code="global_search_scan_limit_too_small",
+                details={"limit": budget, "count": len(entities), "retryable": False},
+            )
+
+        upper_dates = [value for value in (dates.end,) if value is not None]
+        if boundary is not None:
+            upper_dates.append(datetime.fromisoformat(boundary[0].replace("Z", "+00:00")))
+        offset_date = min(upper_dates) + timedelta(seconds=1) if upper_dates else None
+        scanned = 0
+        budget_exhausted = False
+        heads: dict[int, tuple[Any, MessageRecord, int]] = {}
+
+        async def advance(index: int, offset_id: int | None) -> tuple[Any, MessageRecord, int] | None:
+            nonlocal scanned, budget_exhausted
+            entity = entities[index]
+            current_offset = offset_id
+            while scanned < budget:
+                rows = await self._iter_dialog_search_one(
+                    client,
+                    entity,
+                    sender_entity=sender_entity,
+                    offset_id=current_offset,
+                    offset_date=offset_date,
+                )
+                if not rows:
+                    return None
+                message = rows[0]
+                message_id = getattr(message, "id", None)
+                if isinstance(message_id, bool) or not isinstance(message_id, int) or message_id <= 0:
+                    raise BridgeError(
+                        "Telegram search result lacks a stable message identifier",
+                        status=502,
+                        code="telegram_message_id_invalid",
+                    )
+                current_offset = message_id
+                scanned += 1
+                record = await self._message_record(
+                    message,
+                    str(getattr(entity, "id", "global")),
+                )
+                if sender_entity is not None:
+                    bound = self._bind_resolved_sender(record, sender_entity)
+                    if bound is None:
+                        continue
+                    record = bound
+                stamp = datetime.fromisoformat(record.timestamp.replace("Z", "+00:00"))
+                if dates.start is not None and stamp < dates.start:
+                    return None
+                if not dates.contains(stamp):
+                    continue
+                if boundary is not None and message_sort_key(record) >= boundary:
+                    continue
+                return message, record, current_offset
+            budget_exhausted = True
+            return None
+
+        for index in range(len(entities)):
+            candidate = await advance(index, None)
+            if candidate is not None:
+                heads[index] = candidate
+            if budget_exhausted and index + 1 < len(entities):
+                raise BridgeError(
+                    "Global filter search exhausted its scan bound before every dialog was covered",
+                    status=400,
+                    code="global_search_scan_limit_exhausted",
+                    details={"retryable": False},
+                )
+
+        output: list[MessageRecord] = []
+        while heads and len(output) < limit:
+            index = max(heads, key=lambda item: message_sort_key(heads[item][1]))
+            _, record, current_offset = heads.pop(index)
+            output.append(record)
+            candidate = await advance(index, current_offset)
+            if candidate is not None:
+                heads[index] = candidate
+            if len(output) >= limit or budget_exhausted:
+                break
+
+        if not output and budget_exhausted:
+            raise BridgeError(
+                "Global filter search exhausted its scan bound before finding a stable page boundary",
+                status=400,
+                code="global_search_scan_limit_exhausted",
+                details={"retryable": False},
+            )
+        has_more = bool(output) and (bool(heads) or budget_exhausted)
+        next_cursor = None
+        if has_more:
+            next_cursor = encode_cursor(
+                {
+                    "v": 2,
+                    "scope": "search-global-dialogs",
+                    "sig": signature,
+                    "boundary": list(message_sort_key(output[-1])),
+                }
+            )
+        return Page(tuple(output), next_cursor, scanned)
+
     def search(
         self,
         *,
@@ -604,6 +1143,52 @@ class TelethonReadBackend:
             needle = normalize_search_text(text.strip())
             sender_raw = sender.strip() if sender else ""
             sender_cf = normalize_search_text(sender_raw.lstrip("@")) if sender_raw else ""
+            # Telegram's messages.searchGlobal rejects an empty query.  Text
+            # searches therefore use its native restart-safe continuation;
+            # person/date-only searches use a bounded per-dialog merge instead
+            # of issuing an invalid request or silently returning a newest-only
+            # prefix.
+            if chat is None:
+                server_query = unicodedata.normalize("NFKC", text.strip()) if text.strip() else ""
+                async with self._client_session() as client:
+                    dialogs: list[Any] | None = None
+                    if not server_query:
+                        dialogs = await self._iter_dialogs(client, self.config.dialog_scan_limit + 1)
+                        if len(dialogs) > self.config.dialog_scan_limit:
+                            raise BridgeError(
+                                "Global filter search exceeds the configured dialog bound",
+                                status=400,
+                                code="global_search_dialog_limit_exceeded",
+                                details={"retryable": False},
+                            )
+                    sender_entity = (
+                        await self._resolve_search_sender(client, sender_raw, dialogs=dialogs)
+                        if sender_raw
+                        else None
+                    )
+                    if server_query:
+                        return await self._global_text_search(
+                            client,
+                            sender_entity=sender_entity,
+                            sender_cf=sender_cf,
+                            needle=needle,
+                            server_query=server_query,
+                            dates=dates,
+                            limit=limit,
+                            cursor=cursor,
+                            scan_limit=scan_limit,
+                        )
+                    return await self._global_filter_search(
+                        client,
+                        dialogs=dialogs or [],
+                        sender_entity=sender_entity,
+                        sender_cf=sender_cf,
+                        dates=dates,
+                        limit=limit,
+                        cursor=cursor,
+                        scan_limit=scan_limit,
+                    )
+
             signature = self._cursor_signature(
                 "search",
                 (chat or "").strip(),
@@ -615,7 +1200,7 @@ class TelethonReadBackend:
             )
             boundary = self._message_boundary(cursor, "search", signature)
             async with self._client_session() as client:
-                entity = await self._resolve(client, chat) if chat else None
+                entity = await self._resolve(client, chat)
                 # Preserve user-visible Unicode while giving Telegram a stable
                 # compatibility-normalized server search hint. Local NFKC +
                 # casefold filtering remains authoritative for returned rows.
@@ -626,7 +1211,7 @@ class TelethonReadBackend:
                     min(scan_limit, self.config.search_scan_limit),
                     search=server_search,
                 )
-                chat_id = str(getattr(entity, "id", chat or "global"))
+                chat_id = str(getattr(entity, "id", chat))
                 require_sender_details = bool(sender_cf and not sender_cf.lstrip("-").isdigit())
                 records = [
                     await self._message_record(
