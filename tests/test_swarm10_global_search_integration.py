@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import unittest
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -223,6 +224,95 @@ class Swarm10GlobalFilterMergeTests(unittest.TestCase):
                 scan_limit=1,
             )
         self.assertEqual(captured.exception.code, "global_search_scan_limit_too_small")
+
+
+class _RaisesInsideConstrainedCall:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+
+    def iter_messages(
+        self,
+        entity: object,
+        *,
+        limit: int,
+        search: str = "",
+        offset_id: int | None = None,
+    ) -> list[object]:
+        self.calls.append({"entity": entity, "limit": limit, "search": search, "offset_id": offset_id})
+        raise TypeError("simulated TypeError inside client call")
+
+
+class _NoSearchSupport:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def iter_messages(self, entity: object, *, limit: int) -> list[object]:
+        del entity, limit
+        self.calls += 1
+        return []
+
+
+class _NoOffsetSupport:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def iter_messages(self, entity: object, *, limit: int, search: str = "") -> list[object]:
+        del entity, limit, search
+        self.calls += 1
+        return []
+
+
+class _SupportedConstraints:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+
+    def iter_messages(
+        self,
+        entity: object,
+        *,
+        limit: int,
+        search: str = "",
+        offset_id: int | None = None,
+    ) -> list[object]:
+        self.calls.append({"entity": entity, "limit": limit, "search": search, "offset_id": offset_id})
+        return ["ok"]
+
+
+class Swarm10FailClosedIterMessagesTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.backend = TelethonReadBackend(client_factory=lambda: object())
+
+    def test_internal_typeerror_does_not_retry_without_constraints(self) -> None:
+        client = _RaisesInsideConstrainedCall()
+        with self.assertRaisesRegex(TypeError, "inside client call"):
+            asyncio.run(self.backend._iter_messages(client, "peer", 25, search="needle", offset_id=77))
+        self.assertEqual(
+            client.calls,
+            [{"entity": "peer", "limit": 25, "search": "needle", "offset_id": 77}],
+        )
+
+    def test_missing_search_parameter_fails_before_broad_call(self) -> None:
+        client = _NoSearchSupport()
+        with self.assertRaises(BridgeError) as captured:
+            asyncio.run(self.backend._iter_messages(client, "peer", 25, search="needle"))
+        self.assertEqual(captured.exception.code, "telegram_search_unsupported")
+        self.assertEqual(client.calls, 0)
+
+    def test_missing_offset_parameter_fails_before_rescan(self) -> None:
+        client = _NoOffsetSupport()
+        with self.assertRaises(BridgeError) as captured:
+            asyncio.run(self.backend._iter_messages(client, "peer", 25, search="needle", offset_id=77))
+        self.assertEqual(captured.exception.code, "telegram_search_continuation_unsupported")
+        self.assertEqual(client.calls, 0)
+
+    def test_supported_constraints_are_forwarded_exactly_once(self) -> None:
+        client = _SupportedConstraints()
+        result = asyncio.run(self.backend._iter_messages(client, "peer", 25, search="needle", offset_id=77))
+        self.assertEqual(result, ["ok"])
+        self.assertEqual(
+            client.calls,
+            [{"entity": "peer", "limit": 25, "search": "needle", "offset_id": 77}],
+        )
 
 
 if __name__ == "__main__":
