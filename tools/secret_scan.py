@@ -4,6 +4,11 @@ from __future__ import annotations
 import argparse, hashlib, io, json, re, stat, subprocess, tarfile, zipfile
 from pathlib import Path, PurePosixPath
 
+if __package__:
+    from .history_secret_adjudication import filter_exact_history_assignment_findings
+else:
+    from history_secret_adjudication import filter_exact_history_assignment_findings
+
 ROOT=Path(__file__).resolve().parents[1]
 ALLOWLIST_FILE='.secret-scan-allowlist.json'
 MAX_TEXT_BYTES=50_000_000; MAX_ARCHIVE_DEPTH=3; MAX_ARCHIVE_MEMBERS=500; MAX_ARCHIVE_MEMBER_BYTES=25_000_000; MAX_ARCHIVE_TOTAL_BYTES=100_000_000
@@ -206,7 +211,14 @@ def scan_history(repo:Path=ROOT)->list[str]:
     for sha,rel in _history_objects(repo):
         try:blob=run_git(repo,'cat-file','blob',sha,text=False).stdout
         except subprocess.CalledProcessError:out.append(f'history-blob:{sha[:12]}: Git blob unreadable: {rel}');continue
-        out.extend(_scan_bytes(blob,rel,f'history-blob:{sha[:12]}',allow))
+        findings=_scan_bytes(blob,rel,f'history-blob:{sha}',allow)
+        out.extend(filter_exact_history_assignment_findings(
+            repo=repo,
+            git_blob_sha=sha,
+            rel_path=rel,
+            blob=blob,
+            findings=findings,
+        ))
     return sorted(set(out))
 def main(argv=None)->int:
     p=argparse.ArgumentParser(); p.add_argument('--mode',choices=('current','history','all'),default='all'); a=p.parse_args(argv); out=[]

@@ -1,0 +1,57 @@
+name: FINALWAVE26 A01-11 Recovery Validation
+
+on:
+  pull_request:
+    paths:
+      - 'ops/deploy_release.py'
+      - 'tests/test_finalwave26_deploy_recovery_diagnostics.py'
+      - 'tests/test_dev01_dev08_peer_provenance.py'
+      - '.github/workflows/finalwave26-a01-11.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  a01-11-recovery:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout full history
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Set up Python 3.11
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.11'
+      - name: Compile recovery engine and fault tests
+        run: >-
+          python -m py_compile
+          ops/deploy_release.py
+          ops/release_guard.py
+          ops/dev08_deploy_recovery.py
+          tests/test_audit_round8.py
+          tests/test_dev01_dev08_peer_provenance.py
+          tests/test_finalwave26_deploy_recovery_diagnostics.py
+      - name: A01-11 authoritative and FINALWAVE fault matrix
+        run: |
+          umask 022
+          python -m unittest discover -s tests -p 'test_dev01_dev08_peer_provenance.py' -v
+          python -m unittest discover -s tests -p 'test_finalwave26_deploy_recovery_diagnostics.py' -v
+      - name: Deployment transaction adjacent regression
+        run: |
+          umask 022
+          python -m unittest discover -s tests -p 'test_audit_round8.py' -v
+      - name: Current-tree secret scan
+        if: always()
+        run: python tools/secret_scan.py --mode current
+      - name: Full-history secret scan
+        if: always()
+        run: python tools/secret_scan.py --mode history
+      - name: Recovery and no-autodeploy guards
+        if: always()
+        run: |
+          test -f RECOVERY_BASELINE.md
+          grep -q 'DO NOT MERGE / DO NOT DEPLOY' RECOVERY_BASELINE.md
+          test ! -e .cpanel.yml
+          test ! -e ops/ENABLE_HOSTIQ_AUTO_DEPLOY

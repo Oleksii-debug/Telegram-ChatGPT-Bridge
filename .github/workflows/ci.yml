@@ -21,12 +21,19 @@ jobs:
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: '3.11'
-      - name: Compile guard and operations tooling
+      - name: Compile guard, integrated application and operations tooling
         run: >-
           python -m py_compile
+          passenger_wsgi.py
+          bridge/app.py
+          bridge/integrated_app.py
           tools/secret_scan.py
           tools/parallel_overlap_report.py
+          tools/build_action_openapi.py
+          tools/verify_integration_provenance.py
+          tools/verify_release_prepare.py
           ops/release_guard.py
+          ops/release_package.py
           ops/recovery_capture.py
           ops/deploy_release.py
           ops/baseline_reconcile.py
@@ -34,10 +41,22 @@ jobs:
           ops/evidence_privacy.py
           ops/acceptance_harness.py
           ops/acceptance_contracts.py
+          ops/candidate_contracts.py
           ops/deployment_lock_policy.py
           ops/integration_interfaces.py
+          ops/openapi_registry.py
+          ops/write_safety.py
+          ops/write_endpoint_policy.py
+          ops/telegram_write_adapter.py
+          ops/telegram_session_lock.py
+          ops/file_send_policy.py
+          ops/private_evidence.py
+          ops/hostiq_lifecycle.py
+          ops/snapshot_candidate.py
+          ops/dev5_round2_oracles.py
           tests/test_secret_scan.py
           tests/test_recovery_ops.py
+          tests/test_release_package.py
           tests/test_audit_round5.py
           tests/test_audit_round6.py
           tests/test_audit_round7.py
@@ -50,6 +69,38 @@ jobs:
           tests/test_dev1_round2.py
           tests/test_baseline_reconcile.py
           tests/test_runtime_evidence.py
+          tests/test_dev_a_integration.py
+          tests/test_dev_a_provenance.py
+          tests/test_dev_a_candidate_contracts.py
+      - name: Validate canonical release startup and dependency envelope
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          from ops.release_package import validate_public_release_tree
+          result = validate_public_release_tree(
+              Path('.'),
+              paths=['passenger_wsgi.py', 'requirements.txt', 'requirements.lock', 'bridge/app.py'],
+          )
+          assert result['dependencies']['package_count'] == 4
+          assert result['dependencies']['test_dependencies_present'] is False
+          print('DEV_A_RELEASE_PACKAGE_CONTRACT_PASS')
+          PY
+      - name: Validate unified ChatGPT Action schema offline
+        run: python tools/build_action_openapi.py --validate-only
+      - name: Validate truthful candidate coverage and API inventory
+        run: |
+          python - <<'PY'
+          from ops.candidate_contracts import candidate_acceptance_coverage, integrated_api_inventory, validate_candidate_acceptance_coverage, validate_integrated_api_inventory
+          coverage = candidate_acceptance_coverage()
+          counts = validate_candidate_acceptance_coverage(coverage)
+          inventory = integrated_api_inventory()
+          validate_integrated_api_inventory(inventory)
+          assert counts == {'LIVE_EXTERNAL_REQUIRED': 17, 'REAL_SOURCE_REQUIRED': 13, 'SYNTHETIC_EXECUTABLE': 37}
+          assert len(inventory) == 19
+          print('DEV_A_CANDIDATE_CONTRACTS_PASS')
+          PY
+      - name: Verify deterministic integration provenance and overlap decisions
+        run: python tools/verify_integration_provenance.py
       - name: Verify single deploy-capable entrypoint
         run: |
           test -f ops/deploy_release.py
@@ -60,10 +111,21 @@ jobs:
           from ops import deploy_release
           assert deploy_release._supported_deploy_entrypoint() == 'ops.deploy_release'
           PY
-      - name: Guard and deployment regression tests including real Python 3.11 PREPARE
+      - name: Guard and deployment regression tests including real Python 3.11 PREPARE fixtures
         run: |
           umask 022
           python -m unittest discover -s tests -v
+      - name: Real exact-head non-live release PREPARE
+        env:
+          CANDIDATE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          CANDIDATE_REF: ${{ github.event.pull_request.head.ref || github.ref_name }}
+        run: |
+          test -n "$CANDIDATE_SHA"
+          test -n "$CANDIDATE_REF"
+          python tools/verify_release_prepare.py \
+            --repo . \
+            --sha "$CANDIDATE_SHA" \
+            --approved-ref "origin/$CANDIDATE_REF"
       - name: Current-tree secret scan
         if: always()
         run: python tools/secret_scan.py --mode current

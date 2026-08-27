@@ -1,0 +1,3 @@
+# Canonical direct runtime dependency for Telegram personal-account integration.
+# Exact transitive pins and artifact hashes live in requirements.lock.
+Telethon==1.44.0

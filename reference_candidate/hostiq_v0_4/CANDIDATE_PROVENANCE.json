@@ -1,0 +1,144 @@
+{
+  "candidate_file_count": 22,
+  "candidate_files": [
+    {
+      "category": "application_source",
+      "path": "bridge/__init__.py",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "size": 0
+    },
+    {
+      "category": "application_source",
+      "path": "bridge/app.py",
+      "sha256": "2ce44ff026dece52ac19ca6088bf720f4a9606b3a7c463add80f4fff502a919a",
+      "size": 28172
+    },
+    {
+      "category": "application_source",
+      "path": "bridge/audit.py",
+      "sha256": "0d8931b2dbb5d11fb14f8c73583a7250a8315f32e97e2e2be6ec8eae91b548e9",
+      "size": 860
+    },
+    {
+      "category": "application_source",
+      "path": "bridge/config.py",
+      "sha256": "efee22af3c02438bacf719047b6263081da956f872951c44a45f8a9feb67e345",
+      "size": 6109
+    },
+    {
+      "category": "application_source",
+      "path": "bridge/drive.py",
+      "sha256": "74a98f7471f089526b90e3ec9f6f3b9fd8c1bc5104b3b504fdbc3e655a3514b6",
+      "size": 2962
+    },
+    {
+      "category": "application_source",
+      "path": "bridge/errors.py",
+      "sha256": "914b6e06260020c258f589c2a73b9a99da58b81a3dec332c4cfa96b96e1083e7",
+      "size": 387
+    },
+    {
+      "category": "application_source",
+      "path": "bridge/extractor.py",
+      "sha256": "e1ce43addae44b35de1d742bf40fb1309bb607df76154e24820472e59a04fa8c",
+      "size": 4450
+    },
+    {
+      "category": "application_source",
+      "path": "bridge/files.py",
+      "sha256": "8dda4bb49d919432c321d26fbaa801472d8c63fb2ceae2f1ee37d7e02df13da4",
+      "size": 1710
+    },
+    {
+      "category": "application_source",
+      "path": "bridge/local_config.py",
+      "sha256": "696683592ad4bb3726bbe20685e6ad4a7c5b12c917abda4d964b11cf31154102",
+      "size": 1545
+    },
+    {
+      "category": "application_source",
+      "path": "bridge/security.py",
+      "sha256": "a73a7d6e129f589c23d0e8809e35add8c98918bfb442d43d52f9b1d01d17c72a",
+      "size": 8264
+    },
+    {
+      "category": "application_source",
+      "path": "bridge/setup.py",
+      "sha256": "26aacbecc2d35ef3216cfd5db73a427b383353422f0a3e671aca05bb8b2e469e",
+      "size": 16262
+    },
+    {
+      "category": "application_source",
+      "path": "bridge/store.py",
+      "sha256": "d9db22fd90ab722c4773b1d6e55c6931cb6e8b7809f4fe0ea0b17845eb8e2d71",
+      "size": 7888
+    },
+    {
+      "category": "application_source",
+      "path": "bridge/telegram_backend.py",
+      "sha256": "dd987b846afeee1bdf3e872c8decc860c3a02e4a165be04c3e37e418527c99e1",
+      "size": 26691
+    },
+    {
+      "category": "application_source",
+      "path": "bridge/utils.py",
+      "sha256": "6090408167d9abce528d009a893ee29f2964a070bc0151c231be6914a31feb0d",
+      "size": 1034
+    },
+    {
+      "category": "application_source",
+      "path": "bridge/worker.py",
+      "sha256": "0a835dece80f9019b4364fd995c8c73a9372f51235cf2b8eff3665c044542af9",
+      "size": 5198
+    },
+    {
+      "category": "application_source",
+      "path": "cron_worker.py",
+      "sha256": "eaef93468cfeddfa48154b36e6ca710de41254c1fcd4c7d6224bbaa678b068b6",
+      "size": 167
+    },
+    {
+      "category": "empty_extra",
+      "path": "install_server.sh",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "size": 0
+    },
+    {
+      "category": "wsgi_startup",
+      "path": "passenger_wsgi.py",
+      "sha256": "d0c47cd1b99d274c12eccb7e605a3aa968b071f549c508f2ff0d64db508eb419",
+      "size": 104
+    },
+    {
+      "category": "dependency_input",
+      "path": "requirements.txt",
+      "sha256": "98c98dc5b424ff8a069de5aee967342651f2d5ed1992fa02e0178a08896e7e42",
+      "size": 31
+    },
+    {
+      "category": "tests",
+      "path": "tests/test_core.py",
+      "sha256": "35610b660d3ac8b356384eacf5a2b98b5c8c8d50fb3c483c85cd60da4231fc3a",
+      "size": 8735
+    },
+    {
+      "category": "tooling",
+      "path": "tools/build_openapi.py",
+      "sha256": "609c2c77c3c9d08db439343da52913632356c0411c2c44cd2449532b38f84c21",
+      "size": 9036
+    },
+    {
+      "category": "tooling",
+      "path": "tools/server_selftest.py",
+      "sha256": "af6b458a3ca285afd99daf57bcdd41a6cf41960daad8b1b66e0409a57e1b4dd5",
+      "size": 1272
+    }
+  ],
+  "deploy_authority": false,
+  "exact_live_path_bijection_proven": false,
+  "package_file_count": 44,
+  "raw_source_public_commit_authorized": false,
+  "reference_marker": "REFERENCE_ONLY_NOT_DEPLOY_AUTHORITY",
+  "schema_version": 1,
+  "snapshot_sha256": "f6c639effd2be00ebba1afbacc082faacd4bfc397a4ac9d056e4ef0eac50c6bf"
+}

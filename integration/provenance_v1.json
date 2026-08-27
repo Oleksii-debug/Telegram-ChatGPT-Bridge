@@ -1,0 +1,390 @@
+{
+  "schema_version": 2,
+  "base": {
+    "pr": 2,
+    "branch": "recovery/deployment-package-hardening",
+    "sha": "26a2df12c350f670a703b236edc3648f339b64a9",
+    "recovery_guard_run": 67,
+    "run_id": 32568194466,
+    "job_id": 97019792460,
+    "changed_paths": [
+      ".github/workflows/ci.yml",
+      "docs/ACCEPTANCE_CONTRACTS.md",
+      "docs/ACCEPTANCE_HARNESS.md",
+      "docs/DEPLOYMENT_BRANCH_REGISTER.md",
+      "docs/DEPLOYMENT_TRANSACTION_MODEL.md",
+      "docs/DEV1_CONTRACT_HARDENING.md",
+      "docs/DEV1_ROUND2_COMPATIBILITY.md",
+      "docs/HOSTIQ_ONE_TIME_OPERATOR_PACKAGE.md",
+      "docs/LOCK_CONTROL_POLICY.md",
+      "docs/PRODUCTION_BASELINE_RECONCILIATION.md",
+      "docs/RECOVERY_DEPLOYMENT_DESIGN.md",
+      "docs/REFERENCE_SNAPSHOT_V04_ANALYSIS.md",
+      "docs/SECRET_SCAN_ALLOWLIST_POLICY.md",
+      "ops/README.md",
+      "ops/__init__.py",
+      "ops/acceptance_contracts.py",
+      "ops/acceptance_harness.py",
+      "ops/baseline_reconcile.py",
+      "ops/deploy_release.py",
+      "ops/deployment_lock_policy.py",
+      "ops/evidence_privacy.py",
+      "ops/integration_interfaces.py",
+      "ops/recovery_capture.py",
+      "ops/release_guard.py",
+      "ops/runtime_evidence.py",
+      "tests/test_acceptance_contracts.py",
+      "tests/test_acceptance_harness.py",
+      "tests/test_audit_round10.py",
+      "tests/test_audit_round5.py",
+      "tests/test_audit_round6.py",
+      "tests/test_audit_round7.py",
+      "tests/test_audit_round8.py",
+      "tests/test_audit_round9.py",
+      "tests/test_baseline_reconcile.py",
+      "tests/test_dev1_round1.py",
+      "tests/test_dev1_round2.py",
+      "tests/test_recovery_ops.py",
+      "tests/test_runtime_evidence.py",
+      "tests/test_secret_scan.py",
+      "tools/parallel_overlap_report.py",
+      "tools/secret_scan.py"
+    ]
+  },
+  "predecessors": {
+    "DEV3": {
+      "pr": 4,
+      "sha": "4f2c162320c2cbd8e1b0fc2b91a62d2a50806653",
+      "merge_commit": "1cd732480e634e2cd6b45be98977c6cb2b2833b9",
+      "paths": [
+        "bridge/__init__.py", "bridge/app.py", "bridge/archive.py", "bridge/audit.py",
+        "bridge/backend.py", "bridge/downloads.py", "bridge/errors.py", "bridge/models.py",
+        "bridge/routes.py", "bridge/security.py", "bridge/storage.py", "bridge/validation.py",
+        "docs/APPLICATION_READ_MEDIA.md", "docs/DEV3_ROUND2_HARDENING.md",
+        "tests/test_archive_security.py", "tests/test_backend_read.py", "tests/test_dev3_round2.py",
+        "tests/test_read_app.py", "tests/test_storage_downloads.py", "tests/test_validation_security.py"
+      ],
+      "dev_a_overrides": [
+        "bridge/__init__.py", "bridge/app.py", "bridge/archive.py", "bridge/audit.py", "bridge/backend.py",
+        "bridge/downloads.py", "bridge/errors.py", "bridge/models.py", "bridge/storage.py", "bridge/validation.py"
+      ]
+    },
+    "DEV4": {
+      "pr": 7,
+      "sha": "fc409c7e0bd782148df5cb1a00f9f624b7008548",
+      "merge_commit": "10bcc583beaf6aa6f06b15958bf92351cb7f048b",
+      "paths": [
+        "docs/DEV4_WRITE_TELEGRAM_OPENAPI.md", "ops/file_send_policy.py", "ops/openapi_registry.py",
+        "ops/telegram_session_lock.py", "ops/telegram_write_adapter.py", "ops/write_endpoint_policy.py",
+        "ops/write_safety.py", "tests/test_dev4_endpoint_policy.py", "tests/test_dev4_file_send_policy.py",
+        "tests/test_dev4_session_lock.py", "tests/test_dev4_write_core.py", "tools/build_action_openapi.py"
+      ],
+      "dev_a_overrides": [
+        "ops/telegram_session_lock.py", "ops/write_endpoint_policy.py", "ops/write_safety.py",
+        "tests/test_dev4_endpoint_policy.py", "tools/build_action_openapi.py"
+      ]
+    },
+    "DEV2": {
+      "pr": 5,
+      "sha": "19910ec89c85aec6d9ddd31abca0f4cab4dac6cb",
+      "merge_commit": "9b7d10e8b3acda804d10d92850fc54b06270aef7",
+      "paths": [
+        "docs/DEV2_SERVER_RUNTIME_INTEGRATION.md", "docs/HOSTIQ_EVIDENCE_DELTA_CHECKLIST.md",
+        "docs/REFERENCE_SNAPSHOT_V04_DEV2.md", "ops/baseline_reconcile.py", "ops/hostiq_lifecycle.py",
+        "ops/private_evidence.py", "ops/runtime_evidence.py", "ops/snapshot_candidate.py",
+        "reference_candidate/hostiq_v0_4/CANDIDATE_PROVENANCE.json",
+        "reference_candidate/hostiq_v0_4/README_REFERENCE_ONLY.md", "tests/test_dev2_baseline_runtime.py",
+        "tests/test_dev2_compile.py", "tests/test_dev2_lifecycle.py", "tests/test_runtime_evidence.py",
+        "tools/collect_runtime_evidence.py"
+      ],
+      "semantic_overlap_reviewed": [
+        "ops/baseline_reconcile.py", "ops/runtime_evidence.py", "tests/test_runtime_evidence.py"
+      ],
+      "dev_a_overrides": []
+    },
+    "DEV5": {
+      "pr": 3,
+      "sha": "82643ade0f1b5157d311e06a700223a1501ae062",
+      "merge_commit": "c7dbcdbb19968b80575c0a87eae8c3b12800fd86",
+      "ported_paths": [
+        "docs/DEV5_QA_SECURITY_MATRIX.md", "docs/DEV5_ROUND2_QA.md", "ops/dev5_round2_oracles.py",
+        "tests/test_dev5_round2.py", "tests/test_dev5_round2_fuzz.py"
+      ],
+      "dev_a_overrides": ["tests/test_dev5_round2_fuzz.py"],
+      "rejected_overlaps_preserve_base": [
+        "docs/ACCEPTANCE_CONTRACTS.md", "docs/ACCEPTANCE_HARNESS.md", "ops/acceptance_contracts.py",
+        "ops/acceptance_harness.py", "ops/evidence_privacy.py", "tests/test_acceptance_contracts.py",
+        "tests/test_acceptance_harness.py"
+      ]
+    }
+  },
+  "overlap_matrix": {
+    "PR2_PR3": {"count": 7, "classification": "SEMANTIC_PRESERVE_DEV1"},
+    "PR2_PR4": {"count": 0, "classification": "NO_DIRECT_OVERLAP"},
+    "PR2_PR5": {"count": 3, "classification": "SEMANTIC_REVIEW_DEV2_SELECTED"},
+    "PR2_PR7": {"count": 0, "classification": "NO_DIRECT_OVERLAP"},
+    "PR3_PR4": {"count": 0, "classification": "NO_DIRECT_OVERLAP"},
+    "PR3_PR5": {"count": 0, "classification": "NO_DIRECT_OVERLAP"},
+    "PR3_PR7": {"count": 0, "classification": "NO_DIRECT_OVERLAP"},
+    "PR4_PR5": {"count": 0, "classification": "NO_DIRECT_OVERLAP"},
+    "PR4_PR7": {"count": 0, "classification": "NO_DIRECT_OVERLAP"},
+    "PR5_PR7": {"count": 0, "classification": "NO_DIRECT_OVERLAP"}
+  },
+  "assembly_commits": {
+    "application_integration": "d1a28da09d7c6d7d5a19a771ee6a2a342aad1324",
+    "ci_gate": "c5b63e779901db01d49fdb2aa90bc4870597a138",
+    "interface_vocabulary_reconciliation": "738e99eda2afcfe327dac26a87da0cb7c265ee74",
+    "archive_collision_hardening": "e34104f96e63c7f4d117a606e5f8b38c59772a2e",
+    "adapted_dev5_fuzz": "0e9fbf39f9dd6f0bfdf32accbdcb0fb9a31cb797",
+    "candidate_truth_contracts": "c9c162b78460024b2bec407a05d3d34e26b34f81",
+    "candidate_truth_tests": "70985119a21c1951078a8f1b8031ceb3baa3c00b",
+    "candidate_truth_ci_gate": "545e963f7ec89ab534fcb8b1dfafdedb9a8d504b",
+    "dev04_media_storage_sync": "301817d7e2c1a2fa55435d11ce5c6edc0cef5d71",
+    "dev08_deployment_recovery_oracle_sync": "5e35599cca1162bad9501044dfb6a79fa358e182",
+    "dev03_read_hardening_sync": "c0a2b443e811eee8460af6c688f30ad3bbdf5f4d",
+    "dev07_audit_sink_sync": "4884e55ab582c1e906a692499efb6c68575cb8df",
+    "post_audit_canonical_integrations": "59fa24a87fae5f0f549a475f59cd30e1fcf9007e"
+  },
+  "dev_a_paths": [
+    ".github/workflows/ci.yml",
+    ".github/workflows/finalwave26-a01-11.yml",
+    ".github/workflows/finalwave37-rollback-state.yml",
+    ".github/workflows/finalwave38-runtime-composition.yml",
+    ".github/workflows/finalwave42.yml",
+    ".secret-history-adjudications.json",
+    "bridge/__init__.py",
+    "bridge/action_request_guard.py",
+    "bridge/file_access.py",
+    "bridge/filenames.py",
+    "bridge/integrated_app.py",
+    "bridge/phase_aware_write_app.py",
+    "bridge/preparse_rate_guard.py",
+    "bridge/runtime_composition.py",
+    "bridge/upload_snapshot.py",
+    "docs/DEV03_SWARM_READ_HARDENING.md",
+    "docs/DEV04_MEDIA_STORAGE.md",
+    "docs/DEV08_DEPLOYMENT_RECOVERY_R3.md",
+    "docs/DEV_A_INTEGRATED_RELEASE_CANDIDATE.md",
+    "docs/DEV_A_PROVENANCE_LEDGER.md",
+    "docs/FINALWAVE22_B8_RATE_LIMIT.md",
+    "docs/FINALWAVE26_OPENAPI_RUNTIME_PARITY.md",
+    "docs/FINALWAVE37_ROLLBACK_STATE_COMPAT.md",
+    "docs/FINALWAVE42_PUBLIC_ERROR_PRIVACY.md",
+    "integration/provenance_v1.json",
+    "ops/candidate_contracts.py",
+    "ops/deploy_release.py",
+    "ops/dev08_deploy_recovery.py",
+    "ops/finalwave37_rollback_state_compat.py",
+    "ops/integration_interfaces.py",
+    "ops/phase_aware_write_adapter.py",
+    "ops/runtime_write_reliability.py",
+    "ops/secure_write_store.py",
+    "ops/structured_safe_write.py",
+    "tests/test_dev01_dev03_peer_provenance.py",
+    "tests/test_dev01_dev04_peer_provenance.py",
+    "tests/test_dev01_dev08_peer_provenance.py",
+    "tests/test_dev03_history_offset.py",
+    "tests/test_dev03_swarm_read.py",
+    "tests/test_dev04_media_storage.py",
+    "tests/test_dev04_migration_concurrency.py",
+    "tests/test_dev04_private_serving.py",
+    "tests/test_dev07_audit_security.py",
+    "tests/test_dev_a_candidate_contracts.py",
+    "tests/test_dev_a_integration.py",
+    "tests/test_dev_a_provenance.py",
+    "tests/test_final5_task2_preparse_b8_composition.py",
+    "tests/test_final5_task2_sqlite_wal_bootstrap.py",
+    "tests/test_finalwave22_rate_limit_auth_failclosed.py",
+    "tests/test_finalwave22_rate_limit_multiprocess.py",
+    "tests/test_finalwave26_deploy_recovery_diagnostics.py",
+    "tests/test_finalwave26_openapi_runtime_parity.py",
+    "tests/test_finalwave26_wsgi_guard_wiring.py",
+    "tests/test_finalwave37_rollback_state_compat.py",
+    "tests/test_finalwave38_runtime_composition.py",
+    "tests/test_finalwave38_session_lock_security.py",
+    "tests/test_finalwave42_public_error_privacy.py",
+    "tests/test_finalwave46_request_parser_fuzz.py",
+    "tests/test_finalwave46_request_parser_resilience.py",
+    "tests/test_history_secret_adjudication.py",
+    "tests/test_swarm10_global_search_integration.py",
+    "tools/history_secret_adjudication.py",
+    "tools/secret_scan.py",
+    "tools/verify_integration_provenance.py"
+  ],
+  "swarm_integrations": {
+    "DEV03_READ_HARDENING": {
+      "pr": 36,
+      "source_sha": "5c5bd6cea20ac8d977374f1068cb8aec72df1047",
+      "merge_commit": "c0a2b443e811eee8460af6c688f30ad3bbdf5f4d",
+      "first_parent": "2ed817a5e6f9e765757aae1fd91dbe7b30a9190b",
+      "exact_blob_paths": [
+        "bridge/backend.py",
+        "bridge/models.py",
+        "bridge/validation.py",
+        "docs/DEV03_SWARM_READ_HARDENING.md",
+        "tests/test_dev03_history_offset.py",
+        "tests/test_dev03_swarm_read.py"
+      ],
+      "canonical_adaptations": {
+        "bridge/backend.py": "6963e8c046efbf42e18ebfd31e9fbd54343bfb8d"
+      },
+      "excluded_specialist_paths": [".github/workflows/dev03-read.yml"],
+      "auditor_findings": ["A01-08", "A01-09"],
+      "source_ci_run_id": 32642004555,
+      "source_ci_job_id": 97200427195,
+      "production_mutated": false,
+      "deployment_authorized": false
+    },
+    "DEV04_MEDIA_STORAGE": {
+      "pr": 37,
+      "source_sha": "c10ca6aa40755a88c98e2c200001bc05ca0bcf98",
+      "merge_commit": "301817d7e2c1a2fa55435d11ce5c6edc0cef5d71",
+      "first_parent": "2d98d036a3dc13545a9661005d6e290f12bcfe22",
+      "exact_blob_paths": [
+        "bridge/app.py",
+        "bridge/archive.py",
+        "bridge/downloads.py",
+        "bridge/file_access.py",
+        "bridge/filenames.py",
+        "bridge/storage.py",
+        "docs/DEV04_MEDIA_STORAGE.md",
+        "tests/test_dev04_media_storage.py",
+        "tests/test_dev04_migration_concurrency.py",
+        "tests/test_dev04_private_serving.py"
+      ],
+      "canonical_adaptations": {
+        "bridge/app.py": "751a9cbf281f3421dcfae3787dbbae1b910bb80b",
+        "bridge/file_access.py": "6963e8c046efbf42e18ebfd31e9fbd54343bfb8d",
+        "bridge/storage.py": "6963e8c046efbf42e18ebfd31e9fbd54343bfb8d",
+        "tests/test_dev04_migration_concurrency.py": "6963e8c046efbf42e18ebfd31e9fbd54343bfb8d",
+        "tests/test_dev04_private_serving.py": "6963e8c046efbf42e18ebfd31e9fbd54343bfb8d"
+      },
+      "excluded_specialist_paths": [".github/workflows/dev04-media-storage-qa.yml"],
+      "auditor_finding": "A01-06",
+      "source_ci_run_id": 32641698071,
+      "source_ci_job_id": 97199658228,
+      "production_mutated": false,
+      "deployment_authorized": false
+    },
+    "DEV07_AUDIT_SINK": {
+      "pr": 42,
+      "source_sha": "feff7ba8bf7bea74ac88b21002c0810ab7a1c8e2",
+      "merge_commit": "4884e55ab582c1e906a692499efb6c68575cb8df",
+      "first_parent": "9e536dca59eda481bf54ee7e0cb1c78efca7f4d9",
+      "exact_blob_paths": [
+        "bridge/audit.py",
+        "tests/test_dev07_audit_security.py"
+      ],
+      "auditor_finding": "A01-10",
+      "source_ci_run_id": 32641980105,
+      "source_ci_job_id": 97200367017,
+      "production_mutated": false,
+      "deployment_authorized": false
+    },
+    "DEV08_DEPLOYMENT_RECOVERY_ORACLE": {
+      "pr": 48,
+      "source_sha": "2916828628a091a9edd8c4992d9db8834ac1ff68",
+      "merge_commit": "5e35599cca1162bad9501044dfb6a79fa358e182",
+      "first_parent": "4ebfceb153e94840fa046af88cee1131e0705657",
+      "exact_blob_paths": [
+        "docs/DEV08_DEPLOYMENT_RECOVERY_R3.md",
+        "ops/dev08_deploy_recovery.py"
+      ],
+      "excluded_specialist_paths": [
+        "tests/test_dev08_deploy_recovery.py",
+        "tools/verify_dev08_r3_provenance.py"
+      ],
+      "source_validation_run_id": 32646112339,
+      "source_validation_job_id": 97210515630,
+      "auditor_finding": "A01-11",
+      "authoritative_runtime_parent_sha": "2480d74b623283eeebfdb74c711cbc229d89cd14",
+      "authoritative_runtime_source_pr": 54,
+      "authoritative_runtime_source_sha": "d35b960541363bfd88a6790c33d003a78bd6854b",
+      "authoritative_runtime_blob_sha": "83082fad304672f613788b9f1f92061206d57fcf",
+      "authoritative_runtime_paths": [
+        "ops/deploy_release.py",
+        "tests/test_dev01_dev08_peer_provenance.py"
+      ],
+      "production_runtime_modified": false,
+      "canonical_runtime_modified": true,
+      "production_mutated": false,
+      "deployment_authorized": false
+    },
+    "SWARM10_HISTORY_SECRET_ADJUDICATION": {
+      "pr": 111,
+      "source_sha": "5b053f4ff291b827fede302373b82d32a53a389a",
+      "disposition": "ADAPTED_FAIL_CLOSED",
+      "adapted_paths": [
+        ".secret-history-adjudications.json",
+        "tests/test_history_secret_adjudication.py",
+        "tools/history_secret_adjudication.py",
+        "tools/secret_scan.py"
+      ],
+      "exact_historical_blob_count": 7,
+      "private_values_recorded": false,
+      "production_mutated": false,
+      "deployment_authorized": false
+    },
+    "SWARM10_GLOBAL_SEARCH_CONTINUATION": {
+      "pr": 127,
+      "source_sha": "935baaf95d43623c5f3a1b24ad574f8e98a54359",
+      "disposition": "ADAPTED_AND_PRODUCTION_WIRED",
+      "adapted_paths": [
+        "bridge/backend.py",
+        "bridge/runtime.py",
+        "tests/test_swarm10_global_search_integration.py"
+      ],
+      "empty_query_fail_closed": true,
+      "production_mutated": false,
+      "deployment_authorized": false
+    },
+    "SWARM10_PREPARSE_B8_COMPOSITION": {
+      "pr": 158,
+      "source_sha": "34ae5ba17cec8c4737fb5e5e4a0ddfebdb17f934",
+      "merge_commit": "bbd5aabcd22ccf9cab2450e81bd48a294f31560c",
+      "first_parent": "7084104a6dfa0e82cc959b1fd321ec63f079ca17",
+      "exact_blob_paths": [
+        "bridge/preparse_rate_guard.py",
+        "bridge/runtime_wsgi.py",
+        "tests/test_final5_task2_preparse_b8_composition.py"
+      ],
+      "excluded_specialist_paths": [
+        ".github/workflows/final5-task2-preparse-b8.yml"
+      ],
+      "source_ci_run_id": 33105270506,
+      "source_ci_job_id": 98633312893,
+      "production_mutated": false,
+      "deployment_authorized": false
+    },
+    "SWARM10_PRIVATE_FILE_SNAPSHOT": {
+      "pr": 124,
+      "source_sha": "dad2b559358a5c7374308a68cd8919d3732cd921",
+      "disposition": "ADAPTED",
+      "adapted_paths": [
+        "bridge/file_access.py",
+        "tests/test_dev04_private_serving.py"
+      ],
+      "production_mutated": false,
+      "deployment_authorized": false
+    },
+    "SWARM10_SQLITE_WAL_BOOTSTRAP": {
+      "pr": 125,
+      "source_sha": "a9c3a660b34f0541bf6f80ab3b1813a5bfbc5285",
+      "disposition": "ADAPTED",
+      "adapted_paths": [
+        "bridge/storage.py",
+        "tests/test_dev04_migration_concurrency.py",
+        "tests/test_final5_task2_sqlite_wal_bootstrap.py"
+      ],
+      "production_mutated": false,
+      "deployment_authorized": false
+    }
+  },
+  "safety_boundary": {
+    "merge": false,
+    "deploy": false,
+    "passenger_restart": false,
+    "live_telegram_write": false,
+    "telegram_authorization_state": "USER_TELEGRAM_AUTH_NOT_YET_REQUIRED"
+  }
+}
