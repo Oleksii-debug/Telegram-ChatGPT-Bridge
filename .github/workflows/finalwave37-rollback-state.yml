@@ -18,12 +18,46 @@ jobs:
       - name: Checkout full history
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ github.event.pull_request.head.sha }}
           persist-credentials: false
           fetch-depth: 0
       - name: Set up Python 3.11
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: '3.11'
+      - name: Bind rollback evidence to immutable checked-out candidate
+        id: checkout-binding
+        shell: bash
+        env:
+          EXPECTED_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          test -n "$EXPECTED_HEAD"
+          actual_head="$(git rev-parse 'HEAD^{commit}')"
+          test "$actual_head" = "$EXPECTED_HEAD"
+          status_file="$(mktemp)"
+          trap 'rm -f "$status_file"' EXIT
+          git status --porcelain=v1 -z --untracked-files=all > "$status_file"
+          test ! -s "$status_file"
+          rm -f "$status_file"
+          trap - EXIT
+          EXPECTED_HEAD="$EXPECTED_HEAD" python - <<'PY'
+          import os
+          from pathlib import Path
+          from ops.finalwave37_rollback_state_compat import derive_source_checkout_binding
+
+          binding = derive_source_checkout_binding(Path.cwd())
+          actual_head = binding["candidate_sha"]
+          if actual_head != os.environ["EXPECTED_HEAD"]:
+              raise SystemExit("rollback source binding does not match event candidate")
+          print(f"ROLLBACK_SOURCE_HEAD={actual_head}")
+          print(f"ROLLBACK_SOURCE_BINDING_SHA256={binding['source_binding_sha256']}")
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write(f"candidate_sha={actual_head}\n")
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as summary:
+              summary.write("### FINALWAVE37 exact rollback candidate\n\n")
+              summary.write(f"`{actual_head}`\n")
+          PY
       - name: Compile rollback-state surface
         run: >-
           python -m py_compile

@@ -8,6 +8,10 @@ from tools.verify_integration_provenance import (
     MANIFEST,
     RELEASE_OVERRIDE,
     ROOT,
+    SINGLE_FINISHER_BLOBS,
+    SINGLE_FINISHER_CHECKPOINT_SHA,
+    SINGLE_FINISHER_PARENT_SHA,
+    SINGLE_FINISHER_SOURCES,
     TERMINAL_DEV_B_EXACT,
     TERMINAL_DEV_B_FIRST_PARENT,
     TERMINAL_DEV_B_MERGE,
@@ -48,6 +52,8 @@ class DevAProvenanceTests(unittest.TestCase):
         self.assertEqual(result["dev_c_exact_path_count"], 2)
         self.assertEqual(result["dev_c_adapted_path_count"], 2)
         self.assertEqual(result["release_to_live_path_count"], 58)
+        self.assertEqual(result["single_finisher_source_count"], 3)
+        self.assertEqual(result["single_finisher_path_count"], 7)
         self.assertEqual(result["pr2_pr3_overlap_count"], 7)
         self.assertEqual(result["pr2_pr5_overlap_count"], 3)
         self.assertEqual(result["rejected_dev5_overlap_count"], 7)
@@ -182,6 +188,17 @@ class DevAProvenanceTests(unittest.TestCase):
     def test_unexpected_candidate_path_is_rejected(self):
         with self.assertRaises(ProvenanceError):
             _reject_unexpected_paths({"bridge/app.py", "private/session.bin"}, {"bridge/app.py"})
+
+    def test_single_finisher_sources_and_candidate_blobs_are_exact(self):
+        payload = json.loads(MANIFEST.read_text(encoding="utf-8"))
+        convergence = payload["swarm_integrations"]["SWARM10_SINGLE_FINISHER_HIGH_CONVERGENCE"]
+        self.assertEqual(SINGLE_FINISHER_PARENT_SHA, convergence["canonical_parent_sha"])
+        self.assertEqual(SINGLE_FINISHER_CHECKPOINT_SHA, convergence["canonical_checkpoint_sha"])
+        self.assertEqual(SINGLE_FINISHER_SOURCES, convergence["sources"])
+        self.assertEqual(SINGLE_FINISHER_BLOBS, convergence["candidate_git_blobs"])
+        self.assertFalse(convergence["private_values_recorded"])
+        self.assertFalse(convergence["production_mutated"])
+        self.assertFalse(convergence["deployment_authorized"])
 
     def test_manifests_contain_no_secret_value_fields_or_private_content(self):
         text = MANIFEST.read_text(encoding="utf-8") + RELEASE_OVERRIDE.read_text(encoding="utf-8")
