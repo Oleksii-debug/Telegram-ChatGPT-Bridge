@@ -1,0 +1,88 @@
+name: FINALWAVE-54 Action Mock E2E
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: finalwave54-action-mock-e2e-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  action-mock-e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout full history
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Set up Python 3.11
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.11'
+      - name: Verify isolated FINALWAVE-54 overlay
+        env:
+          EVENT_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          test -n "$EVENT_HEAD_SHA"
+          test "$(git rev-list --parents -n 1 HEAD | wc -w)" -eq 3
+          BASE_SHA="$(git rev-parse HEAD^1)"
+          HEAD_SHA="$(git rev-parse HEAD^2)"
+          test "$HEAD_SHA" = "$EVENT_HEAD_SHA"
+          cat > /tmp/finalwave54.allowed <<'EOF'
+          .github/workflows/finalwave54-action-e2e.yml
+          bridge/integrated_app.py
+          docs/FINALWAVE54_ACTION_MOCK_E2E.md
+          ops/dev06_api_contracts.py
+          ops/dev06_runtime_conformance.py
+          tests/test_finalwave54_action_wsgi_e2e.py
+          EOF
+          git diff --name-only "$BASE_SHA...$HEAD_SHA" | sort > /tmp/finalwave54.actual
+          test -s /tmp/finalwave54.actual
+          while IFS= read -r path; do
+            grep -Fxq "$path" /tmp/finalwave54.allowed || {
+              echo "FINALWAVE54_PATH_OUTSIDE_ISOLATED_DOMAIN=$path" >&2
+              exit 1
+            }
+          done < /tmp/finalwave54.actual
+          echo "FINALWAVE54_STACKED_BASE_SHA=$BASE_SHA"
+          echo FINALWAVE54_OVERLAY_ISOLATION_PASS
+      - name: Compile Action contract and E2E code
+        run: >-
+          python -m py_compile
+          bridge/app.py
+          bridge/integrated_app.py
+          ops/dev06_api_contracts.py
+          ops/dev06_runtime_conformance.py
+          tests/test_finalwave54_action_wsgi_e2e.py
+      - name: Validate generated ChatGPT Action schema
+        run: python tools/build_dev06_action_openapi.py --validate-only
+      - name: Run full 17-operation in-memory WSGI Action E2E matrix
+        run: |
+          umask 022
+          python -m unittest tests.test_finalwave54_action_wsgi_e2e -v
+      - name: Recheck canonical Action and integrated write regressions
+        run: |
+          umask 022
+          python -m unittest \
+            tests.test_dev06_api_contracts \
+            tests.test_dev06_runtime_conformance \
+            tests.test_dev_a_candidate_contracts \
+            tests.test_dev_a_integration \
+            tests.test_dev4_endpoint_policy -v
+      - name: Current-tree secret scan
+        if: always()
+        run: python tools/secret_scan.py --mode current
+      - name: Full-history secret scan
+        if: always()
+        run: python tools/secret_scan.py --mode history
+      - name: Verify non-deploy boundary
+        if: always()
+        run: |
+          test -f RECOVERY_BASELINE.md
+          grep -q 'DO NOT MERGE / DO NOT DEPLOY' RECOVERY_BASELINE.md
+          test ! -e .cpanel.yml
+          test ! -e ops/ENABLE_HOSTIQ_AUTO_DEPLOY
