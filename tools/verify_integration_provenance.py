@@ -53,6 +53,55 @@ TERMINAL_DEV_B_RETAINED = {
     "tests/test_devb_round2_release.py",
     "tests/test_server_manifest.py",
 }
+SINGLE_FINISHER_PARENT_SHA = "e95c5bda689ee7b3d54a2f335d24a13b5ce5eed8"
+SINGLE_FINISHER_CHECKPOINT_SHA = "6af7b0a427e53a9f512b5239464bcfe95becacd3"
+SINGLE_FINISHER_SOURCES = {
+    "PASSENGER_SERVING_EVIDENCE": {
+        "pr": 164,
+        "source_sha": "1bd34a7e57792ac6e48418aa9bb20369509ee679",
+        "disposition": "EXACT_BLOB_ADAPT",
+        "exact_blob_paths": [
+            "bridge/runtime_wsgi.py",
+            "tests/test_finalwave26_wsgi_guard_wiring.py",
+        ],
+        "excluded_specialist_paths": [],
+    },
+    "ROLLBACK_SOURCE_BINDING": {
+        "pr": 157,
+        "source_sha": "ca89aaa48214409a42d15ac5a83d84778f732d5f",
+        "disposition": "ADAPTED_HIGH_CLOSED",
+        "adapted_paths": [
+            "ops/finalwave37_rollback_state_compat.py",
+            "tests/test_finalwave37_rollback_state_compat.py",
+        ],
+        "canonical_extension_paths": [
+            ".github/workflows/finalwave37-rollback-state.yml",
+        ],
+        "excluded_specialist_paths": [],
+    },
+    "SHARED_COMMIT_GUARD": {
+        "pr": 162,
+        "source_sha": "e7d194a08a371df49103a90b487e53c75a91b000",
+        "disposition": "ADAPTED_HIGH_CLOSED",
+        "adapted_paths": [
+            "ops/runtime_write_reliability.py",
+            "tests/test_final5_task2_write_guard_parent_toctou.py",
+        ],
+        "excluded_specialist_paths": [
+            ".github/workflows/final5-task2-write-guard-toctou.yml",
+            "integration/provenance_v1.json",
+        ],
+    },
+}
+SINGLE_FINISHER_BLOBS = {
+    ".github/workflows/finalwave37-rollback-state.yml": "83661c713a328be64d1a5a2c88a99000f1f56d06",
+    "bridge/runtime_wsgi.py": "7e30cb08a2edbebaa483b178c83b396a6963b2f7",
+    "ops/finalwave37_rollback_state_compat.py": "741260dbc05a200cdce19d5c82eb581a09a6d5dd",
+    "ops/runtime_write_reliability.py": "38fc7a83539026052f490f9889d17eed22987e73",
+    "tests/test_final5_task2_write_guard_parent_toctou.py": "6a20cc708d97617ae0f1e943bb35cb4dfd3304c4",
+    "tests/test_finalwave26_wsgi_guard_wiring.py": "9e73fbda857db992b24e2abc0b24010a497fe45b",
+    "tests/test_finalwave37_rollback_state_compat.py": "ed25e02856fa6fc4137ad21b4963971664412f7e",
+}
 
 
 class ProvenanceError(RuntimeError):
@@ -306,12 +355,41 @@ def _validate_override_subset(data: dict[str, Any], path_key: str) -> set[str]:
     return overrides
 
 
+def _validate_single_finisher_convergence(manifest: dict[str, Any], head: str) -> dict[str, Any]:
+    integrations = manifest.get("swarm_integrations")
+    if not isinstance(integrations, dict):
+        raise ProvenanceError("swarm integration provenance missing")
+    convergence = integrations.get("SWARM10_SINGLE_FINISHER_HIGH_CONVERGENCE")
+    if not isinstance(convergence, dict):
+        raise ProvenanceError("single-finisher convergence provenance missing")
+    if convergence.get("canonical_parent_sha") != SINGLE_FINISHER_PARENT_SHA:
+        raise ProvenanceError("single-finisher canonical parent mismatch")
+    if convergence.get("canonical_checkpoint_sha") != SINGLE_FINISHER_CHECKPOINT_SHA:
+        raise ProvenanceError("single-finisher canonical checkpoint mismatch")
+    if convergence.get("sources") != SINGLE_FINISHER_SOURCES:
+        raise ProvenanceError("single-finisher source accounting mismatch")
+    if convergence.get("candidate_git_blobs") != SINGLE_FINISHER_BLOBS:
+        raise ProvenanceError("single-finisher candidate blob ledger mismatch")
+    if convergence.get("private_values_recorded") is not False:
+        raise ProvenanceError("single-finisher provenance records private values")
+    if convergence.get("production_mutated") is not False or convergence.get("deployment_authorized") is not False:
+        raise ProvenanceError("single-finisher safety boundary invalid")
+
+    _assert_ancestor(SINGLE_FINISHER_PARENT_SHA, SINGLE_FINISHER_CHECKPOINT_SHA)
+    _assert_ancestor(SINGLE_FINISHER_CHECKPOINT_SHA, head)
+    for path, expected_blob in SINGLE_FINISHER_BLOBS.items():
+        if not _valid_sha(expected_blob) or _blob("HEAD", path) != expected_blob:
+            raise ProvenanceError(f"single-finisher candidate blob mismatch: {path}")
+    return convergence
+
+
 def verify_repository() -> dict[str, Any]:
     manifest = _load()
     release = _load_release_override()
     head = _git("rev-parse", "HEAD")
     base = str(manifest["base"]["sha"])
     predecessors = manifest["predecessors"]
+    convergence = _validate_single_finisher_convergence(manifest, head)
 
     dev_b = release["dev_b"]
     dev_b_imported = set(dev_b["imported_paths"])
@@ -465,6 +543,8 @@ def verify_repository() -> dict[str, Any]:
         "pr2_pr5_overlap_count": overlap_counts["PR2_PR5"],
         "rejected_dev5_overlap_count": len(dev5["rejected_overlaps_preserve_base"]),
         "release_to_live_path_count": len(release_paths),
+        "single_finisher_source_count": len(convergence["sources"]),
+        "single_finisher_path_count": len(convergence["candidate_git_blobs"]),
         "private_values_recorded": False,
     }
 
