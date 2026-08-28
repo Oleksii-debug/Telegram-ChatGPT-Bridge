@@ -72,6 +72,8 @@ jobs:
           tests/test_dev_a_integration.py
           tests/test_dev_a_provenance.py
           tests/test_dev_a_candidate_contracts.py
+          tests/test_finalwave46_request_parser_fuzz.py
+          tests/test_finalwave46_request_parser_resilience.py
       - name: Validate canonical release startup and dependency envelope
         run: |
           python - <<'PY'
@@ -99,6 +101,8 @@ jobs:
           assert len(inventory) == 19
           print('DEV_A_CANDIDATE_CONTRACTS_PASS')
           PY
+      - name: FINALWAVE-46 request parser fuzz
+        run: python -m unittest discover -s tests -p 'test_finalwave46_request_parser_*.py' -v
       - name: Verify deterministic integration provenance and overlap decisions
         run: python tools/verify_integration_provenance.py
       - name: Verify single deploy-capable entrypoint
