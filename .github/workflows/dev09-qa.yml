@@ -1,0 +1,104 @@
+name: DEV09 Independent QA
+
+on:
+  pull_request:
+    branches: [work3/integration-release-candidate]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  dev09-qa:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout exact DEV09 head with full history
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Set up Python 3.11
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.11'
+      - name: Validate exact canonical parent and QA-only path boundary
+        env:
+          EXPECTED_PARENT: 4ebfceb153e94840fa046af88cee1131e0705657
+          ACTUAL_PR_BASE: ${{ github.event.pull_request.base.sha || '' }}
+        run: |
+          set -eu
+          if [ "${GITHUB_EVENT_NAME}" = "pull_request" ]; then
+            test -n "$ACTUAL_PR_BASE"
+            test "$ACTUAL_PR_BASE" = "$EXPECTED_PARENT"
+          fi
+          test "$(git merge-base "$EXPECTED_PARENT" HEAD)" = "$EXPECTED_PARENT"
+          git diff --name-only "$EXPECTED_PARENT"...HEAD | sort > /tmp/dev09-paths.txt
+          printf '%s\n' '.github/workflows/dev09-qa.yml' 'tests/test_dev09_swarm_qa.py' 'tests/test_dev09_cross_lane_contracts.py' | sort > /tmp/dev09-expected.txt
+          diff -u /tmp/dev09-expected.txt /tmp/dev09-paths.txt
+          echo DEV09_EXACT_PARENT_QA_ONLY_PASS
+      - name: Compile DEV09 QA and current integration surface
+        run: >-
+          python -m py_compile
+          tests/test_dev09_swarm_qa.py tests/test_dev09_cross_lane_contracts.py
+          bridge/app.py bridge/integrated_app.py bridge/downloads.py bridge/storage.py
+          ops/candidate_contracts.py ops/write_safety.py ops/write_endpoint_policy.py
+          ops/candidate_runtime_preflight.py ops/private_control.py
+          ops/passenger_evidence_hook.py ops/passenger_probe.py
+      - name: Run DEV09 adversarial acceptance QA
+        run: python -m unittest discover -s tests -p 'test_dev09*.py' -v
+      - name: Run current DEV_B runtime security regressions
+        run: |
+          set -eu
+          for pattern in \
+            'test_private_control.py' \
+            'test_candidate_runtime_preflight.py' \
+            'test_passenger_evidence_hook.py' \
+            'test_passenger_probe.py' \
+            'test_run_passenger_evidence_probe.py' \
+            'test_devb_production_readiness.py' \
+            'test_devb_run_matrix.py' \
+            'test_devb_cli_entrypoints.py'; do
+            python -m unittest discover -s tests -p "$pattern" -v
+          done
+          echo DEV09_DEVB_RUNTIME_SECURITY_REGRESSION_PASS
+      - name: Require exact-parent clean-export full regression
+        env:
+          EXPECTED_PARENT: 4ebfceb153e94840fa046af88cee1131e0705657
+        run: |
+          set -eu
+          TMP_ROOT="$(mktemp -d)"
+          trap 'rm -rf "$TMP_ROOT"' EXIT
+          mkdir -p "$TMP_ROOT/release"
+          git archive "$EXPECTED_PARENT" | tar -x -C "$TMP_ROOT/release"
+          (cd "$TMP_ROOT/release" && python -m unittest discover -s tests -v)
+          echo DEV09_CLEAN_EXPORT_FULL_REGRESSION_PASS
+      - name: Require PREPARE-style isolated venv full regression
+        if: always()
+        env:
+          EXPECTED_PARENT: 4ebfceb153e94840fa046af88cee1131e0705657
+        run: |
+          set -eu
+          TMP_ROOT="$(mktemp -d)"
+          trap 'rm -rf "$TMP_ROOT"' EXIT
+          mkdir -p "$TMP_ROOT/release"
+          git archive "$EXPECTED_PARENT" | tar -x -C "$TMP_ROOT/release"
+          python -m venv "$TMP_ROOT/release/.venv"
+          "$TMP_ROOT/release/.venv/bin/python" -m pip install --require-hashes -r "$TMP_ROOT/release/requirements.lock" >/dev/null
+          (cd "$TMP_ROOT/release" && .venv/bin/python -m unittest discover -s tests -v)
+          echo DEV09_PREPARE_VENV_FULL_REGRESSION_PASS
+      - name: Validate current Action schema independently
+        if: always()
+        run: python tools/build_action_openapi.py --validate-only
+      - name: Current-tree secret scan
+        if: always()
+        run: python tools/secret_scan.py --mode current
+      - name: Full-history secret scan
+        if: always()
+        run: python tools/secret_scan.py --mode history
+      - name: Preserve no-deploy boundary
+        if: always()
+        run: |
+          test ! -e .cpanel.yml
+          test ! -e ops/ENABLE_HOSTIQ_AUTO_DEPLOY
+          grep -q 'DO NOT MERGE / DO NOT DEPLOY' RECOVERY_BASELINE.md
