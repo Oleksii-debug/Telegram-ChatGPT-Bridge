@@ -1,0 +1,49 @@
+name: FINALWAVE-40 Liveness
+
+on:
+  pull_request:
+    branches: [work3/integration-release-candidate]
+  push:
+    branches: [finalwave26/40-timeouts-cancellation]
+
+permissions:
+  contents: read
+
+jobs:
+  fw40-liveness:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout full history
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Set up Python 3.11
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.11'
+      - name: Compile timeout and cancellation overlay
+        run: >-
+          python -m py_compile
+          bridge/archive.py
+          bridge/backend.py
+          bridge/downloads.py
+          ops/telegram_session_lock.py
+          ops/telegram_write_adapter.py
+          ops/write_safety.py
+          ops/passenger_probe.py
+          tests/test_finalwave40_liveness.py
+      - name: Run focused liveness and adjacent regressions
+        run: >-
+          python -m unittest -v
+          tests.test_finalwave40_liveness
+          tests.test_archive_security
+          tests.test_backend_read
+          tests.test_dev4_session_lock
+          tests.test_passenger_probe
+      - name: Current-tree secret scan
+        if: always()
+        run: python tools/secret_scan.py --mode current
+      - name: Full-history secret scan
+        if: always()
+        run: python tools/secret_scan.py --mode history
