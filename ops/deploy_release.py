@@ -19,7 +19,7 @@ import tarfile
 from datetime import datetime
 from pathlib import Path, PurePosixPath
 
-from ops.deployment_lock_policy import LockPolicyError, validate_preexisting_lock
+from ops.deployment_lock_policy import LockPolicyError, hold_deployment_lock, validate_preexisting_lock
 from ops.dev08_deploy_recovery import (
     DeploymentRecoveryClassificationError,
     classify_deployment_recovery,
@@ -769,54 +769,11 @@ def _best_effort_transaction(control_root: Path, journal: dict, state: str, **ex
 def _deployment_lock(control_root: Path):
     if fcntl is None:
         raise SafetyError("POSIX deployment lock support unavailable")
-    validate_private_control_root(control_root)
-    path = control_root / TRANSACTION_LOCK
-
-    preexisting = os.path.lexists(path)
-    expected_dev = expected_ino = None
-    if preexisting:
-        try:
-            validate_preexisting_lock(path)
-            before = path.lstat()
-        except (LockPolicyError, OSError) as exc:
-            raise SafetyError("deployment lock preflight policy failed") from exc
-        expected_dev, expected_ino = before.st_dev, before.st_ino
-        flags = os.O_RDWR
-    else:
-        flags = os.O_RDWR | os.O_CREAT | os.O_EXCL
-    if hasattr(os, "O_NOFOLLOW"):
-        flags |= os.O_NOFOLLOW
-
     try:
-        fd = os.open(path, flags, 0o600)
-    except OSError as exc:
-        raise SafetyError("deployment lock could not be opened safely") from exc
-    try:
-        st = os.fstat(fd)
-        uid = os.getuid() if hasattr(os, "getuid") else None
-        if not stat.S_ISREG(st.st_mode):
-            raise SafetyError("deployment lock is not a regular file")
-        if uid is not None and st.st_uid != uid:
-            raise SafetyError("deployment lock owner is unexpected")
-        if stat.S_IMODE(st.st_mode) != 0o600:
-            raise SafetyError("deployment lock mode must be exactly 0600")
-        if st.st_nlink != 1:
-            raise SafetyError("deployment lock hardlink topology rejected")
-        if st.st_size != 0:
-            raise SafetyError("deployment lock must be empty")
-        if preexisting and (st.st_dev != expected_dev or st.st_ino != expected_ino):
-            raise SafetyError("deployment lock changed during preflight")
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError as exc:
-            raise SafetyError("another deployment transaction owns the lock") from exc
-        yield path
-    finally:
-        try:
-            fcntl.flock(fd, fcntl.LOCK_UN)
-        except Exception:
-            pass
-        os.close(fd)
+        with hold_deployment_lock(control_root, TRANSACTION_LOCK) as path:
+            yield path
+    except LockPolicyError as exc:
+        raise SafetyError("deployment lock acquisition policy failed") from exc
 
 
 def _approval_marker_path(consumption_root: Path, digest: str) -> Path:
