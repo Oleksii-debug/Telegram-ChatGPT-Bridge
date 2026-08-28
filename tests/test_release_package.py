@@ -160,6 +160,7 @@ class ReleasePackageContractTests(unittest.TestCase):
             sha = "a" * 40
             meta = {
                 "sha": sha,
+                "source_manifest_sha256": "d" * 64,
                 "requirements_lock_sha256": release_prepare.sha256_file(prepared / "requirements.lock"),
                 "requirements_test_lock_sha256": None,
                 "immutable_permission_policy": "no-write-bits-v1",
@@ -173,7 +174,10 @@ class ReleasePackageContractTests(unittest.TestCase):
                      return_value=(prepared, meta, "c" * 64),
                  ), \
                  mock.patch.object(release_prepare.deploy_release, "verify_prepared_release", return_value=meta), \
-                 mock.patch.object(release_prepare, "_verify_installed_runtime"):
+                 mock.patch.object(release_prepare, "_verify_archive_identity"), \
+                 mock.patch.object(release_prepare, "_verify_prepared_tree_integrity"), \
+                 mock.patch.object(release_prepare, "_verify_installed_runtime"), \
+                 mock.patch.object(release_prepare.deploy_release, "verify_approved_ref_policy", return_value=sha):
                 result = release_prepare.verify_exact_candidate(repo, sha, "origin/candidate")
             self.assertEqual("NONLIVE_PREPARE_VERIFIED", result["state"])
             self.assertEqual(4, result["package_count"])
