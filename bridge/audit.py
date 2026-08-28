@@ -30,8 +30,18 @@ class AuditSecurityError(RuntimeError):
 
 
 class AuditLog:
-    def __init__(self, path: Path | None = None) -> None:
+    DEFAULT_MEMORY_EVENT_LIMIT = 2048
+    MAX_MEMORY_EVENT_LIMIT = 100_000
+
+    def __init__(self, path: Path | None = None, *, memory_event_limit: int = DEFAULT_MEMORY_EVENT_LIMIT) -> None:
+        if (
+            isinstance(memory_event_limit, bool)
+            or not isinstance(memory_event_limit, int)
+            or not 1 <= memory_event_limit <= self.MAX_MEMORY_EVENT_LIMIT
+        ):
+            raise ValueError("memory_event_limit is outside the safe range")
         self.path = Path(path) if path is not None else None
+        self.memory_event_limit = memory_event_limit
         self.events: list[dict[str, Any]] = []
         self._parent_identity: tuple[int, int] | None = None
         self._leaf_name: str | None = None
@@ -139,3 +149,6 @@ class AuditLog:
             line = (json.dumps(safe, ensure_ascii=True, sort_keys=True, separators=(",", ":")) + "\n").encode("ascii")
             self._append_private_line(line)
         self.events.append(dict(safe))
+        overflow = len(self.events) - self.memory_event_limit
+        if overflow > 0:
+            del self.events[:overflow]
