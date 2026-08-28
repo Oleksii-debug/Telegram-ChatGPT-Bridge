@@ -260,7 +260,8 @@ class SourceCheckoutBindingTests(unittest.TestCase):
         module = importlib.util.module_from_spec(spec)
         sys.modules[name] = module
         self.addCleanup(sys.modules.pop, name, None)
-        spec.loader.exec_module(module)
+        with mock.patch.object(sys, "dont_write_bytecode", True):
+            spec.loader.exec_module(module)
         return root, module
 
     def test_clean_checkout_binding_uses_real_head_tree_and_listing(self):
@@ -287,8 +288,56 @@ class SourceCheckoutBindingTests(unittest.TestCase):
         root, module = self._temporary_checkout()
         module_path = root / "ops" / "finalwave37_rollback_state_compat.py"
         module_path.write_text(module_path.read_text(encoding="utf-8") + "\n# dirty\n", encoding="utf-8")
-        with self.assertRaisesRegex(module.RollbackStateContractError, "tracked tree dirty"):
+        with self.assertRaisesRegex(module.RollbackStateContractError, "worktree dirty"):
             module.derive_source_checkout_binding(root)
+
+    def test_dirty_staged_tree_is_rejected(self):
+        root, module = self._temporary_checkout()
+        init_path = root / "ops" / "__init__.py"
+        init_path.write_text("# staged\n", encoding="utf-8")
+        subprocess.check_call(["git", "add", "ops/__init__.py"], cwd=root)
+        with self.assertRaisesRegex(module.RollbackStateContractError, "worktree dirty"):
+            module.derive_source_checkout_binding(root)
+
+    def test_untracked_sitecustomize_is_rejected_before_identity_derivation(self):
+        root, module = self._temporary_checkout()
+        (root / "sitecustomize.py").write_text(
+            "raise RuntimeError('must never execute')\n", encoding="utf-8"
+        )
+        with mock.patch.object(module, "_read_source_identity") as identity:
+            with self.assertRaisesRegex(module.RollbackStateContractError, "worktree dirty"):
+                module.derive_source_checkout_binding(root)
+        identity.assert_not_called()
+
+    def test_untracked_import_shadow_package_is_rejected_before_identity_derivation(self):
+        root, module = self._temporary_checkout()
+        shadow = root / "json"
+        shadow.mkdir()
+        (shadow / "__init__.py").write_text(
+            "raise RuntimeError('must never execute')\n", encoding="utf-8"
+        )
+        with mock.patch.object(module, "_read_source_identity") as identity:
+            with self.assertRaisesRegex(module.RollbackStateContractError, "worktree dirty"):
+                module.derive_source_checkout_binding(root)
+        identity.assert_not_called()
+
+    def test_untracked_entry_created_during_identity_derivation_fails_closed(self):
+        root, module = self._temporary_checkout()
+        read_identity = module._read_source_identity
+
+        def inject_untracked_entry(checkout: Path):
+            identity = read_identity(checkout)
+            (checkout / "late_import_shadow.py").write_text(
+                "raise RuntimeError('must never execute')\n", encoding="utf-8"
+            )
+            return identity
+
+        with mock.patch.object(
+            module, "_read_source_identity", side_effect=inject_untracked_entry
+        ) as identity:
+            with self.assertRaisesRegex(module.RollbackStateContractError, "worktree dirty"):
+                module.derive_source_checkout_binding(root)
+        self.assertEqual(1, identity.call_count)
 
     def test_changed_head_and_wrong_well_formed_sha_cannot_reuse_old_binding(self):
         root, module = self._temporary_checkout()

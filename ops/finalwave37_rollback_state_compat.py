@@ -93,26 +93,20 @@ def _source_root(source_checkout: str | os.PathLike[str] | Path) -> Path:
     return root
 
 
-def _require_clean_tracked_tree(root: Path) -> None:
-    for args in (
-        ("diff", "--quiet", "--no-ext-diff", "HEAD", "--"),
-        ("diff", "--cached", "--quiet", "--no-ext-diff", "HEAD", "--"),
-    ):
-        try:
-            completed = subprocess.run(
-                ["git", *args],
-                cwd=root,
-                check=False,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                timeout=30,
-            )
-        except (OSError, subprocess.SubprocessError):
-            raise RollbackStateContractError("source checkout Git unavailable") from None
-        if completed.returncode == 1:
-            raise RollbackStateContractError("source checkout tracked tree dirty")
-        if completed.returncode != 0:
-            raise RollbackStateContractError("source checkout Git unavailable")
+def _require_clean_worktree(root: Path) -> None:
+    """Reject tracked, staged, and non-ignored untracked checkout influence."""
+    status = _run_git(
+        root,
+        "status",
+        "--porcelain=v1",
+        "-z",
+        "--untracked-files=all",
+        text=False,
+    )
+    if not isinstance(status, bytes):
+        raise RollbackStateContractError("source checkout identity invalid")
+    if status:
+        raise RollbackStateContractError("source checkout worktree dirty")
 
 
 def _read_source_identity(root: Path) -> tuple[str, str, str]:
@@ -144,11 +138,11 @@ def derive_source_checkout_binding(
 ) -> dict[str, Any]:
     """Derive candidate identity only from this module's clean executing checkout."""
     root = _source_root(source_checkout)
-    _require_clean_tracked_tree(root)
+    _require_clean_worktree(root)
     first = _read_source_identity(root)
-    _require_clean_tracked_tree(root)
+    _require_clean_worktree(root)
     second = _read_source_identity(root)
-    _require_clean_tracked_tree(root)
+    _require_clean_worktree(root)
     if first != second:
         raise RollbackStateContractError("source checkout changed during binding")
     candidate_sha, tree_sha, listing_sha256 = second

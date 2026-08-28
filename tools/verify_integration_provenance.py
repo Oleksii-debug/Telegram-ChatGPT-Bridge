@@ -94,13 +94,13 @@ SINGLE_FINISHER_SOURCES = {
     },
 }
 SINGLE_FINISHER_BLOBS = {
-    ".github/workflows/finalwave37-rollback-state.yml": "83661c713a328be64d1a5a2c88a99000f1f56d06",
+    ".github/workflows/finalwave37-rollback-state.yml": "37236711ba4914f1d1b3fa64a253c9c7dcf9358b",
     "bridge/runtime_wsgi.py": "7e30cb08a2edbebaa483b178c83b396a6963b2f7",
-    "ops/finalwave37_rollback_state_compat.py": "741260dbc05a200cdce19d5c82eb581a09a6d5dd",
+    "ops/finalwave37_rollback_state_compat.py": "34c5cfe4efda01b27d97439a2afe7e03b084d1fe",
     "ops/runtime_write_reliability.py": "38fc7a83539026052f490f9889d17eed22987e73",
     "tests/test_final5_task2_write_guard_parent_toctou.py": "6a20cc708d97617ae0f1e943bb35cb4dfd3304c4",
     "tests/test_finalwave26_wsgi_guard_wiring.py": "9e73fbda857db992b24e2abc0b24010a497fe45b",
-    "tests/test_finalwave37_rollback_state_compat.py": "ed25e02856fa6fc4137ad21b4963971664412f7e",
+    "tests/test_finalwave37_rollback_state_compat.py": "3a12a60d221ccbbf63c8f97c4fe703b9bd32e43c",
 }
 
 

@@ -35,7 +35,12 @@ jobs:
           test -n "$EXPECTED_HEAD"
           actual_head="$(git rev-parse 'HEAD^{commit}')"
           test "$actual_head" = "$EXPECTED_HEAD"
-          test -z "$(git status --porcelain --untracked-files=no)"
+          status_file="$(mktemp)"
+          trap 'rm -f "$status_file"' EXIT
+          git status --porcelain=v1 -z --untracked-files=all > "$status_file"
+          test ! -s "$status_file"
+          rm -f "$status_file"
+          trap - EXIT
           EXPECTED_HEAD="$EXPECTED_HEAD" python - <<'PY'
           import os
           from pathlib import Path
