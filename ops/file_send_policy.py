@@ -1,14 +1,23 @@
 # -*- coding: utf-8 -*-
-"""Validation-only policy for Telegram send-files staging and external HTTPS references."""
+"""Opaque Bridge-file policy for Telegram send-files.
+
+Canonical Telegram send-files uses private Bridge file references only. Legacy
+external-URL entry points are retained as fail-closed compatibility stubs so a
+future caller cannot accidentally turn validation helpers into an SSRF fetch
+boundary.
+
+There is intentionally no resolver, redirect walker or HTTP client here.
+Resolve-then-connect IP checks are not DNS pinning and must not be represented as
+such. Any future remote-URL ingestion feature requires a new independently
+audited address-bound transport and is outside the current Action contract.
+"""
 from __future__ import annotations
 
 import hashlib
-import ipaddress
 import re
 from dataclasses import dataclass
 from pathlib import PurePath
 from typing import Iterable, Sequence
-from urllib.parse import urlsplit, urlunsplit
 
 
 class FileSendPolicyError(RuntimeError):
@@ -18,23 +27,30 @@ class FileSendPolicyError(RuntimeError):
         self.status = status
 
 
+_EXTERNAL_URL_DISABLED = "external_url_sources_disabled"
+
+
 @dataclass(frozen=True)
 class HttpsFetchPolicy:
+    """Legacy compatibility shape; external fetching is disabled."""
+
     max_bytes: int = 100 * 1024 * 1024
     timeout_seconds: int = 20
-    max_redirects: int = 3
+    max_redirects: int = 0
 
     def __post_init__(self) -> None:
         if self.max_bytes <= 0 or self.max_bytes > 512 * 1024 * 1024:
             raise ValueError("bounded fetch size required")
         if self.timeout_seconds <= 0 or self.timeout_seconds > 60:
             raise ValueError("bounded fetch timeout required")
-        if self.max_redirects < 0 or self.max_redirects > 5:
-            raise ValueError("bounded redirect count required")
+        if self.max_redirects != 0:
+            raise ValueError("external URL redirects are disabled")
 
 
 @dataclass(frozen=True)
 class ExternalFileReference:
+    """Legacy data shape only; canonical code cannot create one from a URL."""
+
     url: str
     url_sha256: str
     safe_name: str
@@ -50,7 +66,6 @@ class BridgeFileReference:
     mime_type: str | None = None
 
 
-_HOST_RE = re.compile(r"^[A-Za-z0-9.-]{1,253}$")
 _MIME_RE = re.compile(r"^[A-Za-z0-9!#$&^_.+-]+/[A-Za-z0-9!#$&^_.+-]+$")
 
 
@@ -58,30 +73,14 @@ def _digest(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
-def _public_ip(ip: ipaddress._BaseAddress) -> bool:
-    return not (
-        ip.is_private
-        or ip.is_loopback
-        or ip.is_link_local
-        or ip.is_multicast
-        or ip.is_reserved
-        or ip.is_unspecified
-    )
+def _reject_external_url() -> None:
+    raise FileSendPolicyError(_EXTERNAL_URL_DISABLED, status=403)
 
 
 def validate_resolved_ips(values: Iterable[str]) -> tuple[str, ...]:
-    parsed: list[str] = []
-    for raw in values:
-        try:
-            ip = ipaddress.ip_address(str(raw))
-        except ValueError as exc:
-            raise FileSendPolicyError("external_host_resolution_invalid") from exc
-        if not _public_ip(ip):
-            raise FileSendPolicyError("external_host_private_network_blocked", status=403)
-        parsed.append(ip.compressed)
-    if not parsed:
-        raise FileSendPolicyError("external_host_resolution_required")
-    return tuple(parsed)
+    """Fail closed: separate DNS resolution is not an approved fetch boundary."""
+    del values
+    _reject_external_url()
 
 
 def safe_filename(value: str) -> str:
@@ -92,43 +91,21 @@ def safe_filename(value: str) -> str:
         raise FileSendPolicyError("invalid_file_name")
     if "/" in name or "\\" in name or name in {".", ".."}:
         raise FileSendPolicyError("invalid_file_name")
-    # PurePath catches platform-shaped basename attempts without touching the filesystem.
     if PurePath(name).name != name:
         raise FileSendPolicyError("invalid_file_name")
     return name
 
 
 def validate_https_url(url: str) -> str:
-    if not isinstance(url, str) or not url or len(url) > 2048 or any(ord(ch) < 32 for ch in url):
-        raise FileSendPolicyError("invalid_external_url")
-    parts = urlsplit(url)
-    if parts.scheme.lower() != "https":
-        raise FileSendPolicyError("https_required", status=403)
-    if parts.username is not None or parts.password is not None:
-        raise FileSendPolicyError("url_credentials_forbidden", status=403)
-    if not parts.hostname or not _HOST_RE.fullmatch(parts.hostname):
-        raise FileSendPolicyError("invalid_external_host")
-    host = parts.hostname.lower().rstrip(".")
-    if host in {"localhost", "localhost.localdomain"} or host.endswith(".localhost") or host.endswith(".local"):
-        raise FileSendPolicyError("external_host_private_network_blocked", status=403)
-    try:
-        ip = ipaddress.ip_address(host.strip("[]"))
-    except ValueError:
-        ip = None
-    if ip is not None and not _public_ip(ip):
-        raise FileSendPolicyError("external_host_private_network_blocked", status=403)
-    if parts.port not in (None, 443):
-        raise FileSendPolicyError("external_port_forbidden", status=403)
-    # Fragments are never sent to the server and are excluded from the bound reference.
-    return urlunsplit(("https", parts.netloc.lower(), parts.path or "/", parts.query, ""))
+    """Fail closed for every URL, including otherwise public HTTPS targets."""
+    del url
+    _reject_external_url()
 
 
 def validate_redirect_chain(urls: Sequence[str], *, policy: HttpsFetchPolicy) -> tuple[str, ...]:
-    if not urls:
-        raise FileSendPolicyError("redirect_chain_empty")
-    if len(urls) - 1 > policy.max_redirects:
-        raise FileSendPolicyError("too_many_redirects", status=502)
-    return tuple(validate_https_url(url) for url in urls)
+    """Fail closed; redirect-following external file ingestion is disabled."""
+    del urls, policy
+    _reject_external_url()
 
 
 def make_external_reference(
@@ -139,35 +116,14 @@ def make_external_reference(
     declared_mime: str | None = None,
     policy: HttpsFetchPolicy | None = None,
 ) -> ExternalFileReference:
-    policy = policy or HttpsFetchPolicy()
-    normalized_url = validate_https_url(url)
-    file_name = safe_filename(name)
-    size: int | None
-    if declared_size is None:
-        size = None
-    else:
-        if isinstance(declared_size, bool):
-            raise FileSendPolicyError("invalid_declared_size")
-        try:
-            size = int(declared_size)
-        except (TypeError, ValueError) as exc:
-            raise FileSendPolicyError("invalid_declared_size") from exc
-        if size < 0:
-            raise FileSendPolicyError("invalid_declared_size")
-        if size > policy.max_bytes:
-            raise FileSendPolicyError("file_too_large", status=413)
-    mime = None
-    if declared_mime not in (None, ""):
-        if not isinstance(declared_mime, str) or not _MIME_RE.fullmatch(declared_mime):
-            raise FileSendPolicyError("invalid_mime_type")
-        mime = declared_mime.lower()
-    return ExternalFileReference(normalized_url, _digest(normalized_url), file_name, size, mime)
+    """Fail closed; canonical SEND_FILES accepts only BridgeFileReference."""
+    del url, name, declared_size, declared_mime, policy
+    _reject_external_url()
 
 
 def make_bridge_reference(*, file_id: str, sha256: str, size: int, mime_type: str | None = None) -> BridgeFileReference:
     if not isinstance(file_id, str) or not file_id or len(file_id) > 128 or any(ord(ch) < 32 for ch in file_id):
         raise FileSendPolicyError("invalid_bridge_file_id")
-    # Intentionally no path parameter exists in this API: only opaque BridgeStore IDs.
     if "/" in file_id or "\\" in file_id or file_id in {".", ".."}:
         raise FileSendPolicyError("invalid_bridge_file_id")
     digest = str(sha256 or "")
@@ -221,12 +177,12 @@ def validate_voice_note(files: Sequence[BridgeFileReference], *, voice_note: boo
 
 
 def external_audit_metadata(ref: ExternalFileReference) -> dict[str, object]:
+    """Compatibility sanitizer for historical in-memory objects; not a fetch path."""
     return {
-        "source_kind": "HTTPS",
+        "source_kind": "HTTPS_DISABLED",
         "url_sha256": ref.url_sha256,
         "declared_size": ref.declared_size,
         "mime_present": ref.declared_mime is not None,
-        # No URL, host, filename or content.
     }
 
 
