@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "role": "DEV09",
+  "parent_sha": "4ebfceb153e94840fa046af88cee1131e0705657",
+  "target_branch": "work3/integration-release-candidate",
+  "qa_paths": [
+    ".github/workflows/dev09-e2e-qa.yml",
+    "docs/DEV09_SWARM_QA.md",
+    "integration/dev09_qa_v1.json",
+    "ops/dev09_qa_probe.py",
+    "tests/test_dev09_qa_probe.py"
+  ],
+  "production_logic_modified": false,
+  "deployment_authorized": false,
+  "live_write_authorized": false,
+  "product_pass": false
+}
