@@ -11,18 +11,175 @@ resolved from private live deployment evidence and independently gated.
 """
 from __future__ import annotations
 
+import hashlib
+import json
+import os
 import re
+import stat
+import subprocess
 from dataclasses import dataclass
-from typing import Iterable
+from pathlib import Path
+from typing import Any, Iterable, Mapping
 
 
 CANDIDATE_ANCHOR_SHA = "84691967e5363bc4b88dfae97371d7bf329c105d"
 PREDECESSOR_EVIDENCE_SHA = "00684e834a523f55ea3b61c1a12cb9dc54cfd947"
 FULL_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+_SOURCE_BINDING_KEYS = {
+    "schema_version",
+    "identity_source",
+    "candidate_sha",
+    "source_tree_sha",
+    "source_tree_listing_sha256",
+    "source_gate_status",
+    "production_authorized",
+    "private_values_recorded",
+    "source_binding_sha256",
+}
 
 
 class RollbackStateContractError(ValueError):
     """Invalid or unsafe rollback-plan evidence."""
+
+
+def _run_git(root: Path, *args: str, text: bool = True) -> str | bytes:
+    try:
+        completed = subprocess.run(
+            ["git", *args],
+            cwd=root,
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=text,
+            timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError):
+        raise RollbackStateContractError("source checkout Git unavailable") from None
+    if completed.returncode != 0:
+        raise RollbackStateContractError("source checkout Git unavailable")
+    return completed.stdout
+
+
+def _execution_root() -> Path:
+    try:
+        raw = Path(__file__).absolute()
+        resolved = raw.resolve(strict=True)
+    except OSError:
+        raise RollbackStateContractError("source checkout execution root unsafe") from None
+    if raw != resolved or not stat.S_ISREG(resolved.stat().st_mode):
+        raise RollbackStateContractError("source checkout execution root unsafe")
+    return resolved.parents[1]
+
+
+def _source_root(source_checkout: str | os.PathLike[str] | Path) -> Path:
+    try:
+        absolute = Path(os.path.abspath(os.fspath(source_checkout)))
+        info = absolute.lstat()
+        root = absolute.resolve(strict=True)
+    except (OSError, TypeError, ValueError):
+        raise RollbackStateContractError("source checkout unsafe") from None
+    if not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode) or root != absolute:
+        raise RollbackStateContractError("source checkout unsafe")
+    top = str(_run_git(root, "rev-parse", "--show-toplevel")).strip()
+    try:
+        top_root = Path(top).resolve(strict=True)
+    except OSError:
+        raise RollbackStateContractError("source checkout unsafe") from None
+    if top_root != root:
+        raise RollbackStateContractError("source checkout is not repository root")
+    if root != _execution_root():
+        raise RollbackStateContractError("source checkout execution root mismatch")
+    return root
+
+
+def _require_clean_tracked_tree(root: Path) -> None:
+    for args in (
+        ("diff", "--quiet", "--no-ext-diff", "HEAD", "--"),
+        ("diff", "--cached", "--quiet", "--no-ext-diff", "HEAD", "--"),
+    ):
+        try:
+            completed = subprocess.run(
+                ["git", *args],
+                cwd=root,
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=30,
+            )
+        except (OSError, subprocess.SubprocessError):
+            raise RollbackStateContractError("source checkout Git unavailable") from None
+        if completed.returncode == 1:
+            raise RollbackStateContractError("source checkout tracked tree dirty")
+        if completed.returncode != 0:
+            raise RollbackStateContractError("source checkout Git unavailable")
+
+
+def _read_source_identity(root: Path) -> tuple[str, str, str]:
+    candidate_sha = str(_run_git(root, "rev-parse", "--verify", "HEAD^{commit}")).strip()
+    source_tree_sha = str(_run_git(root, "rev-parse", "--verify", "HEAD^{tree}")).strip()
+    listing = _run_git(root, "ls-tree", "-r", "-z", "--full-tree", "HEAD", text=False)
+    if (
+        not isinstance(listing, bytes)
+        or not listing
+        or FULL_SHA_RE.fullmatch(candidate_sha) is None
+        or FULL_SHA_RE.fullmatch(source_tree_sha) is None
+    ):
+        raise RollbackStateContractError("source checkout identity invalid")
+    return candidate_sha, source_tree_sha, hashlib.sha256(listing).hexdigest()
+
+
+def _canonical_json_sha256(payload: Mapping[str, Any]) -> str:
+    try:
+        encoded = json.dumps(
+            dict(payload), sort_keys=True, separators=(",", ":"), allow_nan=False
+        ).encode("utf-8")
+    except (TypeError, ValueError, UnicodeError):
+        raise RollbackStateContractError("source binding invalid") from None
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def derive_source_checkout_binding(
+    source_checkout: str | os.PathLike[str] | Path,
+) -> dict[str, Any]:
+    """Derive candidate identity only from this module's clean executing checkout."""
+    root = _source_root(source_checkout)
+    _require_clean_tracked_tree(root)
+    first = _read_source_identity(root)
+    _require_clean_tracked_tree(root)
+    second = _read_source_identity(root)
+    _require_clean_tracked_tree(root)
+    if first != second:
+        raise RollbackStateContractError("source checkout changed during binding")
+    candidate_sha, tree_sha, listing_sha256 = second
+    base = {
+        "schema_version": 1,
+        "identity_source": "EXACT_EXECUTING_GIT_CHECKOUT",
+        "candidate_sha": candidate_sha,
+        "source_tree_sha": tree_sha,
+        "source_tree_listing_sha256": listing_sha256,
+        "source_gate_status": "IDENTITY_ONLY_INDEPENDENT_GATE_REQUIRED",
+        "production_authorized": False,
+        "private_values_recorded": False,
+    }
+    return {**base, "source_binding_sha256": _canonical_json_sha256(base)}
+
+
+def validate_source_gate_binding(
+    binding: Mapping[str, Any],
+    source_checkout: str | os.PathLike[str] | Path,
+) -> dict[str, Any]:
+    """Require a sealed binding to equal the re-derived exact checkout identity."""
+    expected = derive_source_checkout_binding(source_checkout)
+    if (
+        not isinstance(binding, Mapping)
+        or set(binding) != _SOURCE_BINDING_KEYS
+        or not isinstance(binding.get("source_binding_sha256"), str)
+        or SHA256_RE.fullmatch(str(binding.get("source_binding_sha256"))) is None
+        or dict(binding) != expected
+    ):
+        raise RollbackStateContractError("source gate binding mismatch")
+    return expected
 
 
 @dataclass(frozen=True)
@@ -165,7 +322,8 @@ def classify_restore_request(domains: Iterable[str]) -> RollbackPlanDecision:
 
 def assess_exact_sha_rollback_plan(
     *,
-    candidate_sha: str,
+    source_checkout: str | os.PathLike[str] | Path,
+    source_gate_binding: Mapping[str, Any],
     rollback_target_sha: str,
     observed_live_previous_sha: str | None,
     compatibility_reference_sha: str,
@@ -175,10 +333,12 @@ def assess_exact_sha_rollback_plan(
     rollback_target_security_regression_cleared: bool,
     independent_auditor_gate: bool,
 ) -> RollbackPlanDecision:
-    """Fail closed until the exact live predecessor and state contract are proven.
+    """Fail closed until exact source, live predecessor and state are proven.
 
-    Even a complete result never authorizes production.  Independent Auditor
-    approval and live deployment evidence remain external gates.
+    Candidate identity is output derived from the same clean checkout that runs
+    this module.  ``source_gate_binding`` must exactly match that derivation; it
+    is identity evidence, not self-approval.  Independent Auditor approval and
+    live deployment evidence remain external gates.
     """
     bools = (
         target_specific_compatibility_proven,
@@ -189,11 +349,10 @@ def assess_exact_sha_rollback_plan(
     )
     if any(type(value) is not bool for value in bools):
         raise RollbackStateContractError("rollback evidence flags must be booleans")
-    for value in (candidate_sha, rollback_target_sha, compatibility_reference_sha):
+    validate_source_gate_binding(source_gate_binding, source_checkout)
+    for value in (rollback_target_sha, compatibility_reference_sha):
         if not isinstance(value, str) or not FULL_SHA_RE.fullmatch(value):
-            raise RollbackStateContractError("candidate/rollback/reference identities must be exact full Git SHAs")
-    if candidate_sha != CANDIDATE_ANCHOR_SHA:
-        return RollbackPlanDecision("BLOCKED_CANDIDATE_IDENTITY_MISMATCH", "plan_not_bound_to_finalwave37_candidate")
+            raise RollbackStateContractError("rollback/reference identities must be exact full Git SHAs")
     if observed_live_previous_sha is None:
         return RollbackPlanDecision("BLOCKED_LKG_IDENTITY_REQUIRED", "live_last_known_good_sha_not_observed")
     if not isinstance(observed_live_previous_sha, str) or not FULL_SHA_RE.fullmatch(observed_live_previous_sha):
@@ -217,10 +376,10 @@ def assess_exact_sha_rollback_plan(
         )
     if not forced_smoke_passed:
         return RollbackPlanDecision("BLOCKED_FORCED_SMOKE_REQUIRED", "rollback_forced_smoke_matrix_not_proven")
-    if rollback_target_sha == PREDECESSOR_EVIDENCE_SHA and not rollback_target_security_regression_cleared:
+    if not rollback_target_security_regression_cleared:
         return RollbackPlanDecision(
             "BLOCKED_ROLLBACK_TARGET_SECURITY_REGRESSION",
-            "evidence_predecessor_audit_writer_lacks_current_fail_closed_topology_hardening",
+            "actual_rollback_target_must_clear_current_security_regression_gate",
         )
     if not independent_auditor_gate:
         return RollbackPlanDecision(
@@ -245,6 +404,8 @@ __all__ = [
     "RollbackStateContractError",
     "assess_exact_sha_rollback_plan",
     "classify_restore_request",
+    "derive_source_checkout_binding",
     "matrix_by_domain",
+    "validate_source_gate_binding",
     "validate_matrix",
 ]

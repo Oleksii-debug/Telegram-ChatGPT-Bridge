@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import sqlite3
@@ -15,14 +16,16 @@ from unittest import mock
 from bridge.audit import AuditLog
 from bridge.runtime import RuntimeBootstrapError, _SQLiteFixedWindowStore
 from bridge.storage import CheckpointStore, DownloadItem, FileRecordStore
-from ops import deploy_release, release_guard
+from ops import deploy_release, finalwave37_rollback_state_compat as rollback_compat, release_guard
 from ops.finalwave37_rollback_state_compat import (
     CANDIDATE_ANCHOR_SHA,
     PREDECESSOR_EVIDENCE_SHA,
     RollbackStateContractError,
     assess_exact_sha_rollback_plan,
     classify_restore_request,
+    derive_source_checkout_binding,
     matrix_by_domain,
+    validate_source_gate_binding,
 )
 from ops.write_safety import PersistentWriteStore, ReconciliationRequired, WriteAction
 from tests.test_audit_round9 import Round9Layout
@@ -132,8 +135,20 @@ class RollbackMatrixContractTests(unittest.TestCase):
         )
 
     def _decision(self, **overrides):
+        synthetic_binding = {
+            "schema_version": 1,
+            "identity_source": "EXACT_EXECUTING_GIT_CHECKOUT",
+            "candidate_sha": "a" * 40,
+            "source_tree_sha": "b" * 40,
+            "source_tree_listing_sha256": "c" * 64,
+            "source_gate_status": "IDENTITY_ONLY_INDEPENDENT_GATE_REQUIRED",
+            "production_authorized": False,
+            "private_values_recorded": False,
+            "source_binding_sha256": "d" * 64,
+        }
         values = dict(
-            candidate_sha=CANDIDATE_ANCHOR_SHA,
+            source_checkout=_repo_root(),
+            source_gate_binding=synthetic_binding,
             rollback_target_sha=PREDECESSOR_EVIDENCE_SHA,
             observed_live_previous_sha=PREDECESSOR_EVIDENCE_SHA,
             compatibility_reference_sha=PREDECESSOR_EVIDENCE_SHA,
@@ -144,7 +159,12 @@ class RollbackMatrixContractTests(unittest.TestCase):
             independent_auditor_gate=False,
         )
         values.update(overrides)
-        return assess_exact_sha_rollback_plan(**values)
+        with mock.patch.object(
+            rollback_compat,
+            "validate_source_gate_binding",
+            return_value=synthetic_binding,
+        ):
+            return assess_exact_sha_rollback_plan(**values)
 
     def test_plan_requires_live_last_known_good_identity(self):
         decision = self._decision(observed_live_previous_sha=None)
@@ -177,6 +197,29 @@ class RollbackMatrixContractTests(unittest.TestCase):
         decision = self._decision(rollback_target_security_regression_cleared=False)
         self.assertEqual("BLOCKED_ROLLBACK_TARGET_SECURITY_REGRESSION", decision.action)
 
+    def test_any_actual_target_is_blocked_until_security_regression_is_cleared(self):
+        live = "f" * 40
+        decision = self._decision(
+            rollback_target_sha=live,
+            observed_live_previous_sha=live,
+            compatibility_reference_sha=live,
+            target_specific_compatibility_proven=True,
+            rollback_target_security_regression_cleared=False,
+        )
+        self.assertEqual("BLOCKED_ROLLBACK_TARGET_SECURITY_REGRESSION", decision.action)
+
+    @unittest.skipUnless((_repo_root() / ".git").exists(), "exact Git checkout required")
+    def test_current_candidate_is_derived_from_actual_clean_checkout_head(self):
+        root = _repo_root()
+        expected = subprocess.check_output(
+            ["git", "rev-parse", "HEAD^{commit}"], cwd=root, text=True
+        ).strip()
+        binding = derive_source_checkout_binding(root)
+        self.assertEqual(expected, binding["candidate_sha"])
+        self.assertEqual("IDENTITY_ONLY_INDEPENDENT_GATE_REQUIRED", binding["source_gate_status"])
+        self.assertFalse(binding["production_authorized"])
+        self.assertEqual(binding, validate_source_gate_binding(binding, root))
+
     def test_complete_nonlive_contract_still_requires_auditor_and_live_evidence(self):
         decision = self._decision(independent_auditor_gate=False)
         self.assertEqual("AUDITOR_GATE_REQUIRED", decision.action)
@@ -188,6 +231,89 @@ class RollbackMatrixContractTests(unittest.TestCase):
     def test_truthy_non_boolean_evidence_is_rejected(self):
         with self.assertRaises(RollbackStateContractError):
             self._decision(forced_smoke_passed=1)
+
+
+class SourceCheckoutBindingTests(unittest.TestCase):
+    def _git(self, root: Path, *args: str) -> str:
+        return subprocess.check_output(
+            ["git", *args], cwd=root, text=True, stderr=subprocess.DEVNULL
+        ).strip()
+
+    def _temporary_checkout(self) -> tuple[Path, types.ModuleType]:
+        td = tempfile.TemporaryDirectory()
+        self.addCleanup(td.cleanup)
+        root = Path(td.name)
+        ops = root / "ops"
+        ops.mkdir()
+        (ops / "__init__.py").write_text("", encoding="utf-8")
+        source = (_repo_root() / "ops" / "finalwave37_rollback_state_compat.py").read_text(encoding="utf-8")
+        module_path = ops / "finalwave37_rollback_state_compat.py"
+        module_path.write_text(source, encoding="utf-8")
+        subprocess.check_call(["git", "init", "-q"], cwd=root)
+        subprocess.check_call(["git", "config", "user.name", "Synthetic Test"], cwd=root)
+        subprocess.check_call(["git", "config", "user.email", "synthetic@example.invalid"], cwd=root)
+        subprocess.check_call(["git", "add", "ops"], cwd=root)
+        subprocess.check_call(["git", "commit", "-q", "-m", "synthetic checkout"], cwd=root)
+        name = f"synthetic_finalwave37_{id(td)}"
+        spec = importlib.util.spec_from_file_location(name, module_path)
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[name] = module
+        self.addCleanup(sys.modules.pop, name, None)
+        spec.loader.exec_module(module)
+        return root, module
+
+    def test_clean_checkout_binding_uses_real_head_tree_and_listing(self):
+        root, module = self._temporary_checkout()
+        binding = module.derive_source_checkout_binding(root)
+        self.assertEqual(self._git(root, "rev-parse", "HEAD^{commit}"), binding["candidate_sha"])
+        self.assertEqual(self._git(root, "rev-parse", "HEAD^{tree}"), binding["source_tree_sha"])
+        self.assertEqual(binding, module.validate_source_gate_binding(binding, root))
+
+    def test_nonrepo_subdirectory_and_symlink_checkout_fail_closed(self):
+        root, module = self._temporary_checkout()
+        with tempfile.TemporaryDirectory() as td:
+            with self.assertRaisesRegex(module.RollbackStateContractError, "Git unavailable"):
+                module.derive_source_checkout_binding(Path(td))
+        with self.assertRaisesRegex(module.RollbackStateContractError, "not repository root"):
+            module.derive_source_checkout_binding(root / "ops")
+        link = root.with_name(root.name + "-symlink")
+        link.symlink_to(root, target_is_directory=True)
+        self.addCleanup(link.unlink)
+        with self.assertRaisesRegex(module.RollbackStateContractError, "checkout unsafe"):
+            module.derive_source_checkout_binding(link)
+
+    def test_dirty_tracked_tree_is_rejected(self):
+        root, module = self._temporary_checkout()
+        module_path = root / "ops" / "finalwave37_rollback_state_compat.py"
+        module_path.write_text(module_path.read_text(encoding="utf-8") + "\n# dirty\n", encoding="utf-8")
+        with self.assertRaisesRegex(module.RollbackStateContractError, "tracked tree dirty"):
+            module.derive_source_checkout_binding(root)
+
+    def test_changed_head_and_wrong_well_formed_sha_cannot_reuse_old_binding(self):
+        root, module = self._temporary_checkout()
+        binding = module.derive_source_checkout_binding(root)
+        tampered = dict(binding)
+        tampered["candidate_sha"] = "f" * 40
+        base = dict(tampered)
+        base.pop("source_binding_sha256")
+        tampered["source_binding_sha256"] = module._canonical_json_sha256(base)
+        with self.assertRaisesRegex(module.RollbackStateContractError, "binding mismatch"):
+            module.validate_source_gate_binding(tampered, root)
+
+        tracked = root / "ops" / "__init__.py"
+        tracked.write_text("# next commit\n", encoding="utf-8")
+        subprocess.check_call(["git", "add", "ops/__init__.py"], cwd=root)
+        subprocess.check_call(["git", "commit", "-q", "-m", "changed checkout"], cwd=root)
+        with self.assertRaisesRegex(module.RollbackStateContractError, "binding mismatch"):
+            module.validate_source_gate_binding(binding, root)
+
+    def test_different_clean_checkout_cannot_relabel_executing_source(self):
+        root, module = self._temporary_checkout()
+        other, _other_module = self._temporary_checkout()
+        self.assertNotEqual(root, other)
+        with self.assertRaisesRegex(module.RollbackStateContractError, "execution root mismatch"):
+            module.derive_source_checkout_binding(other)
 
 
 class ExactPredecessorCompatibilityTests(unittest.TestCase):
