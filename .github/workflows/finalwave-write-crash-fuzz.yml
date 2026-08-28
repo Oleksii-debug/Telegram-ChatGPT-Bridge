@@ -1,0 +1,60 @@
+name: FINALWAVE Write Crash Fuzz
+
+on:
+  pull_request:
+    paths:
+      - 'ops/write_fault_hardening.py'
+      - 'tests/test_finalwave50_write_crash_fuzz.py'
+      - 'tests/test_finalwave50_process_death_matrix.py'
+      - 'tests/test_finalwave50_canonical_reproducers.py'
+      - '.github/workflows/finalwave-write-crash-fuzz.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  write-crash-fuzz:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout full history
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Set up Python 3.11
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.11'
+      - name: Compile write crash hardening and canonical write seams
+        run: >-
+          python -m py_compile
+          ops/write_safety.py
+          ops/write_endpoint_policy.py
+          ops/telegram_write_adapter.py
+          ops/write_fault_hardening.py
+          tests/test_finalwave50_write_crash_fuzz.py
+          tests/test_finalwave50_process_death_matrix.py
+          tests/test_finalwave50_canonical_reproducers.py
+          tests/test_dev4_write_core.py
+          tests/test_dev4_endpoint_policy.py
+          tests/test_dev_a_integration.py
+      - name: Run FINALWAVE fault matrix, red oracle and canonical write regressions
+        run: |
+          python -m unittest -v \
+            tests.test_finalwave50_write_crash_fuzz \
+            tests.test_finalwave50_process_death_matrix \
+            tests.test_finalwave50_canonical_reproducers \
+            tests.test_dev4_write_core \
+            tests.test_dev4_endpoint_policy \
+            tests.test_dev_a_integration
+      - name: Validate unified ChatGPT Action schema offline
+        run: python tools/build_action_openapi.py --validate-only
+      - name: Current-tree secret scan
+        if: always()
+        run: python tools/secret_scan.py --mode current
+      - name: Full-history secret scan
+        if: always()
+        run: python tools/secret_scan.py --mode history
+      - name: Verify specialist branch has no deploy arming marker
+        if: always()
+        run: test ! -e .cpanel.yml && test ! -e ops/ENABLE_HOSTIQ_AUTO_DEPLOY
