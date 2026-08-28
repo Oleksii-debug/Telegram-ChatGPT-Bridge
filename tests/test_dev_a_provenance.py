@@ -211,3 +211,174 @@ class DevAProvenanceTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# FINALWAVE-33: machine-enforced provenance for post-baseline swarm integrations.
+# This section intentionally consumes the existing canonical manifest rather than
+# adding a second prose ledger that could diverge from the Git object graph.
+from pathlib import PurePosixPath
+from unittest import mock
+from tools.verify_integration_provenance import _assert_ancestor, _git, _parents
+
+CANONICAL_PR9_BASE = "26a2df12c350f670a703b236edc3648f339b64a9"
+CANONICAL_PR9_ANCHOR = "84691967e5363bc4b88dfae97371d7bf329c105d"
+CANONICAL_PR9_MERGE = "0516bf242bb7e4551435e99a516a20d8785590b1"
+EXPECTED_SWARM_INTEGRATIONS = {
+    "DEV03_READ_HARDENING",
+    "DEV04_MEDIA_STORAGE",
+    "DEV07_AUDIT_SINK",
+    "DEV08_DEPLOYMENT_RECOVERY_ORACLE",
+}
+
+
+def _exact_paths(value: object, label: str, *, allow_empty: bool = False) -> tuple[str, ...]:
+    if not isinstance(value, list) or (not value and not allow_empty):
+        raise ProvenanceError(f"{label}: explicit path list required")
+    if value != sorted(set(value)):
+        raise ProvenanceError(f"{label}: paths must be unique and sorted")
+    result: list[str] = []
+    for raw in value:
+        if not isinstance(raw, str) or not raw:
+            raise ProvenanceError(f"{label}: invalid path")
+        path = PurePosixPath(raw)
+        if path.is_absolute() or ".." in path.parts or raw.endswith("/"):
+            raise ProvenanceError(f"{label}: unsafe/non-exact path")
+        if any(ch in raw for ch in "*?[]{}"):
+            raise ProvenanceError(f"{label}: wildcard/pattern path forbidden")
+        result.append(raw)
+    return tuple(result)
+
+
+def _require_merge_parent_order(merge_commit: str, first_parent: str, source_sha: str) -> None:
+    if _parents(merge_commit) != (first_parent, source_sha):
+        raise ProvenanceError("semantic merge parent order/source identity mismatch")
+
+
+def _require_exact_blob(candidate: str, source_sha: str, path: str) -> None:
+    if _blob(candidate, path) != _blob(source_sha, path):
+        raise ProvenanceError(f"silent specialist-path mutation: {path}")
+
+
+def _require_adaptation_blob(candidate: str, source_sha: str, adaptation_commit: str, path: str) -> None:
+    source_blob = _blob(source_sha, path)
+    adapted_blob = _blob(adaptation_commit, path)
+    if source_blob == adapted_blob:
+        raise ProvenanceError(f"declared adaptation/supersession has no blob delta: {path}")
+    if _blob(candidate, path) != adapted_blob:
+        raise ProvenanceError(f"unregistered post-adaptation mutation: {path}")
+
+
+class FinalwaveSwarmProvenanceGuardTests(unittest.TestCase):
+    def _candidate_from_pr_merge(self) -> tuple[str, str, str]:
+        head = _git("rev-parse", "HEAD")
+        parents = _parents(head)
+        if len(parents) != 2:
+            self.fail("provenance CI must execute on a two-parent PR merge ref")
+        pr_base, candidate = parents
+        self.assertEqual(pr_base, _git("merge-base", pr_base, candidate))
+        self.assertEqual(_git("rev-parse", f"{head}^{{tree}}"), _git("rev-parse", f"{candidate}^{{tree}}"))
+        return pr_base, candidate, head
+
+    @requires_repository_git
+    def test_fixed_canonical_anchor_binds_base_candidate_and_pr_merge(self):
+        self.assertEqual((CANONICAL_PR9_BASE, CANONICAL_PR9_ANCHOR), _parents(CANONICAL_PR9_MERGE))
+        self.assertEqual(
+            _git("rev-parse", f"{CANONICAL_PR9_MERGE}^{{tree}}"),
+            _git("rev-parse", f"{CANONICAL_PR9_ANCHOR}^{{tree}}"),
+        )
+        pr_base, candidate, pr_merge = self._candidate_from_pr_merge()
+        self.assertEqual(pr_base, _parents(pr_merge)[0])
+        self.assertEqual(candidate, _parents(pr_merge)[1])
+        _assert_ancestor(CANONICAL_PR9_ANCHOR, candidate)
+
+    @requires_repository_git
+    def test_all_swarm_integrations_have_exact_ordered_ancestry_blobs_and_exclusions(self):
+        payload = json.loads(MANIFEST.read_text(encoding="utf-8"))
+        integrations = payload.get("swarm_integrations")
+        self.assertIsInstance(integrations, dict)
+        self.assertEqual(EXPECTED_SWARM_INTEGRATIONS, set(integrations))
+        _, candidate, _ = self._candidate_from_pr_merge()
+        owned: dict[str, str] = {}
+        for owner, record in sorted(integrations.items()):
+            with self.subTest(owner=owner):
+                source = record["source_sha"]
+                merge_commit = record["merge_commit"]
+                first_parent = record["first_parent"]
+                _require_merge_parent_order(merge_commit, first_parent, source)
+                _assert_ancestor(merge_commit, candidate)
+                exact = _exact_paths(record["exact_blob_paths"], f"{owner}.exact")
+                excluded = _exact_paths(record.get("excluded_specialist_paths", []), f"{owner}.excluded", allow_empty=True)
+                self.assertTrue(set(exact).isdisjoint(excluded))
+                for path in exact:
+                    self.assertNotIn(path, owned, f"specialist path has ambiguous owner: {path}")
+                    owned[path] = owner
+                    _require_exact_blob(candidate, source, path)
+                for path in excluded:
+                    self.assertTrue(_path_exists(source, path), f"excluded source path missing: {owner}:{path}")
+                    self.assertFalse(_path_exists(candidate, path), f"excluded specialist path leaked into candidate: {owner}:{path}")
+
+        dev08 = integrations["DEV08_DEPLOYMENT_RECOVERY_ORACLE"]
+        runtime_source = dev08["authoritative_runtime_source_sha"]
+        runtime_paths = _exact_paths(dev08["authoritative_runtime_paths"], "DEV08.authoritative_runtime")
+        for path in runtime_paths:
+            self.assertNotIn(path, owned, f"path has two specialist owners: {path}")
+            owned[path] = "DEV08_AUTHORITATIVE_RUNTIME"
+            _require_exact_blob(candidate, runtime_source, path)
+
+        # dev_a_paths remains a compatibility candidate-diff allowlist. Specialist
+        # ownership for every overlap above is resolved by the exact records, so a
+        # generic allowlist entry cannot be the sole provenance authority.
+        generic_allowlist = set(payload["dev_a_paths"])
+        overlaps = generic_allowlist & set(owned)
+        self.assertTrue(overlaps)
+        self.assertEqual(overlaps, {path for path in generic_allowlist if path in owned})
+
+    @requires_repository_git
+    def test_adapted_and_superseded_paths_are_pinned_to_source_and_canonical_blob(self):
+        payload = json.loads(MANIFEST.read_text(encoding="utf-8"))
+        release = json.loads(RELEASE_OVERRIDE.read_text(encoding="utf-8"))
+        _, candidate, _ = self._candidate_from_pr_merge()
+        _assert_ancestor(CANONICAL_PR9_ANCHOR, candidate)
+
+        records: list[tuple[str, str, str]] = []
+        for lane in ("DEV3", "DEV4"):
+            row = payload["predecessors"][lane]
+            records.extend((row["sha"], path, f"{lane}.dev_a_override") for path in row.get("dev_a_overrides", []))
+        dev5 = payload["predecessors"]["DEV5"]
+        records.extend((dev5["sha"], path, "DEV5.dev_a_override") for path in dev5.get("dev_a_overrides", []))
+
+        dev_b = release["dev_b"]
+        records.extend((dev_b["sha"], path, "DEV_B.adapted") for path in dev_b["adapted_paths"])
+        records.extend((dev_b["sha"], path, "DEV_B.superseded") for path in dev_b["supersedes_predecessor_paths"])
+        terminal = release["dev_b_terminal_sync"]
+        records.extend((terminal["sha"], path, "DEV_B.terminal_retained") for path in terminal["retained_dev_a_adaptations"])
+        dev_c = release["dev_c_qa_sync"]
+        records.extend((dev_c["sha"], path, "DEV_C.adapted") for path in dev_c["adapted_paths"])
+
+        self.assertGreaterEqual(len(records), 20)
+        for source, path, owner in records:
+            with self.subTest(owner=owner, path=path):
+                _exact_paths([path], f"{owner}.path")
+                _assert_ancestor(source, CANONICAL_PR9_ANCHOR)
+                _require_adaptation_blob(candidate, source, CANONICAL_PR9_ANCHOR, path)
+
+    def test_parent_order_spoof_is_rejected(self):
+        with mock.patch(__name__ + "._parents", return_value=("b" * 40, "a" * 40)):
+            with self.assertRaises(ProvenanceError):
+                _require_merge_parent_order("c" * 40, "a" * 40, "b" * 40)
+
+    def test_silent_post_adaptation_mutation_is_rejected(self):
+        values = {
+            ("source", "p.py"): "1" * 40,
+            ("adapt", "p.py"): "2" * 40,
+            ("candidate", "p.py"): "3" * 40,
+        }
+        with mock.patch(__name__ + "._blob", side_effect=lambda ref, path: values[(ref, path)]):
+            with self.assertRaises(ProvenanceError):
+                _require_adaptation_blob("candidate", "source", "adapt", "p.py")
+
+    def test_wildcard_and_prefix_paths_fail_closed(self):
+        for path in ("bridge/*", "tests/", "../escape", "/absolute", "ops/[ab].py"):
+            with self.subTest(path=path):
+                with self.assertRaises(ProvenanceError):
+                    _exact_paths([path], "adversarial")
