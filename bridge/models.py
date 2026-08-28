@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from typing import Any, Iterable
 
 from .errors import BridgeError
+from .filenames import safe_filename
 
 MAX_CURSOR_BYTES = 512
 
@@ -74,7 +75,14 @@ class MediaRecord:
     height: int | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        payload = asdict(self)
+        # Telegram/file metadata is untrusted display input. Keep the internal
+        # record faithful for backend/download matching, but expose one strict
+        # UTF-8, path-independent filename through JSON. Message text is not
+        # transformed here or anywhere in this filename policy.
+        if self.name is not None:
+            payload["name"] = safe_filename(self.name, "file", limit=180)
+        return payload
 
 
 @dataclass(frozen=True)
