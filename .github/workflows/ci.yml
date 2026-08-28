@@ -21,7 +21,45 @@ jobs:
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: '3.11'
+      - name: Classify exact PR head for expensive canonical evidence
+        id: head_authority
+        env:
+          EVENT_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+        run: |
+          if [ "$GITHUB_EVENT_NAME" != "pull_request" ]; then
+            echo "run_heavy=true" >> "$GITHUB_OUTPUT"
+            echo "RECOVERY_GUARD_HEAD_AUTHORITY=push_run_heavy"
+            exit 0
+          fi
+
+          # If exact-current state cannot be proven cheaply, preserve the existing
+          # conservative behavior and run every heavyweight gate.
+          if [ -z "$EVENT_HEAD_SHA" ] || [ -z "$HEAD_REF" ] || [ -z "$HEAD_REPO" ]; then
+            echo "run_heavy=true" >> "$GITHUB_OUTPUT"
+            echo "RECOVERY_GUARD_HEAD_AUTHORITY=unknown_run_heavy"
+            exit 0
+          fi
+          if [ "$HEAD_REPO" != "$GITHUB_REPOSITORY" ]; then
+            echo "run_heavy=true" >> "$GITHUB_OUTPUT"
+            echo "RECOVERY_GUARD_HEAD_AUTHORITY=fork_run_heavy"
+            exit 0
+          fi
+
+          CURRENT_HEAD_SHA="$(git show-ref --verify --hash "refs/remotes/origin/$HEAD_REF" || true)"
+          if [ -z "$CURRENT_HEAD_SHA" ]; then
+            echo "run_heavy=true" >> "$GITHUB_OUTPUT"
+            echo "RECOVERY_GUARD_HEAD_AUTHORITY=unresolved_run_heavy"
+          elif [ "$CURRENT_HEAD_SHA" = "$EVENT_HEAD_SHA" ]; then
+            echo "run_heavy=true" >> "$GITHUB_OUTPUT"
+            echo "RECOVERY_GUARD_HEAD_AUTHORITY=exact_current_run_heavy"
+          else
+            echo "run_heavy=false" >> "$GITHUB_OUTPUT"
+            echo "RECOVERY_GUARD_HEAD_AUTHORITY=superseded_scan_only"
+          fi
       - name: Compile guard, integrated application and operations tooling
+        if: steps.head_authority.outputs.run_heavy == 'true'
         run: >-
           python -m py_compile
           passenger_wsgi.py
@@ -73,6 +111,7 @@ jobs:
           tests/test_dev_a_provenance.py
           tests/test_dev_a_candidate_contracts.py
       - name: Validate canonical release startup and dependency envelope
+        if: steps.head_authority.outputs.run_heavy == 'true'
         run: |
           python - <<'PY'
           from pathlib import Path
@@ -86,8 +125,10 @@ jobs:
           print('DEV_A_RELEASE_PACKAGE_CONTRACT_PASS')
           PY
       - name: Validate unified ChatGPT Action schema offline
+        if: steps.head_authority.outputs.run_heavy == 'true'
         run: python tools/build_action_openapi.py --validate-only
       - name: Validate truthful candidate coverage and API inventory
+        if: steps.head_authority.outputs.run_heavy == 'true'
         run: |
           python - <<'PY'
           from ops.candidate_contracts import candidate_acceptance_coverage, integrated_api_inventory, validate_candidate_acceptance_coverage, validate_integrated_api_inventory
@@ -100,8 +141,10 @@ jobs:
           print('DEV_A_CANDIDATE_CONTRACTS_PASS')
           PY
       - name: Verify deterministic integration provenance and overlap decisions
+        if: steps.head_authority.outputs.run_heavy == 'true'
         run: python tools/verify_integration_provenance.py
       - name: Verify single deploy-capable entrypoint
+        if: steps.head_authority.outputs.run_heavy == 'true'
         run: |
           test -f ops/deploy_release.py
           test ! -e ops/deploy_release_legacy.py
@@ -112,10 +155,12 @@ jobs:
           assert deploy_release._supported_deploy_entrypoint() == 'ops.deploy_release'
           PY
       - name: Guard and deployment regression tests including real Python 3.11 PREPARE fixtures
+        if: steps.head_authority.outputs.run_heavy == 'true'
         run: |
           umask 022
           python -m unittest discover -s tests -v
       - name: Real exact-head non-live release PREPARE
+        if: steps.head_authority.outputs.run_heavy == 'true'
         env:
           CANDIDATE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
           CANDIDATE_REF: ${{ github.event.pull_request.head.ref || github.ref_name }}
@@ -138,3 +183,8 @@ jobs:
       - name: Verify no active cPanel or auto-deploy arming file
         if: always()
         run: test ! -e .cpanel.yml && test ! -e ops/ENABLE_HOSTIQ_AUTO_DEPLOY
+      - name: Reject superseded PR run as non-authoritative
+        if: always() && steps.head_authority.outputs.run_heavy == 'false'
+        run: |
+          echo "SUPERSEDED_PR_HEAD_NONAUTHORITATIVE"
+          exit 1
