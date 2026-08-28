@@ -13,6 +13,36 @@ from typing import Any, Callable, Iterable
 _default_application: Any | None = None
 
 
+def _observe_passenger_serving_request(environ: dict[str, Any]) -> None:
+    """Fail-isolated STRONG Passenger evidence observation for real health serving.
+
+    The actual challenge validation and private evidence writes remain owned by
+    ``ops.passenger_evidence_hook``.  This runtime boundary deliberately does not
+    inspect, copy or log the raw challenge.  Ordinary evidence failures can never
+    break the public health response; process-control BaseException subclasses
+    still propagate.
+    """
+
+    if str(environ.get("REQUEST_METHOD") or "GET").upper() != "GET":
+        return
+    if str(environ.get("PATH_INFO") or "/") != "/health":
+        return
+    try:
+        from pathlib import Path
+
+        from ops.passenger_evidence_hook import collect_if_armed_from_bridge_app
+
+        collect_if_armed_from_bridge_app(
+            Path(__file__).with_name("app.py"),
+            environ=environ,
+        )
+    except Exception:
+        # Passenger evidence is observational and must never reduce application
+        # availability.  The evidence adapter itself returns stable private
+        # statuses; this outer boundary is a final fail-isolation layer.
+        return
+
+
 def application(environ: dict[str, Any], start_response: Callable) -> Iterable[bytes]:
     global _default_application
     if _default_application is None:
@@ -32,7 +62,14 @@ def application(environ: dict[str, Any], start_response: Callable) -> Iterable[b
                 ],
             )
             return [raw]
-    return _default_application(environ, start_response)
+
+    # The canonical health path calls ``start_response`` and returns its concrete
+    # response list synchronously.  Observe the challenged serving request only
+    # after that application dispatch succeeds; a construction/dispatch failure
+    # must never be promoted into STRONG Passenger evidence.
+    result = _default_application(environ, start_response)
+    _observe_passenger_serving_request(environ)
+    return result
 
 
 def reset_runtime_application_for_tests() -> None:
