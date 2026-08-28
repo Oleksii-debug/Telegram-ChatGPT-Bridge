@@ -33,8 +33,9 @@ def main() -> int:
         check = json.loads(out.read_text(encoding="utf-8"))
         if check != payload:
             raise SafetyError("server manifest write verification failed")
-    except (OSError, UnicodeError, json.JSONDecodeError, SafetyError) as exc:
-        print("SERVER_MANIFEST_BLOCKED:" + type(exc).__name__)
+    except (OSError, UnicodeError, json.JSONDecodeError, SafetyError):
+        # Public/support stdout is deliberately content- and class-independent.
+        print("SERVER_MANIFEST_BLOCKED")
         return 2
     print("SERVER_MANIFEST_PRIVATE_REPORT_WRITTEN")
     return 0

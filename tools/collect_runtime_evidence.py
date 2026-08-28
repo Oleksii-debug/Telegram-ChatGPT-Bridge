@@ -23,9 +23,10 @@ def main() -> int:
     try:
         report = collect_runtime_evidence(app_root=app_root, wsgi_file=wsgi, application_process=False)
         write_private_report(out, report)
-    except Exception as exc:
-        # Never print message/path; class name only.
-        print("RUNTIME_EVIDENCE_BLOCKED:" + type(exc).__name__)
+    except Exception:
+        # Public/support stdout is a fixed code only.  Exception class, message,
+        # attributes and paths remain inside the private process boundary.
+        print("RUNTIME_EVIDENCE_BLOCKED")
         return 2
     print("RUNTIME_EVIDENCE_PRIVATE_REPORT_WRITTEN")
     return 0

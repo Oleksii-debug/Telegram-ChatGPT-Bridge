@@ -327,5 +327,24 @@ def sanitize_exception(exc: BaseException) -> dict[str, Any]:
     return {"error_type": known.get(type(exc).__name__, "EXCEPTION"), "error_present": True}
 
 
+def _subprocess_output_present(value: Any, label: str) -> bool:
+    """Return presence without invoking caller-controlled conversion hooks.
+
+    subprocess stdout/stderr are only expected to be exact ``str``/``bytes`` or
+    ``None``.  Reject subclasses and arbitrary objects rather than calling
+    ``bool()``, ``str()``, ``repr()`` or custom properties that may raise with
+    private text and escape the public evidence boundary.
+    """
+    if value is None:
+        return False
+    if type(value) is str or type(value) is bytes:
+        return len(value) > 0
+    raise ValueError(f"unsupported subprocess {label} type")
+
+
 def sanitize_subprocess_result(return_code: int, *, stdout: Any = None, stderr: Any = None) -> dict[str, Any]:
-    return {"return_code": _validate_int(return_code, "return_code"), "stdout_present": bool(stdout), "stderr_present": bool(stderr)}
+    return {
+        "return_code": _validate_int(return_code, "return_code"),
+        "stdout_present": _subprocess_output_present(stdout, "stdout"),
+        "stderr_present": _subprocess_output_present(stderr, "stderr"),
+    }
