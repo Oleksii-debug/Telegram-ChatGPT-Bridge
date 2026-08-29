@@ -1,0 +1,68 @@
+{
+  "schema_version": 1,
+  "purpose": "final10_private_use_canonical_launch_integration",
+  "assembly_sha": "7e25e43cf7e8423094271fce6807e247e14b13a0",
+  "parent_sha": "c3fa5fec7059e80f1ec24f3e06f0f750e67e35de",
+  "sources": {
+    "W09_ACCEPTANCE_ACTION": {
+      "pr": 166,
+      "sha": "9d8b98057b1252736d1cb2fbdf5a93fc71ff4aa3",
+      "exact_paths": [
+        ".github/workflows/ci.yml",
+        "ops/acceptance_contracts.py",
+        "ops/acceptance_harness.py",
+        "ops/acceptance_policy.py",
+        "ops/candidate_contracts.py",
+        "ops/dev06_deployed_action_evidence.py",
+        "ops/evidence_privacy.py",
+        "tests/test_acceptance_harness.py",
+        "tests/test_dev1_round1.py",
+        "tests/test_dev5_round2_fuzz.py",
+        "tests/test_dev_a_candidate_contracts.py",
+        "tests/test_w09_action_evidence.py",
+        "tools/verify_dev06_action_e2e.py",
+        "tools/verify_dev06_deployed_action.py"
+      ]
+    },
+    "DEEP_DIALOG_PAGINATION": {
+      "pr": 163,
+      "sha": "2ecfd599f540444ca331a32e46b2b9a7f7afcd3c",
+      "exact_paths": [
+        "bridge/dialog_pagination.py",
+        "tests/test_final5_task3_dialog_pagination_current.py"
+      ]
+    },
+    "TYPED_DIALOG_IDENTITY": {
+      "pr": 168,
+      "sha": "b63693b7a49f091768c86bda42f6c8f3a1f5aa9d",
+      "exact_paths": [
+        "bridge/typed_dialog_identity.py",
+        "tests/test_final10_b3_typed_dialog_identity.py"
+      ]
+    }
+  },
+  "runtime_composition": {
+    "path": "bridge/runtime_wsgi.py",
+    "preserves_parent_passenger_observation": true,
+    "installer_paths": [
+      "bridge/dialog_pagination.py",
+      "bridge/typed_dialog_identity.py"
+    ]
+  },
+  "w09_base_authority_overrides": [
+    "ops/acceptance_contracts.py",
+    "ops/acceptance_harness.py",
+    "ops/evidence_privacy.py",
+    "tests/test_acceptance_harness.py"
+  ],
+  "provenance_paths": [
+    "integration/canonical_launch_v1.json",
+    "tests/test_dev_a_provenance.py",
+    "tools/verify_integration_provenance.py",
+    "tools/verify_integration_provenance_legacy.py"
+  ],
+  "specialist_workflows_imported": false,
+  "production_mutated": false,
+  "deployment_authorized": false,
+  "private_values_recorded": false
+}
