@@ -19,7 +19,9 @@ def application(environ: dict[str, Any], start_response: Callable) -> Iterable[b
         try:
             from .preparse_rate_guard import PreparseRateLimitedActionGuard
             from .runtime_composition import build_production_application_from_env
+            from .typed_dialog_identity import install_typed_dialog_identity
 
+            install_typed_dialog_identity()
             _default_application = PreparseRateLimitedActionGuard(build_production_application_from_env())
         except Exception:
             raw = b'{"ok":false,"error":{"code":"startup_configuration_error","message":"Application configuration is invalid"}}'
