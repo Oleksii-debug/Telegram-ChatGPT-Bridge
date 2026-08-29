@@ -2,9 +2,9 @@
 """Canonical provenance verifier with a narrow FINAL10 composition overlay.
 
 The historical DEV01 verifier is preserved byte-for-byte in the sibling
-``verify_integration_provenance_legacy.py``.  This wrapper validates the new
+``verify_integration_provenance_legacy.py``. This wrapper validates the new
 private-use launch composition from exact Git objects, then supplies only the
-explicitly superseded historical assumptions to the legacy verifier.  It reads
+explicitly superseded historical assumptions to the legacy verifier. It reads
 no secrets and performs no network or production operations.
 """
 from __future__ import annotations
@@ -147,14 +147,24 @@ def _legacy_manifest_for_canonical(canonical: dict[str, Any], candidate_paths: s
     base = str(manifest["base"]["sha"])
 
     # The new W09 acceptance implementation deliberately supersedes four old
-    # DEV5 rejection decisions.  The remaining historical rejections stay exact.
+    # DEV5 rejection decisions. The remaining historical rejections stay exact.
     overrides = set(canonical["w09_base_authority_overrides"])
     rejected = manifest["predecessors"]["DEV5"]["rejected_overlaps_preserve_base"]
     manifest["predecessors"]["DEV5"]["rejected_overlaps_preserve_base"] = [
         path for path in rejected if path not in overrides
     ]
 
-    # runtime_wsgi is now an explicitly reviewed semantic composition.  Preserve
+    # The overlap matrix is derived from those lane path sets. Recompute only
+    # its counts in the in-memory compatibility view instead of carrying stale
+    # counts from the pre-W09 historical decision set.
+    lanes = legacy._lane_changed_paths(manifest)
+    for key, entry in manifest["overlap_matrix"].items():
+        left, right = key.split("_", 1)
+        entry["count"] = len(lanes[left] & lanes[right])
+        if entry["count"] == 0:
+            entry["classification"] = "NO_DIRECT_OVERLAP"
+
+    # runtime_wsgi is now an explicitly reviewed semantic composition. Preserve
     # every other single-finisher blob assertion and replace only that one blob.
     runtime_blob = _blob(str(canonical["assembly_sha"]), "bridge/runtime_wsgi.py")
     manifest["swarm_integrations"]["SWARM10_SINGLE_FINISHER_HIGH_CONVERGENCE"]["candidate_git_blobs"][
