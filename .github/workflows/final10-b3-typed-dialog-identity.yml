@@ -1,0 +1,45 @@
+name: FINAL10 B3 Typed Dialog Identity
+
+on:
+  pull_request:
+    paths:
+      - 'bridge/typed_dialog_identity.py'
+      - 'bridge/runtime_wsgi.py'
+      - 'tests/test_final10_b3_typed_dialog_identity.py'
+      - '.github/workflows/final10-b3-typed-dialog-identity.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  typed-dialog-e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout exact PR head
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Set up Python 3.11
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.11'
+      - name: Compile focused production boundary
+        run: >-
+          python -m py_compile
+          bridge/typed_dialog_identity.py
+          bridge/runtime_wsgi.py
+          tests/test_final10_b3_typed_dialog_identity.py
+      - name: Run dialogs to history peer-identity regressions
+        run: python -m unittest tests.test_final10_b3_typed_dialog_identity -v
+      - name: Run adjacent read API regressions
+        run: python -m unittest tests.test_read_app -v
+      - name: Current-tree secret scan
+        if: always()
+        run: python tools/secret_scan.py --mode current
+      - name: Verify no active deploy trigger
+        if: always()
+        run: |
+          test ! -e .cpanel.yml
+          test ! -e ops/ENABLE_HOSTIQ_AUTO_DEPLOY
