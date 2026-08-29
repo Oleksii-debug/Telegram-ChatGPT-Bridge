@@ -32,6 +32,7 @@ class AcceptanceMatrixTests(unittest.TestCase):
             result="PASS",
             evidence_ref="ci:RecoveryGuard#44",
             facts={
+                "success": True,
                 "tree_scan_passed": True,
                 "history_scan_passed": True,
                 "findings_count": 0,
@@ -39,7 +40,7 @@ class AcceptanceMatrixTests(unittest.TestCase):
             },
         )
         roundtrip = json.loads(ah.serialize_result(payload))
-        self.assertEqual(2, roundtrip["schema_version"])
+        self.assertEqual(3, roundtrip["schema_version"])
         self.assertEqual("B4", roundtrip["criterion"])
         self.assertEqual(0, roundtrip["facts"]["findings_count"])
 
@@ -89,7 +90,7 @@ class AcceptanceMatrixTests(unittest.TestCase):
         payload = ah.build_result(
             criterion="J5", code_sha="e" * 40, environment_class="synthetic",
             result="PASS", evidence_ref="test:rollback",
-            facts={"rollback_state": "ROLLED_BACK", "previous_sha": "1" * 40, "return_code": 20},
+            facts={"success": True, "rollback_state": "ROLLED_BACK", "previous_sha": "1" * 40, "return_code": 20},
         )
         self.assertEqual("ROLLED_BACK", payload["facts"]["rollback_state"])
 
@@ -135,18 +136,225 @@ class AcceptanceMatrixTests(unittest.TestCase):
     def test_serialize_result_revalidates_mutated_payload(self):
         payload = ah.build_result(
             criterion="B4", code_sha="4" * 40, environment_class="synthetic",
-            result="PASS", evidence_ref="test:mutation", facts={"findings_count": 0},
+            result="PASS", evidence_ref="test:mutation", facts={"success": True, "tree_scan_passed": True, "history_scan_passed": True, "findings_count": 0},
         )
         payload["facts"] = {"detail": "not allowed"}
         with self.assertRaises(ValueError):
             ah.serialize_result(payload)
         payload2 = ah.build_result(
             criterion="B4", code_sha="4" * 40, environment_class="synthetic",
-            result="PASS", evidence_ref="test:mutation2", facts={"findings_count": 0},
+            result="PASS", evidence_ref="test:mutation2", facts={"success": True, "tree_scan_passed": True, "history_scan_passed": True, "findings_count": 0},
         )
         payload2["extra"] = "UNREVIEWED"
         with self.assertRaises(ValueError):
             ah.serialize_result(payload2)
+
+
+class AcceptancePassAuthorityTests(unittest.TestCase):
+    sha = "a" * 40
+    digest = "b" * 64
+
+    @classmethod
+    def ref(cls, provider="LIVE_ENDPOINT"):
+        if provider == "GITHUB_ACTIONS":
+            return {"provider": provider, "run_id": 123, "suite": "ACCEPTANCE_HARNESS"}
+        if provider == "SYNTHETIC_TEST":
+            return {"provider": provider, "suite": "ACCEPTANCE_HARNESS"}
+        return {"provider": provider, "evidence_sha256": cls.digest}
+
+    @classmethod
+    def authority(cls, authority_class, provider):
+        return {"authority_class": authority_class, "evidence_ref": cls.ref(provider)}
+
+    def test_synthetic_pass_is_rejected_for_representative_phase_boundaries(self):
+        for criterion in ("A3", "C1", "H1", "H2", "I6", "J1", "K5"):
+            with self.subTest(criterion=criterion), self.assertRaises(ValueError):
+                ah.build_result(
+                    criterion=criterion,
+                    code_sha=self.sha,
+                    environment_class="SYNTHETIC",
+                    result="PASS",
+                    evidence_ref=self.ref("SYNTHETIC_TEST"),
+                    facts={"success": True},
+                )
+
+    def test_source_only_b4_positive_control(self):
+        payload = ah.build_result(
+            criterion="B4",
+            code_sha=self.sha,
+            environment_class="GITHUB_CI",
+            result="PASS",
+            evidence_ref=self.ref("GITHUB_ACTIONS"),
+            facts={
+                "success": True,
+                "tree_scan_passed": True,
+                "history_scan_passed": True,
+                "findings_count": 0,
+            },
+        )
+        self.assertEqual("PASS", payload["result"])
+        self.assertEqual("SOURCE_CI", payload["authority_refs"][0]["authority_class"])
+
+    def test_h1_requires_live_and_independent_authority_with_exact_identity(self):
+        authorities = [
+            self.authority("LIVE_RUNTIME", "LIVE_ENDPOINT"),
+            self.authority("INDEPENDENT_AUDITOR", "DRIVE_CONTROL"),
+        ]
+        payload = ah.build_result(
+            criterion="H1",
+            code_sha=self.sha,
+            environment_class="HOSTIQ_PRODUCTION",
+            result="PASS",
+            evidence_ref=self.ref("LIVE_ENDPOINT"),
+            authority_refs=authorities,
+            facts={
+                "success": True,
+                "schema_valid": True,
+                "deployed_sha": self.sha,
+                "observed_sha": self.sha,
+            },
+        )
+        self.assertIn('"result":"PASS"', ah.serialize_result(payload))
+        for mutation in ("missing_auditor", "wrong_deployed_sha", "synthetic_environment"):
+            changed = json.loads(json.dumps(payload))
+            if mutation == "missing_auditor":
+                changed["authority_refs"] = changed["authority_refs"][:1]
+            elif mutation == "wrong_deployed_sha":
+                changed["facts"]["deployed_sha"] = "c" * 40
+            else:
+                changed["environment_class"] = "SYNTHETIC"
+            with self.subTest(mutation=mutation), self.assertRaises(ValueError):
+                ah.serialize_result(changed)
+
+        with self.assertRaises(ValueError):
+            ah.build_result(
+                criterion="H1",
+                code_sha=self.sha,
+                environment_class="HOSTIQ_PRODUCTION",
+                result="PASS",
+                evidence_ref=self.ref("LIVE_ENDPOINT"),
+                authority_refs=[
+                    self.authority("LIVE_RUNTIME", "LIVE_ENDPOINT"),
+                    self.authority("INDEPENDENT_AUDITOR", "GITHUB_ACTIONS"),
+                ],
+                facts={
+                    "success": True,
+                    "schema_valid": True,
+                    "deployed_sha": self.sha,
+                    "observed_sha": self.sha,
+                },
+            )
+
+    def test_human_nvda_pass_cannot_be_created_by_automation(self):
+        facts = {
+            "success": True,
+            "deployed_sha": self.sha,
+            "human_verified": True,
+            "nvda_verified": True,
+        }
+        with self.assertRaises(ValueError):
+            ah.build_result(
+                criterion="I6",
+                code_sha=self.sha,
+                environment_class="HOSTIQ_PRODUCTION",
+                result="PASS",
+                evidence_ref=self.ref("LIVE_ENDPOINT"),
+                authority_refs=[
+                    self.authority("LIVE_RUNTIME", "LIVE_ENDPOINT"),
+                    self.authority("INDEPENDENT_HUMAN", "GITHUB_ACTIONS"),
+                ],
+                facts=facts,
+            )
+        payload = ah.build_result(
+            criterion="I6",
+            code_sha=self.sha,
+            environment_class="HOSTIQ_PRODUCTION",
+            result="PASS",
+            evidence_ref=self.ref("DRIVE_CONTROL"),
+            authority_refs=[
+                self.authority("LIVE_RUNTIME", "LIVE_ENDPOINT"),
+                self.authority("INDEPENDENT_HUMAN", "DRIVE_CONTROL"),
+            ],
+            facts=facts,
+        )
+        self.assertEqual("PASS", payload["result"])
+
+    def test_k5_requires_every_write_gate_and_replay_fact(self):
+        authorities = [
+            self.authority("LIVE_RUNTIME", "LIVE_ENDPOINT"),
+            self.authority("INDEPENDENT_AUDITOR", "DRIVE_CONTROL"),
+            self.authority("USER_CONFIRMATION", "DRIVE_CONTROL"),
+        ]
+        facts = {
+            "success": True,
+            "deployed_sha": self.sha,
+            "w10_approval_verified": True,
+            "safe_destination_verified": True,
+            "exact_preview_verified": True,
+            "exact_text_verified": True,
+            "idempotency_bound": True,
+            "fresh_user_confirmation": True,
+            "commit_single_use": True,
+            "deduplicated": True,
+            "operation_kind": "SEND",
+            "external_effect_count": 1,
+            "replay_duplicate_count": 0,
+            "payload_sha256": self.digest,
+            "identifier_sha256": "c" * 64,
+            "idempotency_sha256": "d" * 64,
+            "preview_fingerprint_sha256": "e" * 64,
+        }
+        payload = ah.build_result(
+            criterion="K5",
+            code_sha=self.sha,
+            environment_class="HOSTIQ_PRODUCTION",
+            result="PASS",
+            evidence_ref=self.ref("LIVE_ENDPOINT"),
+            authority_refs=authorities,
+            facts=facts,
+        )
+        self.assertEqual("PASS", payload["result"])
+        missing_cases = [
+            "w10_approval_verified",
+            "safe_destination_verified",
+            "exact_preview_verified",
+            "exact_text_verified",
+            "idempotency_bound",
+            "fresh_user_confirmation",
+            "payload_sha256",
+            "identifier_sha256",
+            "idempotency_sha256",
+            "preview_fingerprint_sha256",
+        ]
+        for key in missing_cases:
+            changed = dict(facts)
+            changed.pop(key)
+            with self.subTest(missing=key), self.assertRaises(ValueError):
+                ah.build_result(
+                    criterion="K5", code_sha=self.sha,
+                    environment_class="HOSTIQ_PRODUCTION", result="PASS",
+                    evidence_ref=self.ref("LIVE_ENDPOINT"),
+                    authority_refs=authorities, facts=changed,
+                )
+        for key, value in (("external_effect_count", 2), ("replay_duplicate_count", 1)):
+            changed = dict(facts)
+            changed[key] = value
+            with self.subTest(invalid=key), self.assertRaises(ValueError):
+                ah.build_result(
+                    criterion="K5", code_sha=self.sha,
+                    environment_class="HOSTIQ_PRODUCTION", result="PASS",
+                    evidence_ref=self.ref("LIVE_ENDPOINT"),
+                    authority_refs=authorities, facts=changed,
+                )
+        for missing_authority in ("INDEPENDENT_AUDITOR", "USER_CONFIRMATION"):
+            changed = [item for item in authorities if item["authority_class"] != missing_authority]
+            with self.subTest(missing_authority=missing_authority), self.assertRaises(ValueError):
+                ah.build_result(
+                    criterion="K5", code_sha=self.sha,
+                    environment_class="HOSTIQ_PRODUCTION", result="PASS",
+                    evidence_ref=self.ref("LIVE_ENDPOINT"),
+                    authority_refs=changed, facts=facts,
+                )
 
 
 class SanitizationTests(unittest.TestCase):

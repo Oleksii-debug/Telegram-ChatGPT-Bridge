@@ -37,9 +37,6 @@ def _observe_passenger_serving_request(environ: dict[str, Any]) -> None:
             environ=environ,
         )
     except Exception:
-        # Passenger evidence is observational and must never reduce application
-        # availability.  The evidence adapter itself returns stable private
-        # statuses; this outer boundary is a final fail-isolation layer.
         return
 
 
@@ -47,9 +44,13 @@ def application(environ: dict[str, Any], start_response: Callable) -> Iterable[b
     global _default_application
     if _default_application is None:
         try:
+            from .dialog_pagination import install_dialog_pagination
             from .preparse_rate_guard import PreparseRateLimitedActionGuard
             from .runtime_composition import build_production_application_from_env
+            from .typed_dialog_identity import install_typed_dialog_identity
 
+            install_dialog_pagination()
+            install_typed_dialog_identity()
             _default_application = PreparseRateLimitedActionGuard(build_production_application_from_env())
         except Exception:
             raw = b'{"ok":false,"error":{"code":"startup_configuration_error","message":"Application configuration is invalid"}}'
@@ -63,17 +64,12 @@ def application(environ: dict[str, Any], start_response: Callable) -> Iterable[b
             )
             return [raw]
 
-    # The canonical health path calls ``start_response`` and returns its concrete
-    # response list synchronously.  Observe the challenged serving request only
-    # after that application dispatch succeeds; a construction/dispatch failure
-    # must never be promoted into STRONG Passenger evidence.
     result = _default_application(environ, start_response)
     _observe_passenger_serving_request(environ)
     return result
 
 
 def reset_runtime_application_for_tests() -> None:
-    """Credential-free test helper; it is not mounted as an HTTP operation."""
     global _default_application
     _default_application = None
 
