@@ -285,7 +285,7 @@ class AcceptanceEvidenceAdaptationTests(unittest.TestCase):
             code_sha="a" * 40,
             environment_class="github-ci",
             result="PASS",
-            facts={"tree_scan_passed": True, "history_scan_passed": True},
+            facts={"success": True, "tree_scan_passed": True, "history_scan_passed": True, "findings_count": 0},
         )
         with self.assertRaises(ValueError):
             harness.build_result(evidence_ref="test:private-label", **common)

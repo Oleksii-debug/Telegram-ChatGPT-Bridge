@@ -75,6 +75,9 @@ BOOL_FACTS = {
     "commit_single_use", "restart_safe", "recoverable", "schema_valid",
     "keyboard_operable", "labels_present", "accessible_names_present",
     "heading_order_valid", "tab_order_valid", "mouse_only_absent",
+    "human_verified", "nvda_verified", "w10_approval_verified",
+    "safe_destination_verified", "exact_preview_verified", "exact_text_verified",
+    "idempotency_bound", "fresh_user_confirmation",
 }
 INT_FACTS = {
     "count", "findings_count", "artifact_count", "persistent_entries_count",
@@ -82,12 +85,14 @@ INT_FACTS = {
     "duration_ms", "timeout_ms", "return_code", "http_status", "status_code",
     "rate_limit_remaining", "retry_after_seconds", "window_seconds",
     "job_checkpoint", "criteria_count",
+    "external_effect_count", "replay_duplicate_count",
 }
 SHA40_FACTS = {"previous_sha", "candidate_sha", "deployed_sha", "observed_sha"}
 SHA256_FACTS = {
     "sha256", "backup_sha256", "manifest_sha256", "identifier_sha256",
     "chat_sha256", "message_sha256", "file_sha256", "payload_sha256",
     "operation_sha256", "idempotency_sha256",
+    "preview_fingerprint_sha256",
 }
 ENUM_FACTS = {
     "state", "mode", "reason_code", "error_type", "scan_scope",
@@ -245,6 +250,7 @@ def _validate_int(value: Any, key: str) -> int:
         "count", "attempt", "duration_ms", "timeout_ms", "retry_count", "rate_limit_remaining",
         "retry_after_seconds", "window_seconds", "job_checkpoint", "criteria_count",
         "findings_count", "artifact_count", "persistent_entries_count", "file_count", "result_count", "page_count",
+        "external_effect_count", "replay_duplicate_count",
     }
     if key in nonnegative and value < 0:
         raise ValueError(f"negative count/duration fact: {key}")
