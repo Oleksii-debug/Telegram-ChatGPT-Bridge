@@ -53,6 +53,29 @@ TERMINAL_DEV_B_RETAINED = {
     "tests/test_devb_round2_release.py",
     "tests/test_server_manifest.py",
 }
+W09_SOURCE_SHA = "1b6ed80ccf31d6990674f87cfd5a91db5e02348a"
+W09_ACTION_EVIDENCE_PATHS = {
+    ".github/workflows/ci.yml",
+    ".github/workflows/swarm10-w09-action-evidence.yml",
+    "docs/ACCEPTANCE_HARNESS.md",
+    "docs/SWARM10_W09_ACTION_EVIDENCE.md",
+    "integration/provenance_v1.json",
+    "ops/acceptance_contracts.py",
+    "ops/acceptance_harness.py",
+    "ops/acceptance_policy.py",
+    "ops/candidate_contracts.py",
+    "ops/dev06_deployed_action_evidence.py",
+    "ops/evidence_privacy.py",
+    "tests/test_acceptance_harness.py",
+    "tests/test_dev1_round1.py",
+    "tests/test_dev5_round2_fuzz.py",
+    "tests/test_dev_a_candidate_contracts.py",
+    "tests/test_dev_a_provenance.py",
+    "tests/test_w09_action_evidence.py",
+    "tools/verify_dev06_action_e2e.py",
+    "tools/verify_dev06_deployed_action.py",
+    "tools/verify_integration_provenance.py",
+}
 
 
 class ProvenanceError(RuntimeError):
@@ -306,12 +329,45 @@ def _validate_override_subset(data: dict[str, Any], path_key: str) -> set[str]:
     return overrides
 
 
+def _validate_w09_action_evidence(manifest: dict[str, Any], head: str) -> set[str]:
+    integrations = manifest.get("swarm_integrations")
+    if not isinstance(integrations, dict):
+        raise ProvenanceError("swarm integration provenance missing")
+    entry = integrations.get("SWARM10_ACTION_EVIDENCE_AUTHORITY")
+    if not isinstance(entry, dict) or entry.get("issue") != 122:
+        raise ProvenanceError("W09 Action evidence provenance missing")
+    if entry.get("source_sha") != W09_SOURCE_SHA or entry.get("disposition") != "ADAPTED_FAIL_CLOSED":
+        raise ProvenanceError("W09 Action evidence source checkpoint mismatch")
+    paths = set(_safe_sorted_paths(entry.get("adapted_paths"), "W09 Action evidence"))
+    if paths != W09_ACTION_EVIDENCE_PATHS:
+        raise ProvenanceError("W09 Action evidence path accounting mismatch")
+    if entry.get("successor_identity_source") != "EXACT_HEAD_DERIVED_BY_CHECKOUT_ONLY_CLI":
+        raise ProvenanceError("W09 Action evidence identity source mismatch")
+    if entry.get("independent_auditor_required") is not True:
+        raise ProvenanceError("W09 independent auditor boundary missing")
+    if entry.get("product_pass_claimed") is not False:
+        raise ProvenanceError("W09 may not claim product acceptance")
+    if entry.get("production_mutated") is not False or entry.get("deployment_authorized") is not False:
+        raise ProvenanceError("W09 safety boundary invalid")
+    if _parents(head) != (W09_SOURCE_SHA,):
+        raise ProvenanceError("W09 must be one complete successor commit")
+    observed = {
+        line.strip()
+        for line in _git("diff", "--name-only", f"{W09_SOURCE_SHA}..{head}").splitlines()
+        if line.strip()
+    }
+    if observed != paths:
+        raise ProvenanceError("W09 successor diff does not match provenance path set")
+    return paths
+
+
 def verify_repository() -> dict[str, Any]:
     manifest = _load()
     release = _load_release_override()
     head = _git("rev-parse", "HEAD")
     base = str(manifest["base"]["sha"])
     predecessors = manifest["predecessors"]
+    w09_paths = _validate_w09_action_evidence(manifest, head)
 
     dev_b = release["dev_b"]
     dev_b_imported = set(dev_b["imported_paths"])
@@ -375,6 +431,10 @@ def verify_repository() -> dict[str, Any]:
         if path not in dev5_overrides and _blob("HEAD", path) != _blob(str(dev5["sha"]), path):
             raise ProvenanceError(f"DEV5 portable oracle drift: {path}")
     for path in dev5["rejected_overlaps_preserve_base"]:
+        if path in w09_paths:
+            if _blob("HEAD", path) == _blob(base, path):
+                raise ProvenanceError(f"declared W09 adaptation is absent: {path}")
+            continue
         if _blob("HEAD", path) != _blob(base, path):
             raise ProvenanceError(f"rejected DEV5 overlap overwrote DEV1 authority: {path}")
 
@@ -465,6 +525,7 @@ def verify_repository() -> dict[str, Any]:
         "pr2_pr5_overlap_count": overlap_counts["PR2_PR5"],
         "rejected_dev5_overlap_count": len(dev5["rejected_overlaps_preserve_base"]),
         "release_to_live_path_count": len(release_paths),
+        "w09_action_evidence_path_count": len(w09_paths),
         "private_values_recorded": False,
     }
 

@@ -1,0 +1,139 @@
+name: SWARM10 W09 Action evidence
+
+on:
+  pull_request:
+  push:
+    branches: [swarm10/w09-action-h1-h2-current]
+
+permissions:
+  contents: read
+
+jobs:
+  source-bound-h1-h2:
+    runs-on: ubuntu-latest
+    env:
+      EXPECTED_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+    steps:
+      - name: Checkout exact event head with full history
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Set up Python 3.11
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.11'
+      - name: Prove exact clean event checkout
+        run: |
+          test -n "$EXPECTED_SHA"
+          test "$(git rev-parse --verify HEAD^{commit})" = "$EXPECTED_SHA"
+          test -z "$(git status --porcelain=v2 --untracked-files=all)"
+      - name: Compile W09 and acceptance authority boundary
+        run: >-
+          python -m py_compile
+          ops/acceptance_policy.py
+          ops/acceptance_harness.py
+          ops/acceptance_contracts.py
+          ops/candidate_contracts.py
+          ops/dev06_deployed_action_evidence.py
+          tools/verify_dev06_deployed_action.py
+          tools/verify_dev06_action_e2e.py
+          tests/test_acceptance_harness.py
+          tests/test_dev_a_candidate_contracts.py
+          tests/test_w09_action_evidence.py
+      - name: Build sanitized source-mock schema outside checkout
+        run: |
+          python -B - "$RUNNER_TEMP/w09-observed-schema.json" <<'PY'
+          import json
+          import sys
+          from ops.dev06_deployed_action_evidence import PRODUCTION_BASE_URL
+          from ops.dev06_runtime_conformance import build_compatible_chatgpt_action_openapi
+
+          with open(sys.argv[1], "w", encoding="utf-8") as stream:
+              json.dump(build_compatible_chatgpt_action_openapi(PRODUCTION_BASE_URL), stream, sort_keys=True)
+          PY
+      - name: Verify H1 against exact executing checkout
+        run: |
+          python -I -B tools/verify_dev06_deployed_action.py \
+            --source-checkout "$GITHUB_WORKSPACE" \
+            --observed-schema "$RUNNER_TEMP/w09-observed-schema.json" \
+            --source-classification SOURCE_MOCK \
+            > "$RUNNER_TEMP/w09-h1.json"
+          python -B - "$RUNNER_TEMP/w09-h1.json" "$EXPECTED_SHA" <<'PY'
+          import json
+          import sys
+
+          with open(sys.argv[1], encoding="utf-8") as stream:
+              result = json.load(stream)
+          assert result["candidate_sha"] == sys.argv[2]
+          assert result["schema_match"] is True
+          assert result["product_h1_pass"] is False
+          assert result["self_authorization"] is False
+          assert result["deployment_authorized"] is False
+          PY
+      - name: Verify H2 shares H1 source binding and stays read-only
+        run: |
+          python -B - "$RUNNER_TEMP/w09-h1.json" "$RUNNER_TEMP/w09-h2-capture.json" <<'PY'
+          import hashlib
+          import json
+          import sys
+
+          with open(sys.argv[1], encoding="utf-8") as stream:
+              h1 = json.load(stream)
+          capture = {
+              "schema_version": 1,
+              "source_classification": "SOURCE_MOCK",
+              "source_binding_sha256": h1["source_binding_sha256"],
+              "deployed_sha": h1["candidate_sha"],
+              "operation_id": "listTelegramDialogs",
+              "method": "POST",
+              "http_status": 200,
+              "authorized": True,
+              "read_only": True,
+              "telegram_read_observed": True,
+              "request_sha256": hashlib.sha256(b"w09-synthetic-read-request").hexdigest(),
+              "response_sha256": hashlib.sha256(b"w09-synthetic-read-response").hexdigest(),
+          }
+          with open(sys.argv[2], "w", encoding="utf-8") as stream:
+              json.dump(capture, stream, sort_keys=True)
+          PY
+          python -I -B tools/verify_dev06_action_e2e.py \
+            --source-checkout "$GITHUB_WORKSPACE" \
+            --capture "$RUNNER_TEMP/w09-h2-capture.json" \
+            > "$RUNNER_TEMP/w09-h2.json"
+          python -B - "$RUNNER_TEMP/w09-h1.json" "$RUNNER_TEMP/w09-h2.json" "$EXPECTED_SHA" <<'PY'
+          import json
+          import sys
+
+          with open(sys.argv[1], encoding="utf-8") as stream:
+              h1 = json.load(stream)
+          with open(sys.argv[2], encoding="utf-8") as stream:
+              h2 = json.load(stream)
+          assert h1["candidate_sha"] == h2["candidate_sha"] == sys.argv[3]
+          assert h1["source_binding_sha256"] == h2["source_binding_sha256"]
+          assert h2["read_only"] is True
+          assert h2["product_h2_pass"] is False
+          assert h2["self_authorization"] is False
+          assert h2["deployment_authorized"] is False
+          PY
+      - name: Run adversarial and acceptance-policy tests
+        run: |
+          python -m unittest -v \
+            tests.test_w09_action_evidence \
+            tests.test_acceptance_harness \
+            tests.test_acceptance_contracts \
+            tests.test_dev_a_candidate_contracts \
+            tests.test_dev1_round1 \
+            tests.test_dev5_round2_fuzz
+      - name: Current-tree secret scan
+        if: always()
+        run: python tools/secret_scan.py --mode current
+      - name: Full-history secret scan
+        if: always()
+        run: python tools/secret_scan.py --mode history
+      - name: Verify W09 cannot arm deployment
+        if: always()
+        run: |
+          test ! -e .cpanel.yml
+          test ! -e ops/ENABLE_HOSTIQ_AUTO_DEPLOY

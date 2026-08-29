@@ -4,6 +4,11 @@ from __future__ import annotations
 import json, re
 from typing import Any
 from ops import evidence_privacy as privacy
+from ops.acceptance_policy import (
+    AUTHORITY_PROVIDER_POLICY,
+    CRITERION_POLICIES,
+    criterion_policy,
+)
 
 PLAN_STATUSES = {"IMPLEMENTED_TEST", "READY_FOR_REAL_SOURCE", "EXTERNALLY_BLOCKED", "NOT_IMPLEMENTED"}
 RESULT_STATUSES = {"PASS", "FAIL", "BLOCKED"}
@@ -29,18 +34,19 @@ CRITERIA={i["criterion"]:i for i in ACCEPTANCE_MATRIX}
 
 COMMON_FACT_KEYS={"success","count","duration_ms","timeout_ms","retry_count","attempt","return_code","http_status","status_code","state","reason_code","reason_codes","checks","contract_status","error_type","error_present"}
 GROUP_FACT_KEYS={
-"A":{"observed_sha","restart_safe","state_preserved"},
+"A":{"observed_sha","deployed_sha","restart_safe","state_preserved"},
 "B":{"authorized","findings_count","tree_scan_passed","history_scan_passed","artifact_count","rate_limit_remaining","retry_after_seconds","window_seconds","file_count","scan_scope"},
-"C":{"auth_state","state_preserved","restart_safe","recoverable"},"D":{"result_count","page_count","identifier_hashes"},
+"C":{"auth_state","state_preserved","restart_safe","recoverable","deployed_sha","human_verified","nvda_verified","keyboard_operable"},"D":{"result_count","page_count","identifier_hashes"},
 "E":{"file_count","file_hashes","file_sha256","deduplicated","recoverable","private_serving_enforced","media_kind"},
 "F":{"preview_only","commit_single_use","audit_recorded","operation_kind","payload_sha256","identifier_sha256","operation_sha256","idempotency_sha256","preview_state","commit_state","deduplicated"},
 "G":{"state_preserved","restart_safe","recoverable","job_state","job_checkpoint","deduplicated","idempotency_sha256"},
-"H":{"schema_valid","authorized","preview_only","commit_single_use","operation_kind"},
-"I":{"keyboard_operable","labels_present","accessible_names_present","heading_order_valid","tab_order_valid","mouse_only_absent"},
+"H":{"schema_valid","authorized","preview_only","commit_single_use","operation_kind","deployed_sha","observed_sha"},
+"I":{"keyboard_operable","labels_present","accessible_names_present","heading_order_valid","tab_order_valid","mouse_only_absent","deployed_sha","human_verified","nvda_verified"},
 "J":{"backup_created","backup_sha256","state_preserved","persistent_state_preserved","persistent_entries_count","previous_sha","candidate_sha","deployed_sha","observed_sha","rollback_state","quiesced","resumed","manifest_sha256"},
-"K":{"result_count","file_count","preview_only","commit_single_use","operation_kind","identifier_sha256","success"}}
+"K":{"result_count","file_count","preview_only","commit_single_use","operation_kind","identifier_sha256","payload_sha256","idempotency_sha256","preview_fingerprint_sha256","deduplicated","deployed_sha","observed_sha","w10_approval_verified","safe_destination_verified","exact_preview_verified","exact_text_verified","idempotency_bound","fresh_user_confirmation","external_effect_count","replay_duplicate_count","success"}}
 CRITERION_FACT_KEYS={c:COMMON_FACT_KEYS|GROUP_FACT_KEYS[c[0]] for c in CRITERIA}
-RESULT_KEYS={"schema_version","criterion","code_sha","environment_class","result","evidence_ref","facts"}
+RESULT_KEYS={"schema_version","criterion","code_sha","environment_class","result","evidence_ref","authority_refs","facts"}
+AUTHORITY_REF_KEYS={"authority_class","evidence_ref"}
 
 
 def validate_matrix()->None:
@@ -53,11 +59,66 @@ def validate_matrix()->None:
         if item["plan_status"] not in PLAN_STATUSES: raise ValueError("invalid planning status")
         if not item["description"].strip(): raise ValueError("missing criterion description")
     if {i["criterion"][0] for i in ACCEPTANCE_MATRIX}!=expected: raise ValueError("A-K groups incomplete")
+    if set(CRITERIA) != set(CRITERION_POLICIES): raise ValueError("criterion policy coverage mismatch")
+
+
+def _inferred_authority_ref(evidence_ref:dict[str,Any])->dict[str,Any]|None:
+    provider=evidence_ref.get("provider")
+    authority={
+        "SYNTHETIC_TEST":"SYNTHETIC_TEST",
+        "GITHUB_ACTIONS":"SOURCE_CI",
+        "LIVE_ENDPOINT":"LIVE_RUNTIME",
+        "HOSTIQ_PRIVATE":"LIVE_RUNTIME",
+    }.get(provider)
+    if authority is None:return None
+    return {"authority_class":authority,"evidence_ref":dict(evidence_ref)}
+
+
+def _validate_authority_refs(value:Any)->list[dict[str,Any]]:
+    if not isinstance(value,list) or not value or len(value)>6:
+        raise ValueError("acceptance authority references required")
+    cleaned=[];seen=set()
+    for item in value:
+        if not isinstance(item,dict) or set(item)!=AUTHORITY_REF_KEYS:
+            raise ValueError("acceptance authority reference schema mismatch")
+        authority=item.get("authority_class")
+        if authority not in AUTHORITY_PROVIDER_POLICY or authority in seen:
+            raise ValueError("acceptance authority reference invalid")
+        reference=privacy.validate_evidence_ref(item.get("evidence_ref"))
+        if reference["provider"] not in AUTHORITY_PROVIDER_POLICY[authority]:
+            raise ValueError("acceptance authority provider mismatch")
+        seen.add(authority)
+        cleaned.append({"authority_class":authority,"evidence_ref":reference})
+    return cleaned
+
+
+def _validate_pass_authority(payload:dict[str,Any])->None:
+    if payload["result"]!="PASS":return
+    policy=criterion_policy(payload["criterion"])
+    if payload["environment_class"] not in policy["allowed_environment_classes"]:
+        raise ValueError("acceptance PASS environment lacks criterion authority")
+    if payload["evidence_ref"]["provider"] not in policy["allowed_primary_providers"]:
+        raise ValueError("acceptance PASS evidence provider lacks criterion authority")
+    authorities={item["authority_class"] for item in payload["authority_refs"]}
+    if not policy["required_authority_classes"].issubset(authorities):
+        raise ValueError("acceptance PASS authority incomplete")
+    facts=payload["facts"]
+    if any(facts.get(key) is not True for key in policy["required_true_facts"]):
+        raise ValueError("acceptance PASS required positive fact missing")
+    if any(facts.get(key)!=expected for key,expected in policy["required_fact_values"].items()):
+        raise ValueError("acceptance PASS required fact value mismatch")
+    if any(key not in facts for key in policy["required_fact_keys"]):
+        raise ValueError("acceptance PASS required fact missing")
+    if policy["requires_deployed_sha"]:
+        if facts.get("deployed_sha")!=payload["code_sha"]:
+            raise ValueError("acceptance PASS deployed source identity mismatch")
+    if "observed_sha" in policy["required_fact_keys"] and facts.get("observed_sha")!=payload["code_sha"]:
+        raise ValueError("acceptance PASS observed source identity mismatch")
 
 
 def validate_result_payload(payload:Any)->dict[str,Any]:
     if not isinstance(payload,dict) or set(payload)!=RESULT_KEYS: raise ValueError("acceptance result schema mismatch")
-    if payload.get("schema_version")!=2: raise ValueError("acceptance result schema version unsupported")
+    if payload.get("schema_version")!=3: raise ValueError("acceptance result schema version unsupported")
     criterion=payload.get("criterion")
     if criterion not in CRITERIA: raise ValueError("unknown acceptance criterion")
     sha=payload.get("code_sha")
@@ -65,13 +126,20 @@ def validate_result_payload(payload:Any)->dict[str,Any]:
     payload["environment_class"]=privacy.validate_environment_class(payload.get("environment_class"))
     if payload.get("result") not in RESULT_STATUSES: raise ValueError("invalid result status")
     payload["evidence_ref"]=privacy.validate_evidence_ref(payload.get("evidence_ref"))
+    payload["authority_refs"]=_validate_authority_refs(payload.get("authority_refs"))
     payload["facts"]=privacy.validate_facts(payload.get("facts"),allowed_keys=CRITERION_FACT_KEYS[criterion])
+    _validate_pass_authority(payload)
     privacy.validate_aggregate_payload(payload)
     return payload
 
 
-def build_result(*,criterion:str,code_sha:str,environment_class:str,result:str,evidence_ref:dict[str,Any],facts:dict[str,Any]|None=None)->dict[str,Any]:
-    return validate_result_payload({"schema_version":2,"criterion":criterion,"code_sha":code_sha,"environment_class":environment_class,"result":result,"evidence_ref":evidence_ref,"facts":facts or {}})
+def build_result(*,criterion:str,code_sha:str,environment_class:str,result:str,evidence_ref:dict[str,Any],facts:dict[str,Any]|None=None,authority_refs:list[dict[str,Any]]|None=None)->dict[str,Any]:
+    cleaned_ref=privacy.validate_evidence_ref(evidence_ref)
+    refs=authority_refs
+    if refs is None:
+        inferred=_inferred_authority_ref(cleaned_ref)
+        refs=[inferred] if inferred is not None else []
+    return validate_result_payload({"schema_version":3,"criterion":criterion,"code_sha":code_sha,"environment_class":environment_class,"result":result,"evidence_ref":cleaned_ref,"authority_refs":refs,"facts":facts or {}})
 
 
 def serialize_result(payload:dict[str,Any])->str:

@@ -13,6 +13,8 @@ from tools.verify_integration_provenance import (
     TERMINAL_DEV_B_MERGE,
     TERMINAL_DEV_B_RETAINED,
     TERMINAL_DEV_B_SHA,
+    W09_ACTION_EVIDENCE_PATHS,
+    W09_SOURCE_SHA,
     ProvenanceError,
     _blob,
     _path_exists,
@@ -63,14 +65,28 @@ class DevAProvenanceTests(unittest.TestCase):
         self.assertEqual(sum(observed.values()), 10)
 
     @requires_repository_git
-    def test_rejected_dev5_overlaps_are_identical_to_dev1_authority(self):
+    def test_rejected_dev5_overlaps_preserve_dev1_except_declared_w09_adaptations(self):
         payload = json.loads(MANIFEST.read_text(encoding="utf-8"))
         base = payload["base"]["sha"]
         rejected = payload["predecessors"]["DEV5"]["rejected_overlaps_preserve_base"]
         self.assertEqual(len(rejected), 7)
         for path in rejected:
             with self.subTest(path=path):
-                self.assertEqual(_blob("HEAD", path), _blob(base, path))
+                if path in W09_ACTION_EVIDENCE_PATHS:
+                    self.assertNotEqual(_blob("HEAD", path), _blob(base, path))
+                else:
+                    self.assertEqual(_blob("HEAD", path), _blob(base, path))
+
+    @requires_repository_git
+    def test_w09_is_one_complete_non_authorizing_successor(self):
+        payload = json.loads(MANIFEST.read_text(encoding="utf-8"))
+        entry = payload["swarm_integrations"]["SWARM10_ACTION_EVIDENCE_AUTHORITY"]
+        self.assertEqual(W09_SOURCE_SHA, entry["source_sha"])
+        self.assertEqual(W09_ACTION_EVIDENCE_PATHS, set(entry["adapted_paths"]))
+        self.assertTrue(entry["independent_auditor_required"])
+        self.assertFalse(entry["product_pass_claimed"])
+        self.assertFalse(entry["production_mutated"])
+        self.assertFalse(entry["deployment_authorized"])
 
     def test_ported_dev5_paths_are_disjoint_from_rejected_production_overlaps(self):
         payload = json.loads(MANIFEST.read_text(encoding="utf-8"))

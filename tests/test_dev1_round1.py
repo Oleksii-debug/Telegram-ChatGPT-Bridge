@@ -18,10 +18,11 @@ class FakeClock:
 class EvidenceSemanticTests(unittest.TestCase):
     def ref(self):return {"provider":"GITHUB_ACTIONS","run_id":32461101553,"job_id":96708043115,"suite":"CONTRACT_SUITE"}
     def test_structured_ref_and_environment(self):
-        p=ah.build_result(criterion="B4",code_sha="a"*40,environment_class="GITHUB_CI",result="PASS",evidence_ref=self.ref(),facts={"scan_scope":"PUBLIC_REPOSITORY","findings_count":0})
+        required={"success":True,"tree_scan_passed":True,"history_scan_passed":True,"findings_count":0}
+        p=ah.build_result(criterion="B4",code_sha="a"*40,environment_class="GITHUB_CI",result="PASS",evidence_ref=self.ref(),facts={**required,"scan_scope":"PUBLIC_REPOSITORY"})
         self.assertEqual("GITHUB_ACTIONS",p["evidence_ref"]["provider"])
         for legacy in ("github-ci","synthetic"):
-            p=ah.build_result(criterion="B4",code_sha="a"*40,environment_class=legacy,result="PASS",evidence_ref=self.ref())
+            p=ah.build_result(criterion="B4",code_sha="a"*40,environment_class=legacy,result="PASS",evidence_ref=self.ref(),facts=required)
             self.assertIn(p["environment_class"], {"GITHUB_CI","SYNTHETIC"})
         for bad in ("Приватний чат","friend-name"):
             with self.assertRaises(ValueError): ah.build_result(criterion="B4",code_sha="a"*40,environment_class=bad,result="PASS",evidence_ref=self.ref())
@@ -34,14 +35,15 @@ class EvidenceSemanticTests(unittest.TestCase):
         for key,val in (("state","PRIVATE_NOTE"),("state","ІННЕСА"),("reason_code","FRIEND_NAME"),("checks",["SECRET_SCAN_CURRENT","PRIVATE_FILE"]),("capabilities",["READ","ОСОБА"]),("coverage_tags",["SYNTHETIC_EXECUTABLE","PHOTO_NAME"])):
             with self.subTest(key=key),self.assertRaises(ValueError): ah.build_result(criterion="B4",code_sha="c"*40,environment_class="SYNTHETIC",result="FAIL",evidence_ref={"provider":"SYNTHETIC_TEST","suite":"CONTRACT_SUITE"},facts={key:val})
     def test_mutations_and_prebuilt_fail_closed(self):
-        p=ah.build_result(criterion="B4",code_sha="d"*40,environment_class="SYNTHETIC",result="PASS",evidence_ref={"provider":"SYNTHETIC_TEST","suite":"CONTRACT_SUITE"},facts={"checks":["UNIT"]})
+        required={"success":True,"tree_scan_passed":True,"history_scan_passed":True,"findings_count":0}
+        p=ah.build_result(criterion="B4",code_sha="d"*40,environment_class="SYNTHETIC",result="PASS",evidence_ref={"provider":"SYNTHETIC_TEST","suite":"CONTRACT_SUITE"},facts={**required,"checks":["UNIT"]})
         alias=p["facts"]["checks"]; alias.append("PRIVATE_NOTE")
         with self.assertRaises(ValueError):ah.serialize_result(p)
-        p2=ah.build_result(criterion="B4",code_sha="d"*40,environment_class="SYNTHETIC",result="PASS",evidence_ref={"provider":"SYNTHETIC_TEST","suite":"CONTRACT_SUITE"},facts={"findings_count":0})
+        p2=ah.build_result(criterion="B4",code_sha="d"*40,environment_class="SYNTHETIC",result="PASS",evidence_ref={"provider":"SYNTHETIC_TEST","suite":"CONTRACT_SUITE"},facts=required)
         p2["evidence_ref"]["note"]="private"
         with self.assertRaises(ValueError):ah.serialize_result(p2)
     def test_boundaries_and_controls(self):
-        safe=ah.build_result(criterion="B4",code_sha="e"*40,environment_class="SYNTHETIC",result="PASS",evidence_ref={"provider":"SYNTHETIC_TEST","suite":"UNIT_SUITE"},facts={"findings_count":0,"checks":["UNIT"]})
+        safe=ah.build_result(criterion="B4",code_sha="e"*40,environment_class="SYNTHETIC",result="PASS",evidence_ref={"provider":"SYNTHETIC_TEST","suite":"UNIT_SUITE"},facts={"success":True,"tree_scan_passed":True,"history_scan_passed":True,"findings_count":0,"checks":["UNIT"]})
         self.assertIn('"findings_count":0',ah.serialize_result(safe))
         for bad in ("PRIVATE\nNOTE","A\x00B","Файл"):
             with self.assertRaises(ValueError):ep.reject_sensitive_text(bad)
@@ -66,8 +68,8 @@ class RateLimiterTests(unittest.TestCase):
         self.assertTrue(d.allowed); self.assertNotIn("private-actor-label", json.dumps(d.public_metadata()))
         self.assertEqual(1,r.tracked_actors)
         with self.assertRaises(ac.ContractError): r.consume("bad\nactor")
-    def test_b8_honestly_real_source_required(self):
-        item=next(x for x in ac.coverage_report() if x["criterion"]=="B8");self.assertEqual("REAL_SOURCE_REQUIRED",item["coverage"])
+    def test_b8_matches_canonical_synthetic_executable_policy(self):
+        item=next(x for x in ac.coverage_report() if x["criterion"]=="B8");self.assertEqual("SYNTHETIC_EXECUTABLE",item["coverage"])
 
 class IdempotencyTests(unittest.TestCase):
     def setUp(self):self.s=ac.PreviewCommitStore(retention_seconds=300);self.t=H("target");self.p=H("payload")
@@ -125,7 +127,7 @@ class EvidenceFuzzBoundaryTests(unittest.TestCase):
         for ref in bad:
             with self.subTest(ref=ref), self.assertRaises(ValueError): ep.validate_evidence_ref(ref)
     def test_size_list_and_shared_alias_boundaries(self):
-        base=ah.build_result(criterion="B4",code_sha="a"*40,environment_class="SYNTHETIC",result="PASS",evidence_ref=self.ref(),facts={"checks":["UNIT"]})
+        base=ah.build_result(criterion="B4",code_sha="a"*40,environment_class="SYNTHETIC",result="PASS",evidence_ref=self.ref(),facts={"success":True,"tree_scan_passed":True,"history_scan_passed":True,"findings_count":0,"checks":["UNIT"]})
         for _ in range(64):
             copy=json.loads(json.dumps(base)); self.assertIn('"UNIT"', ah.serialize_result(copy))
         shared=base["facts"]["checks"]; shared[0]="PRIVATE_LABEL"
