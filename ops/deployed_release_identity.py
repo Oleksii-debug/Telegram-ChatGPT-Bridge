@@ -15,51 +15,66 @@ PREPARED_RELEASE_NAME = "PREPARED_RELEASE.json"
 MAX_PREPARED_RELEASE_BYTES = 16 * 1024
 
 
-def derive_deployed_release_sha(app_root: Path) -> str:
-    """Derive release identity from the serving app root, never from a caller label.
-
-    A deployable release is expected to live in a directory named by its exact
-    40-character commit SHA and to contain a regular, non-symlink
-    PREPARED_RELEASE.json whose ``sha`` field agrees with that directory name.
-    The metadata file is opened with O_NOFOLLOW where the platform supports it.
-    """
-    root = Path(app_root).expanduser()
+def _close_quietly(fd: int | None) -> None:
+    if fd is None:
+        return
     try:
-        root_lstat = root.lstat()
-    except OSError as exc:
-        raise SafetyError("deployed release root unavailable") from exc
-    if root.is_symlink() or not stat.S_ISDIR(root_lstat.st_mode):
-        raise SafetyError("deployed release root topology unsafe")
+        os.close(fd)
+    except OSError:
+        pass
 
-    candidate_sha = root.name
-    if not SHA40_RE.fullmatch(candidate_sha):
-        raise SafetyError("deployed release root is not exact-SHA versioned")
 
-    metadata = root / PREPARED_RELEASE_NAME
+def _open_bound_release_root(root: Path, expected: os.stat_result) -> int:
+    nofollow = getattr(os, "O_NOFOLLOW", None)
+    directory = getattr(os, "O_DIRECTORY", None)
+    if nofollow is None or directory is None:
+        raise SafetyError("descriptor-safe deployed release validation unavailable")
+    flags = os.O_RDONLY | int(directory) | int(nofollow) | int(getattr(os, "O_CLOEXEC", 0))
     try:
-        meta_lstat = metadata.lstat()
+        fd = os.open(root, flags)
     except OSError as exc:
+        raise SafetyError("deployed release root open failed") from exc
+    try:
+        opened = os.fstat(fd)
+        if (
+            not stat.S_ISDIR(opened.st_mode)
+            or opened.st_dev != expected.st_dev
+            or opened.st_ino != expected.st_ino
+        ):
+            raise SafetyError("deployed release root changed during validation")
+        return fd
+    except Exception:
+        _close_quietly(fd)
+        raise
+
+
+def _read_bound_prepared_release(root_fd: int) -> bytes:
+    try:
+        before = os.stat(PREPARED_RELEASE_NAME, dir_fd=root_fd, follow_symlinks=False)
+    except (OSError, TypeError, NotImplementedError) as exc:
         raise SafetyError("prepared release metadata unavailable") from exc
-    if metadata.is_symlink() or not stat.S_ISREG(meta_lstat.st_mode) or meta_lstat.st_nlink != 1:
+    if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
         raise SafetyError("prepared release metadata topology unsafe")
-    if meta_lstat.st_size <= 0 or meta_lstat.st_size > MAX_PREPARED_RELEASE_BYTES:
+    if before.st_size <= 0 or before.st_size > MAX_PREPARED_RELEASE_BYTES:
         raise SafetyError("prepared release metadata size unsafe")
 
-    flags = os.O_RDONLY | int(getattr(os, "O_CLOEXEC", 0))
-    if hasattr(os, "O_NOFOLLOW"):
-        flags |= int(getattr(os, "O_NOFOLLOW"))
+    nofollow = getattr(os, "O_NOFOLLOW", None)
+    if nofollow is None:
+        raise SafetyError("descriptor-safe prepared release validation unavailable")
+    flags = os.O_RDONLY | int(nofollow) | int(getattr(os, "O_CLOEXEC", 0))
+    fd: int | None = None
     try:
-        fd = os.open(metadata, flags)
-    except OSError as exc:
-        raise SafetyError("prepared release metadata open failed") from exc
-    try:
+        try:
+            fd = os.open(PREPARED_RELEASE_NAME, flags, dir_fd=root_fd)
+        except (OSError, TypeError, NotImplementedError) as exc:
+            raise SafetyError("prepared release metadata open failed") from exc
         opened = os.fstat(fd)
         if (
             not stat.S_ISREG(opened.st_mode)
             or opened.st_nlink != 1
-            or opened.st_dev != meta_lstat.st_dev
-            or opened.st_ino != meta_lstat.st_ino
-            or opened.st_size != meta_lstat.st_size
+            or opened.st_dev != before.st_dev
+            or opened.st_ino != before.st_ino
+            or opened.st_size != before.st_size
         ):
             raise SafetyError("prepared release metadata changed during validation")
         raw = bytearray()
@@ -70,11 +85,56 @@ def derive_deployed_release_sha(app_root: Path) -> str:
             raw.extend(chunk)
         if len(raw) > MAX_PREPARED_RELEASE_BYTES:
             raise SafetyError("prepared release metadata too large")
+        after = os.fstat(fd)
+        if (
+            after.st_dev != opened.st_dev
+            or after.st_ino != opened.st_ino
+            or after.st_size != opened.st_size
+            or not stat.S_ISREG(after.st_mode)
+            or after.st_nlink != 1
+        ):
+            raise SafetyError("prepared release metadata changed during read")
+        return bytes(raw)
     finally:
-        os.close(fd)
+        _close_quietly(fd)
+
+
+def derive_deployed_release_sha(app_root: Path) -> str:
+    """Derive release identity from a descriptor-bound exact-SHA release root.
+
+    The root pathname is used only to obtain the initial expected identity and to
+    verify that the same path identity still exists after validation. Metadata is
+    opened relative to the already-bound directory descriptor, preventing a
+    same-name root replacement from redirecting PREPARED_RELEASE.json lookup.
+    """
+    root = Path(app_root).expanduser()
+    try:
+        root_lstat = root.lstat()
+    except OSError as exc:
+        raise SafetyError("deployed release root unavailable") from exc
+    if stat.S_ISLNK(root_lstat.st_mode) or not stat.S_ISDIR(root_lstat.st_mode):
+        raise SafetyError("deployed release root topology unsafe")
+
+    candidate_sha = root.name
+    if not SHA40_RE.fullmatch(candidate_sha):
+        raise SafetyError("deployed release root is not exact-SHA versioned")
+
+    root_fd: int | None = None
+    try:
+        root_fd = _open_bound_release_root(root, root_lstat)
+        raw = _read_bound_prepared_release(root_fd)
+        bound_after = os.fstat(root_fd)
+        if (
+            not stat.S_ISDIR(bound_after.st_mode)
+            or bound_after.st_dev != root_lstat.st_dev
+            or bound_after.st_ino != root_lstat.st_ino
+        ):
+            raise SafetyError("deployed release root changed during validation")
+    finally:
+        _close_quietly(root_fd)
 
     try:
-        payload = json.loads(bytes(raw).decode("utf-8"))
+        payload = json.loads(raw.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise SafetyError("prepared release metadata invalid") from exc
     if not isinstance(payload, dict):
@@ -90,7 +150,7 @@ def derive_deployed_release_sha(app_root: Path) -> str:
     except OSError as exc:
         raise SafetyError("deployed release root changed during validation") from exc
     if (
-        root.is_symlink()
+        stat.S_ISLNK(root_after.st_mode)
         or not stat.S_ISDIR(root_after.st_mode)
         or root_after.st_dev != root_lstat.st_dev
         or root_after.st_ino != root_lstat.st_ino
