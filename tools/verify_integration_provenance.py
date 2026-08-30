@@ -72,9 +72,11 @@ def _validate_predeploy_overlay(payload: dict[str, Any]) -> tuple[set[str], str]
     if sha != "b3a0e16a110bbaf352314399e0fb4feec3a5a0ee":
         raise ProvenanceError("canonical predeploy overlay SHA mismatch")
     if parent != "7714f923e96e7b8d04cd35aa5382a93a128d3f25":
-        raise ProvenanceError("canonical predeploy overlay parent mismatch")
-    if _parents(str(sha)) != (str(parent),):
-        raise ProvenanceError("canonical predeploy overlay parent relation mismatch")
+        raise ProvenanceError("canonical predeploy overlay base mismatch")
+    # PR #170 contains multiple specialist commits.  The frozen #169 SHA is the
+    # reviewed PR base/ancestor, not necessarily the direct parent of the head.
+    # Provenance therefore requires ancestry plus exact accepted-head blobs.
+    _assert_ancestor(str(parent), str(sha))
     _assert_ancestor(str(sha), legacy._git("rev-parse", "HEAD"))
     paths = set(_safe_paths(overlay.get("exact_paths"), "canonical predeploy overlay"))
     expected = {
