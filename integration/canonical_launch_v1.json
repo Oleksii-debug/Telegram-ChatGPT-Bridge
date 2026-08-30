@@ -50,6 +50,19 @@
       ]
     }
   },
+  "predeploy_overlay": {
+    "name": "PASSENGER_EXACT_DEPLOYED_SHA_BINDING",
+    "pr": 170,
+    "sha": "b3a0e16a110bbaf352314399e0fb4feec3a5a0ee",
+    "parent_sha": "7714f923e96e7b8d04cd35aa5382a93a128d3f25",
+    "exact_paths": [
+      "bridge/runtime_wsgi.py",
+      "ops/deployed_release_identity.py",
+      "ops/passenger_bound_evidence.py",
+      "tests/test_final10_b2_passenger_binding.py",
+      "tests/test_finalwave26_wsgi_guard_wiring.py"
+    ]
+  },
   "runtime_composition": {
     "path": "bridge/runtime_wsgi.py",
     "preserves_parent_passenger_observation": true,

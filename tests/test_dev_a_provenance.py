@@ -32,8 +32,10 @@ class DevAProvenanceTests(unittest.TestCase):
         self.assertEqual(result["base"], "26a2df12c350f670a703b236edc3648f339b64a9")
         self.assertEqual(result["canonical_assembly_sha"], "6878a21ebe46a3cdb1e84ef600587ec5cc99c90e")
         self.assertEqual(result["canonical_launch_source_count"], 4)
-        self.assertGreaterEqual(result["canonical_launch_path_count"], 24)
+        self.assertGreaterEqual(result["canonical_launch_path_count"], 29)
         self.assertEqual(result["canonical_w09_override_count"], 4)
+        self.assertEqual(result["canonical_predeploy_overlay_sha"], "b3a0e16a110bbaf352314399e0fb4feec3a5a0ee")
+        self.assertEqual(result["canonical_predeploy_overlay_path_count"], 5)
         self.assertFalse(result["private_values_recorded"])
 
     @requires_repository_git
@@ -43,16 +45,21 @@ class DevAProvenanceTests(unittest.TestCase):
             for path in source["exact_paths"]:
                 with self.subTest(path=path):
                     self.assertEqual(_blob("HEAD", path), _blob(source["sha"], path))
+        overlay = payload["predeploy_overlay"]
+        for path in overlay["exact_paths"]:
+            with self.subTest(predeploy_path=path):
+                self.assertEqual(_blob("HEAD", path), _blob(overlay["sha"], path))
 
     @requires_repository_git
-    def test_runtime_composition_is_frozen_at_assembly_commit(self):
+    def test_runtime_composition_is_frozen_at_accepted_predeploy_overlay(self):
         payload = json.loads(CANONICAL_MANIFEST.read_text(encoding="utf-8"))
         path = payload["runtime_composition"]["path"]
-        self.assertEqual(_blob("HEAD", path), _blob(payload["assembly_sha"], path))
+        self.assertEqual(_blob("HEAD", path), _blob(payload["predeploy_overlay"]["sha"], path))
         self.assertEqual(
             payload["runtime_composition"]["installer_paths"],
             ["bridge/dialog_pagination.py", "bridge/typed_dialog_identity.py"],
         )
+        self.assertFalse(_path_exists("HEAD", ".github/workflows/final10-b2-passenger-binding.yml"))
 
     @requires_repository_git
     def test_only_explicit_w09_overrides_supersede_old_dev5_rejections(self):

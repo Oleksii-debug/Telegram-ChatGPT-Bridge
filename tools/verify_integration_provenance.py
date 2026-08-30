@@ -1,12 +1,5 @@
 #!/usr/bin/env python3
-"""Canonical provenance verifier with a narrow FINAL10 composition overlay.
-
-The historical DEV01 verifier is preserved byte-for-byte in the sibling
-``verify_integration_provenance_legacy.py``. This wrapper validates the new
-private-use launch composition from exact Git objects, then supplies only the
-explicitly superseded historical assumptions to the legacy verifier. It reads
-no secrets and performs no network or production operations.
-"""
+"""Canonical provenance verifier with FINAL10 canonical + predeploy overlays."""
 from __future__ import annotations
 
 import copy
@@ -66,6 +59,42 @@ def _load_canonical() -> dict[str, Any]:
     return payload
 
 
+def _validate_predeploy_overlay(payload: dict[str, Any]) -> tuple[set[str], str]:
+    overlay = payload.get("predeploy_overlay")
+    if not isinstance(overlay, dict):
+        raise ProvenanceError("canonical predeploy overlay missing")
+    if overlay.get("name") != "PASSENGER_EXACT_DEPLOYED_SHA_BINDING":
+        raise ProvenanceError("canonical predeploy overlay name mismatch")
+    if overlay.get("pr") != 170:
+        raise ProvenanceError("canonical predeploy overlay PR mismatch")
+    sha = overlay.get("sha")
+    parent = overlay.get("parent_sha")
+    if sha != "b3a0e16a110bbaf352314399e0fb4feec3a5a0ee":
+        raise ProvenanceError("canonical predeploy overlay SHA mismatch")
+    if parent != "7714f923e96e7b8d04cd35aa5382a93a128d3f25":
+        raise ProvenanceError("canonical predeploy overlay base mismatch")
+    # PR #170 contains multiple specialist commits. The frozen #169 SHA is the
+    # reviewed PR base/ancestor, not necessarily the direct parent of the head.
+    _assert_ancestor(str(parent), str(sha))
+    _assert_ancestor(str(sha), legacy._git("rev-parse", "HEAD"))
+    paths = set(_safe_paths(overlay.get("exact_paths"), "canonical predeploy overlay"))
+    expected = {
+        "bridge/runtime_wsgi.py",
+        "ops/deployed_release_identity.py",
+        "ops/passenger_bound_evidence.py",
+        "tests/test_final10_b2_passenger_binding.py",
+        "tests/test_finalwave26_wsgi_guard_wiring.py",
+    }
+    if paths != expected:
+        raise ProvenanceError("canonical predeploy overlay path set mismatch")
+    for path in paths:
+        if _blob("HEAD", path) != _blob(str(sha), path):
+            raise ProvenanceError(f"canonical predeploy overlay blob mismatch: {path}")
+    if _path_exists("HEAD", ".github/workflows/final10-b2-passenger-binding.yml"):
+        raise ProvenanceError("specialist Passenger workflow imported into deployable successor")
+    return paths, str(sha)
+
+
 def _validate_canonical_launch(payload: dict[str, Any]) -> set[str]:
     assembly = payload.get("assembly_sha")
     parent = payload.get("parent_sha")
@@ -98,6 +127,9 @@ def _validate_canonical_launch(payload: dict[str, Any]) -> set[str]:
                 raise ProvenanceError(f"canonical source blob mismatch: {name}:{path}")
         candidate_paths.update(paths)
 
+    overlay_paths, overlay_sha = _validate_predeploy_overlay(payload)
+    candidate_paths.update(overlay_paths)
+
     runtime = payload.get("runtime_composition")
     if not isinstance(runtime, dict) or runtime.get("path") != "bridge/runtime_wsgi.py":
         raise ProvenanceError("canonical runtime composition missing")
@@ -106,8 +138,8 @@ def _validate_canonical_launch(payload: dict[str, Any]) -> set[str]:
     installers = _safe_paths(runtime.get("installer_paths"), "canonical runtime installer")
     if installers != ["bridge/dialog_pagination.py", "bridge/typed_dialog_identity.py"]:
         raise ProvenanceError("canonical runtime installer set mismatch")
-    if _blob("HEAD", "bridge/runtime_wsgi.py") != _blob(str(assembly), "bridge/runtime_wsgi.py"):
-        raise ProvenanceError("canonical runtime composition drift")
+    if _blob("HEAD", "bridge/runtime_wsgi.py") != _blob(overlay_sha, "bridge/runtime_wsgi.py"):
+        raise ProvenanceError("canonical runtime predeploy composition drift")
     candidate_paths.add("bridge/runtime_wsgi.py")
 
     overrides = set(_safe_paths(payload.get("w09_base_authority_overrides"), "canonical W09 override"))
@@ -162,10 +194,12 @@ def _legacy_manifest_for_canonical(canonical: dict[str, Any], candidate_paths: s
         if entry["count"] == 0:
             entry["classification"] = "NO_DIRECT_OVERLAP"
 
-    runtime_blob = _blob(str(canonical["assembly_sha"]), "bridge/runtime_wsgi.py")
-    manifest["swarm_integrations"]["SWARM10_SINGLE_FINISHER_HIGH_CONVERGENCE"]["candidate_git_blobs"][
-        "bridge/runtime_wsgi.py"
-    ] = runtime_blob
+    overlay_sha = str(canonical["predeploy_overlay"]["sha"])
+    convergence_blobs = manifest["swarm_integrations"]["SWARM10_SINGLE_FINISHER_HIGH_CONVERGENCE"]["candidate_git_blobs"]
+    convergence_blobs["bridge/runtime_wsgi.py"] = _blob(overlay_sha, "bridge/runtime_wsgi.py")
+    convergence_blobs["tests/test_finalwave26_wsgi_guard_wiring.py"] = _blob(
+        overlay_sha, "tests/test_finalwave26_wsgi_guard_wiring.py"
+    )
 
     changed = {
         line.strip()
@@ -185,7 +219,11 @@ def verify_repository() -> dict[str, Any]:
     candidate_paths = _validate_canonical_launch(canonical)
     patched_manifest = _legacy_manifest_for_canonical(canonical, candidate_paths)
     patched_blobs = dict(legacy.SINGLE_FINISHER_BLOBS)
-    patched_blobs["bridge/runtime_wsgi.py"] = _blob(str(canonical["assembly_sha"]), "bridge/runtime_wsgi.py")
+    overlay_sha = str(canonical["predeploy_overlay"]["sha"])
+    patched_blobs["bridge/runtime_wsgi.py"] = _blob(overlay_sha, "bridge/runtime_wsgi.py")
+    patched_blobs["tests/test_finalwave26_wsgi_guard_wiring.py"] = _blob(
+        overlay_sha, "tests/test_finalwave26_wsgi_guard_wiring.py"
+    )
 
     original_load = legacy._load
     original_blobs = legacy.SINGLE_FINISHER_BLOBS
@@ -201,6 +239,8 @@ def verify_repository() -> dict[str, Any]:
     result["canonical_launch_path_count"] = len(candidate_paths)
     result["canonical_w09_override_count"] = len(canonical["w09_base_authority_overrides"])
     result["canonical_assembly_sha"] = canonical["assembly_sha"]
+    result["canonical_predeploy_overlay_sha"] = canonical["predeploy_overlay"]["sha"]
+    result["canonical_predeploy_overlay_path_count"] = len(canonical["predeploy_overlay"]["exact_paths"])
     return result
 
 
