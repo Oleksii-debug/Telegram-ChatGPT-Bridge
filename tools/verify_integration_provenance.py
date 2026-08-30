@@ -73,8 +73,6 @@ def _validate_predeploy_overlay(payload: dict[str, Any]) -> tuple[set[str], str]
         raise ProvenanceError("canonical predeploy overlay SHA mismatch")
     if parent != "7714f923e96e7b8d04cd35aa5382a93a128d3f25":
         raise ProvenanceError("canonical predeploy overlay base mismatch")
-    # PR #170 contains multiple specialist commits. The frozen #169 SHA is the
-    # reviewed PR base/ancestor, not necessarily the direct parent of the head.
     _assert_ancestor(str(parent), str(sha))
     _assert_ancestor(str(sha), legacy._git("rev-parse", "HEAD"))
     paths = set(_safe_paths(overlay.get("exact_paths"), "canonical predeploy overlay"))
@@ -95,6 +93,36 @@ def _validate_predeploy_overlay(payload: dict[str, Any]) -> tuple[set[str], str]
     return paths, str(sha)
 
 
+def _validate_release_artifact_overlay(payload: dict[str, Any]) -> tuple[set[str], str]:
+    overlay = payload.get("release_artifact_overlay")
+    if not isinstance(overlay, dict):
+        raise ProvenanceError("canonical release artifact overlay missing")
+    if overlay.get("name") != "PORTABLE_EXACT_SHA_RELEASE_ARTIFACT":
+        raise ProvenanceError("canonical release artifact overlay name mismatch")
+    if overlay.get("pr") != 173:
+        raise ProvenanceError("canonical release artifact overlay PR mismatch")
+    sha = overlay.get("sha")
+    parent = overlay.get("parent_sha")
+    if sha != "2ba88b9af54af3476ba30d80023384fcd1bb7cd2":
+        raise ProvenanceError("canonical release artifact overlay SHA mismatch")
+    if parent != "cc808a14740bad5e239ceec1592163c01182239c":
+        raise ProvenanceError("canonical release artifact overlay base mismatch")
+    _assert_ancestor(str(parent), str(sha))
+    _assert_ancestor(str(sha), legacy._git("rev-parse", "HEAD"))
+    paths = set(_safe_paths(overlay.get("exact_paths"), "canonical release artifact overlay"))
+    expected = {
+        ".github/workflows/ci.yml",
+        "tests/test_release_artifact.py",
+        "tools/build_release_artifact.py",
+    }
+    if paths != expected:
+        raise ProvenanceError("canonical release artifact overlay path set mismatch")
+    for path in paths:
+        if _blob("HEAD", path) != _blob(str(sha), path):
+            raise ProvenanceError(f"canonical release artifact overlay blob mismatch: {path}")
+    return paths, str(sha)
+
+
 def _validate_canonical_launch(payload: dict[str, Any]) -> set[str]:
     assembly = payload.get("assembly_sha")
     parent = payload.get("parent_sha")
@@ -105,6 +133,8 @@ def _validate_canonical_launch(payload: dict[str, Any]) -> set[str]:
     if _parents(str(assembly)) != (str(parent),):
         raise ProvenanceError("canonical launch assembly parent mismatch")
     _assert_ancestor(str(assembly), legacy._git("rev-parse", "HEAD"))
+
+    release_paths, _release_sha = _validate_release_artifact_overlay(payload)
 
     expected_sources = {
         "W09_ACCEPTANCE_ACTION": (166, "9d8b98057b1252736d1cb2fbdf5a93fc71ff4aa3"),
@@ -123,9 +153,12 @@ def _validate_canonical_launch(payload: dict[str, Any]) -> set[str]:
             raise ProvenanceError(f"canonical launch source identity mismatch: {name}")
         paths = _safe_paths(entry.get("exact_paths"), f"canonical {name}")
         for path in paths:
+            if path in release_paths:
+                continue
             if _blob("HEAD", path) != _blob(sha, path):
                 raise ProvenanceError(f"canonical source blob mismatch: {name}:{path}")
         candidate_paths.update(paths)
+    candidate_paths.update(release_paths)
 
     overlay_paths, overlay_sha = _validate_predeploy_overlay(payload)
     candidate_paths.update(overlay_paths)
@@ -241,6 +274,8 @@ def verify_repository() -> dict[str, Any]:
     result["canonical_assembly_sha"] = canonical["assembly_sha"]
     result["canonical_predeploy_overlay_sha"] = canonical["predeploy_overlay"]["sha"]
     result["canonical_predeploy_overlay_path_count"] = len(canonical["predeploy_overlay"]["exact_paths"])
+    result["canonical_release_artifact_overlay_sha"] = canonical["release_artifact_overlay"]["sha"]
+    result["canonical_release_artifact_overlay_path_count"] = len(canonical["release_artifact_overlay"]["exact_paths"])
     return result
 
 
