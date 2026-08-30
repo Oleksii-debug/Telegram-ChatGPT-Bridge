@@ -2,11 +2,13 @@
 """Fail-closed identity derivation and descriptor binding for deployed releases."""
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
 import stat
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator
 
@@ -50,26 +52,26 @@ def _open_bound_release_root(root: Path, expected: os.stat_result) -> int:
         raise
 
 
-def _read_bound_prepared_release(root_fd: int) -> bytes:
+def _read_regular_leaf(root_fd: int, name: str, *, max_bytes: int) -> bytes:
     try:
-        before = os.stat(PREPARED_RELEASE_NAME, dir_fd=root_fd, follow_symlinks=False)
+        before = os.stat(name, dir_fd=root_fd, follow_symlinks=False)
     except (OSError, TypeError, NotImplementedError) as exc:
-        raise SafetyError("prepared release metadata unavailable") from exc
+        raise SafetyError("deployed release file unavailable") from exc
     if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
-        raise SafetyError("prepared release metadata topology unsafe")
-    if before.st_size <= 0 or before.st_size > MAX_PREPARED_RELEASE_BYTES:
-        raise SafetyError("prepared release metadata size unsafe")
+        raise SafetyError("deployed release file topology unsafe")
+    if before.st_size < 0 or before.st_size > max_bytes:
+        raise SafetyError("deployed release file size unsafe")
 
     nofollow = getattr(os, "O_NOFOLLOW", None)
     if nofollow is None:
-        raise SafetyError("descriptor-safe prepared release validation unavailable")
+        raise SafetyError("descriptor-safe deployed release file validation unavailable")
     flags = os.O_RDONLY | int(nofollow) | int(getattr(os, "O_CLOEXEC", 0))
     fd: int | None = None
     try:
         try:
-            fd = os.open(PREPARED_RELEASE_NAME, flags, dir_fd=root_fd)
+            fd = os.open(name, flags, dir_fd=root_fd)
         except (OSError, TypeError, NotImplementedError) as exc:
-            raise SafetyError("prepared release metadata open failed") from exc
+            raise SafetyError("deployed release file open failed") from exc
         opened = os.fstat(fd)
         if (
             not stat.S_ISREG(opened.st_mode)
@@ -78,15 +80,15 @@ def _read_bound_prepared_release(root_fd: int) -> bytes:
             or opened.st_ino != before.st_ino
             or opened.st_size != before.st_size
         ):
-            raise SafetyError("prepared release metadata changed during validation")
+            raise SafetyError("deployed release file changed during validation")
         raw = bytearray()
-        while len(raw) <= MAX_PREPARED_RELEASE_BYTES:
-            chunk = os.read(fd, min(4096, MAX_PREPARED_RELEASE_BYTES + 1 - len(raw)))
+        while len(raw) <= max_bytes:
+            chunk = os.read(fd, min(65536, max_bytes + 1 - len(raw)))
             if not chunk:
                 break
             raw.extend(chunk)
-        if len(raw) > MAX_PREPARED_RELEASE_BYTES:
-            raise SafetyError("prepared release metadata too large")
+        if len(raw) > max_bytes:
+            raise SafetyError("deployed release file too large")
         after = os.fstat(fd)
         if (
             after.st_dev != opened.st_dev
@@ -95,15 +97,21 @@ def _read_bound_prepared_release(root_fd: int) -> bytes:
             or not stat.S_ISREG(after.st_mode)
             or after.st_nlink != 1
         ):
-            raise SafetyError("prepared release metadata changed during read")
+            raise SafetyError("deployed release file changed during read")
         return bytes(raw)
     finally:
         _close_quietly(fd)
 
 
-def _validate_bound_release(root: Path, root_fd: int, expected: os.stat_result) -> str:
-    candidate_sha = root.name
-    if not SHA40_RE.fullmatch(candidate_sha):
+def _read_bound_prepared_release(root_fd: int) -> bytes:
+    raw = _read_regular_leaf(root_fd, PREPARED_RELEASE_NAME, max_bytes=MAX_PREPARED_RELEASE_BYTES)
+    if not raw:
+        raise SafetyError("prepared release metadata size unsafe")
+    return raw
+
+
+def _validate_bound_release(root_name: str, root_fd: int, expected: os.stat_result) -> str:
+    if not SHA40_RE.fullmatch(root_name):
         raise SafetyError("deployed release root is not exact-SHA versioned")
     raw = _read_bound_prepared_release(root_fd)
     opened = os.fstat(root_fd)
@@ -122,9 +130,9 @@ def _validate_bound_release(root: Path, root_fd: int, expected: os.stat_result) 
     metadata_sha = payload.get("sha")
     if not isinstance(metadata_sha, str) or not SHA40_RE.fullmatch(metadata_sha):
         raise SafetyError("prepared release metadata SHA invalid")
-    if metadata_sha != candidate_sha:
+    if metadata_sha != root_name:
         raise SafetyError("deployed release identity mismatch")
-    return candidate_sha
+    return root_name
 
 
 def _initial_root_identity(app_root: Path) -> tuple[Path, os.stat_result]:
@@ -143,7 +151,7 @@ def derive_deployed_release_sha(app_root: Path) -> str:
     root_fd: int | None = None
     try:
         root_fd = _open_bound_release_root(root, root_lstat)
-        candidate_sha = _validate_bound_release(root, root_fd, root_lstat)
+        candidate_sha = _validate_bound_release(root.name, root_fd, root_lstat)
     finally:
         _close_quietly(root_fd)
 
@@ -170,14 +178,32 @@ def require_armed_candidate_matches_deployed(app_root: Path, armed_candidate_sha
     return deployed_sha
 
 
-@contextmanager
-def bound_deployed_release_root(app_root: Path, armed_candidate_sha: str) -> Iterator[tuple[Path, str]]:
-    """Keep the validated release inode open through Passenger evidence collection.
+@dataclass(frozen=True)
+class BoundDeployedRelease:
+    root_fd: int
+    root_name: str
+    expected_dev: int
+    expected_ino: int
+    deployed_sha: str
 
-    The yielded path is the Linux descriptor path for the already-open release
-    root. This prevents a same-name pathname replacement after identity
-    verification from redirecting the subsequent WSGI/runtime evidence reads.
-    """
+    @property
+    def proc_path(self) -> Path:
+        return Path(f"/proc/self/fd/{self.root_fd}")
+
+    def revalidate(self) -> str:
+        expected = os.fstat(self.root_fd)
+        if expected.st_dev != self.expected_dev or expected.st_ino != self.expected_ino:
+            raise SafetyError("bound deployed release root identity changed")
+        return _validate_bound_release(self.root_name, self.root_fd, expected)
+
+    def regular_leaf_sha256(self, name: str, *, max_bytes: int = 8 * 1024 * 1024) -> str:
+        raw = _read_regular_leaf(self.root_fd, name, max_bytes=max_bytes)
+        return hashlib.sha256(raw).hexdigest()
+
+
+@contextmanager
+def bound_deployed_release_root(app_root: Path, armed_candidate_sha: str) -> Iterator[BoundDeployedRelease]:
+    """Keep the validated release inode authoritative through finalization."""
     if not isinstance(armed_candidate_sha, str) or not SHA40_RE.fullmatch(armed_candidate_sha):
         raise SafetyError("armed Passenger candidate SHA invalid")
     if os.name != "posix" or not Path("/proc/self/fd").is_dir():
@@ -187,12 +213,18 @@ def bound_deployed_release_root(app_root: Path, armed_candidate_sha: str) -> Ite
     root_fd: int | None = None
     try:
         root_fd = _open_bound_release_root(root, root_lstat)
-        deployed_sha = _validate_bound_release(root, root_fd, root_lstat)
+        deployed_sha = _validate_bound_release(root.name, root_fd, root_lstat)
         if deployed_sha != armed_candidate_sha:
             raise SafetyError("armed Passenger candidate does not match deployed release")
-        bound_path = Path(f"/proc/self/fd/{root_fd}")
-        if not bound_path.is_dir():
+        bound = BoundDeployedRelease(
+            root_fd=root_fd,
+            root_name=root.name,
+            expected_dev=int(root_lstat.st_dev),
+            expected_ino=int(root_lstat.st_ino),
+            deployed_sha=deployed_sha,
+        )
+        if not bound.proc_path.is_dir():
             raise SafetyError("bound deployed release path unavailable")
-        yield bound_path, deployed_sha
+        yield bound
     finally:
         _close_quietly(root_fd)
