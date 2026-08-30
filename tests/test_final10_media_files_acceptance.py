@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import tempfile
 import unittest
 import zipfile
@@ -13,6 +14,7 @@ from bridge.backend import TelethonReadBackend, TelethonReadConfig
 from bridge.downloads import DownloadManager
 from bridge.errors import BridgeError
 from bridge.storage import CheckpointStore, DownloadItem, FileRecordStore
+from bridge.upload_snapshot import UploadFileIdentity, open_verified_upload_batch
 
 
 class Chat:
@@ -235,6 +237,39 @@ class Final10MediaFilesAcceptanceTests(unittest.TestCase):
             self.assertIsNone(zf.testzip())
             for message in self.messages:
                 self.assertEqual(zf.read(message.file.name), message.payload)
+
+    def test_send_files_snapshot_is_immutable_pathless_and_identity_bound(self) -> None:
+        original = b"approved-upload-bytes"
+        source = self.files.root / "upload.bin"
+        source.write_bytes(original)
+        record = self.files.add(source, name="upload.bin", mime_type="application/octet-stream")
+        identity = UploadFileIdentity(file_ref=record.file_ref, sha256=record.sha256, size=record.size)
+
+        batch = open_verified_upload_batch(self.files, (identity,))
+        self.assertIsNotNone(batch)
+        upload = batch.files[0]
+        self.assertEqual(upload.file_ref, record.file_ref)
+        self.assertEqual(upload.sha256, record.sha256)
+        self.assertEqual(upload.size, record.size)
+        self.assertEqual(upload.name, "upload.bin")
+        with self.assertRaises(io.UnsupportedOperation):
+            upload.fileno()
+
+        # Mutation after the pre-effect boundary must not alter approved upload bytes.
+        source.write_bytes(b"mutated-after-snapshot")
+        upload.seek(0)
+        self.assertEqual(upload.read(), original)
+        batch.close()
+        self.assertTrue(upload.closed)
+
+    def test_send_files_snapshot_rejects_wrong_hash_before_effect_surface(self) -> None:
+        payload = b"registered-upload"
+        source = self.files.root / "wrong-hash.bin"
+        source.write_bytes(payload)
+        record = self.files.add(source, name="wrong-hash.bin")
+        wrong = UploadFileIdentity(file_ref=record.file_ref, sha256="0" * 64, size=record.size)
+        self.assertIsNone(open_verified_upload_batch(self.files, (wrong,)))
+        self.assertEqual(source.read_bytes(), payload)
 
     def test_mismatched_file_ref_fails_before_telegram_download(self) -> None:
         message = self.messages[0]
