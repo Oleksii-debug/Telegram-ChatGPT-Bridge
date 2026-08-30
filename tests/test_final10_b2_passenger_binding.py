@@ -11,6 +11,7 @@ from unittest import mock
 from ops import passenger_bound_evidence
 from ops.deployed_release_identity import PREPARED_RELEASE_NAME, bound_deployed_release_root
 from ops.passenger_evidence_hook import CONSUMED_RECEIPT_NAME
+from ops.release_guard import SafetyError
 
 
 @unittest.skipUnless(os.name == "posix" and Path("/proc/self/fd").is_dir(), "Linux descriptor binding required")
@@ -33,13 +34,17 @@ class Final10B2PassengerBindingTests(unittest.TestCase):
             base = Path(td)
             root, _ = self._release(base)
             displaced = base / "displaced"
-            with bound_deployed_release_root(root, self.SHA) as (bound_root, deployed_sha):
-                self.assertEqual(self.SHA, deployed_sha)
+            with bound_deployed_release_root(root, self.SHA) as bound:
+                self.assertEqual(self.SHA, bound.deployed_sha)
                 root.rename(displaced)
                 replacement, _ = self._release(base)
                 self.assertEqual(self.SHA, replacement.name)
-                self.assertTrue((bound_root / "passenger_wsgi.py").is_file())
-                self.assertEqual("# synthetic wsgi\n", (bound_root / "passenger_wsgi.py").read_text(encoding="utf-8"))
+                self.assertTrue((bound.proc_path / "passenger_wsgi.py").is_file())
+                self.assertEqual(
+                    "# synthetic wsgi\n",
+                    (bound.proc_path / "passenger_wsgi.py").read_text(encoding="utf-8"),
+                )
+                self.assertEqual(self.SHA, bound.revalidate())
 
     def test_armed_deployed_mismatch_blocks_before_finalizer_and_creates_zero_artifacts(self):
         with tempfile.TemporaryDirectory() as td:
@@ -62,7 +67,7 @@ class Final10B2PassengerBindingTests(unittest.TestCase):
             with mock.patch.object(passenger_bound_evidence, "_paths", return_value=(control, marker_path, report, binding)), \
                  mock.patch.object(passenger_bound_evidence, "_read_arm_marker", return_value=(marker, fake_identity)), \
                  mock.patch.object(passenger_bound_evidence, "_verified_serving_request", return_value=True), \
-                 mock.patch.object(passenger_bound_evidence, "_finalize_strong_evidence") as finalize:
+                 mock.patch.object(passenger_bound_evidence, "_finalize_bound_strong_evidence") as finalize:
                 result = passenger_bound_evidence.collect_bound_if_armed_from_bridge_app(
                     app,
                     environ={"REQUEST_METHOD": "GET", "PATH_INFO": "/health"},
@@ -94,16 +99,16 @@ class Final10B2PassengerBindingTests(unittest.TestCase):
             fake_identity = object()
 
             def finalize(**kwargs):
-                bound_root = kwargs["app_root"]
-                self.assertTrue(str(bound_root).startswith("/proc/self/fd/"))
-                self.assertTrue((bound_root / "passenger_wsgi.py").is_file())
-                self.assertEqual(bound_root / "passenger_wsgi.py", kwargs["wsgi_file"])
+                bound = kwargs["bound"]
+                self.assertTrue(str(bound.proc_path).startswith("/proc/self/fd/"))
+                self.assertTrue((bound.proc_path / "passenger_wsgi.py").is_file())
+                self.assertEqual(self.SHA, bound.revalidate())
                 return "PASSENGER_EVIDENCE_PRIVATE_REPORT_WRITTEN"
 
             with mock.patch.object(passenger_bound_evidence, "_paths", return_value=(control, marker_path, report, binding)), \
                  mock.patch.object(passenger_bound_evidence, "_read_arm_marker", return_value=(marker, fake_identity)), \
                  mock.patch.object(passenger_bound_evidence, "_verified_serving_request", return_value=True), \
-                 mock.patch.object(passenger_bound_evidence, "_finalize_strong_evidence", side_effect=finalize) as finalize_mock:
+                 mock.patch.object(passenger_bound_evidence, "_finalize_bound_strong_evidence", side_effect=finalize) as finalize_mock:
                 result = passenger_bound_evidence.collect_bound_if_armed_from_bridge_app(
                     app,
                     environ={"REQUEST_METHOD": "GET", "PATH_INFO": "/health"},
@@ -111,6 +116,51 @@ class Final10B2PassengerBindingTests(unittest.TestCase):
                 )
             self.assertEqual("PASSENGER_EVIDENCE_PRIVATE_REPORT_WRITTEN", result)
             finalize_mock.assert_called_once()
+
+    def test_runtime_wsgi_hash_mismatch_fails_before_any_artifact_write(self):
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            root, _app = self._release(base, self.SHA)
+            control = base / "control"
+            evidence_dir = base / "evidence"
+            control.mkdir()
+            evidence_dir.mkdir()
+            marker_path = control / "marker.json"
+            marker_path.write_text("{}", encoding="utf-8")
+            report = evidence_dir / "report.json"
+            binding = evidence_dir / "binding.json"
+            marker = {
+                "schema_version": 2,
+                "candidate_sha": self.SHA,
+                "expected_wsgi_sha256": "1" * 64,
+                "request_challenge_sha256": "2" * 64,
+            }
+            with bound_deployed_release_root(root, self.SHA) as bound, \
+                 mock.patch.object(passenger_bound_evidence, "verify_private_file_identity"), \
+                 mock.patch.object(
+                     passenger_bound_evidence,
+                     "collect_runtime_evidence",
+                     return_value={"wsgi_sha256": "0" * 64},
+                 ), \
+                 mock.patch.object(passenger_bound_evidence, "write_private_report") as write_report, \
+                 mock.patch.object(passenger_bound_evidence, "_write_binding_report") as write_binding, \
+                 mock.patch.object(passenger_bound_evidence, "write_private_json_no_clobber") as write_receipt:
+                with self.assertRaisesRegex(SafetyError, "WSGI does not match bound"):
+                    passenger_bound_evidence._finalize_bound_strong_evidence(
+                        bound=bound,
+                        control=control,
+                        marker_path=marker_path,
+                        report=report,
+                        binding_path=binding,
+                        marker=marker,
+                        marker_identity=object(),
+                    )
+            write_report.assert_not_called()
+            write_binding.assert_not_called()
+            write_receipt.assert_not_called()
+            self.assertFalse(report.exists())
+            self.assertFalse(binding.exists())
+            self.assertFalse((control / CONSUMED_RECEIPT_NAME).exists())
 
 
 if __name__ == "__main__":
