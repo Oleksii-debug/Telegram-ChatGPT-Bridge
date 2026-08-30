@@ -30,9 +30,9 @@ class DevAProvenanceTests(unittest.TestCase):
         result = verify_repository()
         self.assertEqual(result["schema_version"], 2)
         self.assertEqual(result["base"], "26a2df12c350f670a703b236edc3648f339b64a9")
-        self.assertEqual(result["canonical_assembly_sha"], "7e25e43cf7e8423094271fce6807e247e14b13a0")
-        self.assertEqual(result["canonical_launch_source_count"], 3)
-        self.assertGreaterEqual(result["canonical_launch_path_count"], 20)
+        self.assertEqual(result["canonical_assembly_sha"], "6878a21ebe46a3cdb1e84ef600587ec5cc99c90e")
+        self.assertEqual(result["canonical_launch_source_count"], 4)
+        self.assertGreaterEqual(result["canonical_launch_path_count"], 24)
         self.assertEqual(result["canonical_w09_override_count"], 4)
         self.assertFalse(result["private_values_recorded"])
 

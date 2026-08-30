@@ -1,8 +1,8 @@
 {
   "schema_version": 1,
   "purpose": "final10_private_use_canonical_launch_integration",
-  "assembly_sha": "7e25e43cf7e8423094271fce6807e247e14b13a0",
-  "parent_sha": "c3fa5fec7059e80f1ec24f3e06f0f750e67e35de",
+  "assembly_sha": "6878a21ebe46a3cdb1e84ef600587ec5cc99c90e",
+  "parent_sha": "e35c1d51fccc45576dd15d1c95f75deb560d7a76",
   "sources": {
     "W09_ACCEPTANCE_ACTION": {
       "pr": 166,
@@ -39,6 +39,15 @@
         "bridge/typed_dialog_identity.py",
         "tests/test_final10_b3_typed_dialog_identity.py"
       ]
+    },
+    "MEDIA_DOWNLOAD_ARCHIVE_RESIDUALS": {
+      "pr": 50,
+      "sha": "29a9d3bf30ac75999b86b51d694e6885b54b519a",
+      "exact_paths": [
+        "bridge/archive.py",
+        "bridge/downloads.py",
+        "tests/test_dev04_media_storage.py"
+      ]
     }
   },
   "runtime_composition": {
@@ -58,6 +67,7 @@
   "provenance_paths": [
     "integration/canonical_launch_v1.json",
     "tests/test_dev_a_provenance.py",
+    "tests/test_final10_media_residuals.py",
     "tools/verify_integration_provenance.py",
     "tools/verify_integration_provenance_legacy.py"
   ],

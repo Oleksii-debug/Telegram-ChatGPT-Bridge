@@ -69,9 +69,9 @@ def _load_canonical() -> dict[str, Any]:
 def _validate_canonical_launch(payload: dict[str, Any]) -> set[str]:
     assembly = payload.get("assembly_sha")
     parent = payload.get("parent_sha")
-    if assembly != "7e25e43cf7e8423094271fce6807e247e14b13a0":
+    if assembly != "6878a21ebe46a3cdb1e84ef600587ec5cc99c90e":
         raise ProvenanceError("canonical launch assembly mismatch")
-    if parent != "c3fa5fec7059e80f1ec24f3e06f0f750e67e35de":
+    if parent != "e35c1d51fccc45576dd15d1c95f75deb560d7a76":
         raise ProvenanceError("canonical launch parent mismatch")
     if _parents(str(assembly)) != (str(parent),):
         raise ProvenanceError("canonical launch assembly parent mismatch")
@@ -81,6 +81,7 @@ def _validate_canonical_launch(payload: dict[str, Any]) -> set[str]:
         "W09_ACCEPTANCE_ACTION": (166, "9d8b98057b1252736d1cb2fbdf5a93fc71ff4aa3"),
         "DEEP_DIALOG_PAGINATION": (163, "2ecfd599f540444ca331a32e46b2b9a7f7afcd3c"),
         "TYPED_DIALOG_IDENTITY": (168, "b63693b7a49f091768c86bda42f6c8f3a1f5aa9d"),
+        "MEDIA_DOWNLOAD_ARCHIVE_RESIDUALS": (50, "29a9d3bf30ac75999b86b51d694e6885b54b519a"),
     }
     sources = payload.get("sources")
     if not isinstance(sources, dict) or set(sources) != set(expected_sources):
@@ -126,6 +127,7 @@ def _validate_canonical_launch(payload: dict[str, Any]) -> set[str]:
     expected_provenance = {
         "integration/canonical_launch_v1.json",
         "tests/test_dev_a_provenance.py",
+        "tests/test_final10_media_residuals.py",
         "tools/verify_integration_provenance.py",
         "tools/verify_integration_provenance_legacy.py",
     }
@@ -146,17 +148,12 @@ def _legacy_manifest_for_canonical(canonical: dict[str, Any], candidate_paths: s
     manifest = copy.deepcopy(legacy._load())
     base = str(manifest["base"]["sha"])
 
-    # The new W09 acceptance implementation deliberately supersedes four old
-    # DEV5 rejection decisions. The remaining historical rejections stay exact.
     overrides = set(canonical["w09_base_authority_overrides"])
     rejected = manifest["predecessors"]["DEV5"]["rejected_overlaps_preserve_base"]
     manifest["predecessors"]["DEV5"]["rejected_overlaps_preserve_base"] = [
         path for path in rejected if path not in overrides
     ]
 
-    # The overlap matrix is derived from those lane path sets. Recompute only
-    # its counts in the in-memory compatibility view instead of carrying stale
-    # counts from the pre-W09 historical decision set.
     lanes = legacy._lane_changed_paths(manifest)
     for key, entry in manifest["overlap_matrix"].items():
         left, right = key.split("_", 1)
@@ -164,8 +161,6 @@ def _legacy_manifest_for_canonical(canonical: dict[str, Any], candidate_paths: s
         if entry["count"] == 0:
             entry["classification"] = "NO_DIRECT_OVERLAP"
 
-    # runtime_wsgi is now an explicitly reviewed semantic composition. Preserve
-    # every other single-finisher blob assertion and replace only that one blob.
     runtime_blob = _blob(str(canonical["assembly_sha"]), "bridge/runtime_wsgi.py")
     manifest["swarm_integrations"]["SWARM10_SINGLE_FINISHER_HIGH_CONVERGENCE"]["candidate_git_blobs"][
         "bridge/runtime_wsgi.py"
