@@ -6,10 +6,12 @@ on:
       - 'final10/media-files-acceptance-d536'
     paths:
       - 'tests/test_final10_media_files_acceptance.py'
+      - 'tests/test_final10_send_files_preview_identity.py'
       - '.github/workflows/final10-media-files-acceptance.yml'
   pull_request:
     paths:
       - 'tests/test_final10_media_files_acceptance.py'
+      - 'tests/test_final10_send_files_preview_identity.py'
       - '.github/workflows/final10-media-files-acceptance.yml'
 
 permissions:
@@ -37,7 +39,8 @@ jobs:
           actual="$(git diff --name-only "$parent"..HEAD | sort)"
           expected="$(printf '%s\n' \
             '.github/workflows/final10-media-files-acceptance.yml' \
-            'tests/test_final10_media_files_acceptance.py' | sort)"
+            'tests/test_final10_media_files_acceptance.py' \
+            'tests/test_final10_send_files_preview_identity.py' | sort)"
           test "$actual" = "$expected"
       - name: Compile focused media/files boundary
         run: >-
@@ -48,9 +51,14 @@ jobs:
           bridge/archive.py
           bridge/file_access.py
           bridge/upload_snapshot.py
+          bridge/phase_aware_write_app.py
           tests/test_final10_media_files_acceptance.py
+          tests/test_final10_send_files_preview_identity.py
       - name: Run focused current-successor media/files acceptance
-        run: python -m unittest tests.test_final10_media_files_acceptance -v
+        run: |
+          python -m unittest \
+            tests.test_final10_media_files_acceptance \
+            tests.test_final10_send_files_preview_identity -v
       - name: Current-tree secret scan
         if: always()
         run: python tools/secret_scan.py --mode current
