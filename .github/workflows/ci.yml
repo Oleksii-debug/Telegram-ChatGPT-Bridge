@@ -31,6 +31,7 @@ jobs:
           tools/secret_scan.py
           tools/parallel_overlap_report.py
           tools/build_action_openapi.py
+          tools/build_release_artifact.py
           tools/verify_dev06_action_e2e.py
           tools/verify_dev06_deployed_action.py
           tools/verify_integration_provenance.py
@@ -62,6 +63,7 @@ jobs:
           tests/test_secret_scan.py
           tests/test_recovery_ops.py
           tests/test_release_package.py
+          tests/test_release_artifact.py
           tests/test_audit_round5.py
           tests/test_audit_round6.py
           tests/test_audit_round7.py
@@ -105,6 +107,8 @@ jobs:
           assert len(inventory) == 19
           print('DEV_A_CANDIDATE_CONTRACTS_PASS')
           PY
+      - name: B4 focused exact-SHA release artifact tests
+        run: python -m unittest tests.test_release_artifact -v
       - name: Verify deterministic integration provenance and overlap decisions
         run: python tools/verify_integration_provenance.py
       - name: Verify single deploy-capable entrypoint
@@ -144,3 +148,21 @@ jobs:
       - name: Verify no active cPanel or auto-deploy arming file
         if: always()
         run: test ! -e .cpanel.yml && test ! -e ops/ENABLE_HOSTIQ_AUTO_DEPLOY
+      - name: Build exact-head portable release artifact
+        env:
+          CANDIDATE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          test -n "$CANDIDATE_SHA"
+          rm -rf "$RUNNER_TEMP/telegram-bridge-release-artifact"
+          python tools/build_release_artifact.py \
+            --repo . \
+            --sha "$CANDIDATE_SHA" \
+            --output-dir "$RUNNER_TEMP/telegram-bridge-release-artifact"
+      - name: Upload exact-head portable release artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: telegram-bridge-release-${{ github.event.pull_request.head.sha || github.sha }}
+          path: ${{ runner.temp }}/telegram-bridge-release-artifact/
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
