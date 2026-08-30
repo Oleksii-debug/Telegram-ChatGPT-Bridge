@@ -63,6 +63,17 @@
       "tests/test_finalwave26_wsgi_guard_wiring.py"
     ]
   },
+  "release_artifact_overlay": {
+    "name": "PORTABLE_EXACT_SHA_RELEASE_ARTIFACT",
+    "pr": 173,
+    "sha": "2ba88b9af54af3476ba30d80023384fcd1bb7cd2",
+    "parent_sha": "cc808a14740bad5e239ceec1592163c01182239c",
+    "exact_paths": [
+      ".github/workflows/ci.yml",
+      "tests/test_release_artifact.py",
+      "tools/build_release_artifact.py"
+    ]
+  },
   "runtime_composition": {
     "path": "bridge/runtime_wsgi.py",
     "preserves_parent_passenger_observation": true,
