@@ -36,19 +36,28 @@ class DevAProvenanceTests(unittest.TestCase):
         self.assertEqual(result["canonical_w09_override_count"], 4)
         self.assertEqual(result["canonical_predeploy_overlay_sha"], "b3a0e16a110bbaf352314399e0fb4feec3a5a0ee")
         self.assertEqual(result["canonical_predeploy_overlay_path_count"], 5)
+        self.assertEqual(result["canonical_release_artifact_overlay_sha"], "2ba88b9af54af3476ba30d80023384fcd1bb7cd2")
+        self.assertEqual(result["canonical_release_artifact_overlay_path_count"], 3)
         self.assertFalse(result["private_values_recorded"])
 
     @requires_repository_git
     def test_canonical_exact_sources_match_their_reviewed_blobs(self):
         payload = json.loads(CANONICAL_MANIFEST.read_text(encoding="utf-8"))
+        release_overlay = payload["release_artifact_overlay"]
+        release_paths = set(release_overlay["exact_paths"])
         for source in payload["sources"].values():
             for path in source["exact_paths"]:
+                if path in release_paths:
+                    continue
                 with self.subTest(path=path):
                     self.assertEqual(_blob("HEAD", path), _blob(source["sha"], path))
         overlay = payload["predeploy_overlay"]
         for path in overlay["exact_paths"]:
             with self.subTest(predeploy_path=path):
                 self.assertEqual(_blob("HEAD", path), _blob(overlay["sha"], path))
+        for path in release_overlay["exact_paths"]:
+            with self.subTest(release_artifact_path=path):
+                self.assertEqual(_blob("HEAD", path), _blob(release_overlay["sha"], path))
 
     @requires_repository_git
     def test_runtime_composition_is_frozen_at_accepted_predeploy_overlay(self):
