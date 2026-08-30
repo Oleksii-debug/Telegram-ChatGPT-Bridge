@@ -11,37 +11,14 @@ from typing import Any
 
 from bridge.routes import READ_ROUTE_REGISTRY
 from ops.acceptance_harness import CRITERIA
+from ops.acceptance_policy import (
+    CRITERION_POLICIES,
+    EVIDENCE_CLASSES,
+    HUMAN_ACCESSIBILITY_REQUIRED,
+    LIVE_EXTERNAL_REQUIRED,
+    SYNTHETIC_EXECUTABLE,
+)
 from ops.openapi_registry import OPERATIONS, OperationClass
-
-EVIDENCE_CLASSES = {
-    "SYNTHETIC_EXECUTABLE",
-    "REAL_SOURCE_REQUIRED",
-    "LIVE_EXTERNAL_REQUIRED",
-}
-
-# Conservative candidate truth boundary.  Human accessibility, Passenger/live
-# identity, deployed Action equality and final K scenarios are never promoted
-# by source/unit evidence.
-SYNTHETIC_EXECUTABLE = frozenset({
-    "B4", "B5", "B7", "B8",
-    "C3", "C4", "C6",
-    "D1", "D2", "D3", "D4", "D5", "D6",
-    "E1", "E2", "E3", "E4", "E5",
-    "F1", "F2", "F3", "F4", "F5", "F6", "F7", "F8",
-    "G1", "G2", "G3", "G4", "G5",
-    "H3", "H4", "H5",
-    "J2", "J3", "J5",
-})
-LIVE_EXTERNAL_REQUIRED = frozenset({
-    "A5",
-    "C1", "C2", "C5",
-    "H1", "H2",
-    "I1", "I4", "I6",
-    "J1", "J4", "J6",
-    "K1", "K2", "K3", "K4", "K5",
-})
-HUMAN_ACCESSIBILITY_REQUIRED = frozenset({"I1", "I4", "I6"})
-
 
 def _criterion_sort(value: str) -> tuple[str, int]:
     return value[0], int(value[1:])
@@ -50,17 +27,13 @@ def _criterion_sort(value: str) -> tuple[str, int]:
 def candidate_acceptance_coverage() -> tuple[dict[str, Any], ...]:
     rows: list[dict[str, Any]] = []
     for criterion in sorted(CRITERIA, key=_criterion_sort):
-        if criterion in LIVE_EXTERNAL_REQUIRED:
-            evidence_class = "LIVE_EXTERNAL_REQUIRED"
-        elif criterion in SYNTHETIC_EXECUTABLE:
-            evidence_class = "SYNTHETIC_EXECUTABLE"
-        else:
-            evidence_class = "REAL_SOURCE_REQUIRED"
+        policy = CRITERION_POLICIES[criterion]
+        evidence_class = policy["evidence_class"]
         rows.append({
             "criterion": criterion,
             "evidence_class": evidence_class,
-            "human_verification_required": criterion in HUMAN_ACCESSIBILITY_REQUIRED,
-            "explicit_write_approval_required": criterion == "K5",
+            "human_verification_required": policy["human_verification_required"],
+            "explicit_write_approval_required": policy["explicit_write_approval_required"],
             "product_pass": False,
         })
     validate_candidate_acceptance_coverage(rows)

@@ -20,9 +20,11 @@ from typing import Any, Callable, Mapping
 from ops.write_safety import CommitResult, PersistentWriteStore, PreviewEnvelope, ReconciliationRequired, WriteSafetyError
 
 _PROTOCOL_VERSION = 1
+_LOCK_ROOT_PROTOCOL_VERSION = 1
 _REQUIRED_IDEMPOTENCY_COLUMNS = {
     "key_hash", "request_fingerprint", "preview_id", "state", "result_json", "created_at", "updated_at",
 }
+_LOCK_ROOT_IDENTITY_COLUMNS = {"singleton", "protocol", "root_dev", "root_ino"}
 
 
 @dataclass(frozen=True)
@@ -115,28 +117,91 @@ class ProcessSharedCommitGuard:
     def __init__(self, store: PersistentWriteStore, *, lock_root: str | Path | None = None) -> None:
         self.store = store
         self.lock_root = Path(lock_root) if lock_root is not None else store.db_path.parent / ".write-operation-locks"
-        self._prepare_lock_root()
-        self._ensure_schema()
+        self._lock_root_identity: tuple[int, int] | None = None
+        root_fd = self._prepare_lock_root()
+        try:
+            self._ensure_schema(root_fd)
+        except BaseException:
+            self._close_fd(root_fd)
+            raise
+        if not self._close_fd(root_fd):
+            raise WriteSafetyError("write_guard_lock_root_cleanup_failed", status=503)
 
-    def _prepare_lock_root(self) -> None:
+    @staticmethod
+    def _close_fd(fd: int | None) -> bool:
+        """Close one descriptor without allowing a raw OS error to escape."""
+        if fd is None:
+            return True
+        try:
+            os.close(fd)
+            return True
+        except OSError:
+            return False
+
+    @staticmethod
+    def _root_open_flags() -> int:
+        nofollow = getattr(os, "O_NOFOLLOW", None)
+        directory = getattr(os, "O_DIRECTORY", None)
+        supports_dir_fd = getattr(os, "supports_dir_fd", set())
+        if nofollow is None or directory is None or os.open not in supports_dir_fd:
+            raise WriteSafetyError("write_guard_lock_root_unsafe", status=503)
+        return os.O_RDONLY | int(directory) | int(nofollow) | int(getattr(os, "O_CLOEXEC", 0))
+
+    @staticmethod
+    def _validate_root_stat(st: os.stat_result) -> tuple[int, int]:
+        if (
+            not stat.S_ISDIR(st.st_mode)
+            or (hasattr(os, "geteuid") and st.st_uid != os.geteuid())
+            or stat.S_IMODE(st.st_mode) != 0o700
+        ):
+            raise WriteSafetyError("write_guard_lock_root_unsafe", status=503)
+        return int(st.st_dev), int(st.st_ino)
+
+    def _open_lock_root_descriptor(self, expected: tuple[int, int] | None = None) -> int:
+        try:
+            fd = os.open(self.lock_root, self._root_open_flags())
+        except OSError as exc:
+            raise WriteSafetyError("write_guard_lock_root_unavailable", status=503) from exc
+        try:
+            try:
+                identity = self._validate_root_stat(os.fstat(fd))
+            except OSError as exc:
+                raise WriteSafetyError("write_guard_lock_root_unavailable", status=503) from exc
+            if expected is not None and identity != expected:
+                raise WriteSafetyError("write_guard_lock_root_identity_mismatch", status=503)
+            return fd
+        except BaseException:
+            self._close_fd(fd)
+            raise
+
+    def _prepare_lock_root(self) -> int:
         try:
             self.lock_root.mkdir(mode=0o700, parents=False, exist_ok=False)
         except FileExistsError:
             pass
         except OSError as exc:
             raise WriteSafetyError("write_guard_lock_root_unavailable", status=503) from exc
+        return self._open_lock_root_descriptor()
+
+    @staticmethod
+    def _identity_component(value: Any) -> str:
+        if isinstance(value, bool):
+            raise WriteSafetyError("write_guard_lock_root_identity_invalid", status=503)
         try:
-            st = os.lstat(self.lock_root)
+            parsed = int(value)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise WriteSafetyError("write_guard_lock_root_identity_invalid", status=503) from exc
+        if parsed < 0 or str(value) != str(parsed):
+            raise WriteSafetyError("write_guard_lock_root_identity_invalid", status=503)
+        return str(parsed)
+
+    def _ensure_schema(self, root_fd: int) -> None:
+        try:
+            descriptor_identity = self._validate_root_stat(os.fstat(root_fd))
         except OSError as exc:
             raise WriteSafetyError("write_guard_lock_root_unavailable", status=503) from exc
-        if (
-            stat.S_ISLNK(st.st_mode) or not stat.S_ISDIR(st.st_mode)
-            or (hasattr(os, "geteuid") and st.st_uid != os.geteuid())
-            or stat.S_IMODE(st.st_mode) != 0o700
-        ):
-            raise WriteSafetyError("write_guard_lock_root_unsafe", status=503)
-
-    def _ensure_schema(self) -> None:
+        root_dev = str(descriptor_identity[0])
+        root_ino = str(descriptor_identity[1])
         with self.store._connect() as con:
             con.execute("BEGIN IMMEDIATE")
             try:
@@ -148,7 +213,58 @@ class ProcessSharedCommitGuard:
                     "key_hash TEXT PRIMARY KEY,protocol INTEGER NOT NULL,"
                     "armed_at INTEGER NOT NULL CHECK(armed_at>=0))"
                 )
+                con.execute(
+                    "CREATE TABLE IF NOT EXISTS runtime_commit_guard_identity ("
+                    "singleton INTEGER PRIMARY KEY CHECK(singleton=1),"
+                    "protocol INTEGER NOT NULL,root_dev TEXT NOT NULL,root_ino TEXT NOT NULL)"
+                )
+                identity_schema = {
+                    str(row[1]): (str(row[2]).upper(), int(row[3]), int(row[5]))
+                    for row in con.execute("PRAGMA table_info(runtime_commit_guard_identity)").fetchall()
+                }
+                expected_schema = {
+                    "singleton": ("INTEGER", 0, 1),
+                    "protocol": ("INTEGER", 1, 0),
+                    "root_dev": ("TEXT", 1, 0),
+                    "root_ino": ("TEXT", 1, 0),
+                }
+                ddl_row = con.execute(
+                    "SELECT sql FROM sqlite_master WHERE type='table' AND name='runtime_commit_guard_identity'"
+                ).fetchone()
+                normalized_ddl = "" if ddl_row is None else "".join(str(ddl_row["sql"] or "").lower().split())
+                if (
+                    set(identity_schema) != _LOCK_ROOT_IDENTITY_COLUMNS
+                    or identity_schema != expected_schema
+                    or "check(singleton=1)" not in normalized_ddl
+                ):
+                    raise WriteSafetyError("write_guard_lock_root_identity_schema_mismatch", status=503)
+                identity_rows = con.execute(
+                    "SELECT singleton,protocol,root_dev,root_ino FROM runtime_commit_guard_identity ORDER BY singleton"
+                ).fetchall()
+                if len(identity_rows) > 1 or (identity_rows and int(identity_rows[0]["singleton"]) != 1):
+                    raise WriteSafetyError("write_guard_lock_root_identity_invalid", status=503)
+                row = identity_rows[0] if identity_rows else None
+                if row is None:
+                    con.execute(
+                        "INSERT INTO runtime_commit_guard_identity(singleton,protocol,root_dev,root_ino) "
+                        "VALUES(1,?,?,?)",
+                        (_LOCK_ROOT_PROTOCOL_VERSION, root_dev, root_ino),
+                    )
+                else:
+                    try:
+                        stored_protocol = int(row["protocol"])
+                    except (TypeError, ValueError, OverflowError) as exc:
+                        raise WriteSafetyError("write_guard_lock_root_identity_invalid", status=503) from exc
+                    stored_identity = (
+                        int(self._identity_component(row["root_dev"])),
+                        int(self._identity_component(row["root_ino"])),
+                    )
+                    if stored_protocol != _LOCK_ROOT_PROTOCOL_VERSION:
+                        raise WriteSafetyError("write_guard_lock_root_protocol_mismatch", status=503)
+                    if stored_identity != descriptor_identity:
+                        raise WriteSafetyError("write_guard_lock_root_identity_mismatch", status=503)
                 con.commit()
+                self._lock_root_identity = descriptor_identity
             except Exception:
                 if con.in_transaction:
                     con.rollback()
@@ -163,16 +279,35 @@ class ProcessSharedCommitGuard:
     def _key_hash(self, idempotency_key: str) -> str:
         return self._validate_key_hash(self.store._idempotency_hash(idempotency_key))
 
+    def _open_lock_root(self) -> int:
+        if self._lock_root_identity is None:
+            raise WriteSafetyError("write_guard_lock_root_identity_invalid", status=503)
+        return self._open_lock_root_descriptor(self._lock_root_identity)
+
     def _open_lock(self, key_hash: str, *, fail_busy: bool) -> int | None:
         key_hash = self._validate_key_hash(key_hash)
-        path = self.lock_root / f"{key_hash}.lock"
-        flags = os.O_RDWR | os.O_CREAT | int(getattr(os, "O_CLOEXEC", 0)) | int(getattr(os, "O_NOFOLLOW", 0))
+        root_fd = self._open_lock_root()
+        nofollow = getattr(os, "O_NOFOLLOW", None)
+        if nofollow is None:
+            self._close_fd(root_fd)
+            raise WriteSafetyError("write_guard_lock_unsafe", status=503)
+        flags = os.O_RDWR | os.O_CREAT | int(getattr(os, "O_CLOEXEC", 0)) | int(nofollow)
         try:
-            fd = os.open(path, flags, 0o600)
+            fd = os.open(f"{key_hash}.lock", flags, 0o600, dir_fd=root_fd)
         except OSError as exc:
+            self._close_fd(root_fd)
             raise WriteSafetyError("write_guard_lock_unavailable", status=503) from exc
+        except BaseException:
+            self._close_fd(root_fd)
+            raise
+        if not self._close_fd(root_fd):
+            self._close_fd(fd)
+            raise WriteSafetyError("write_guard_lock_root_cleanup_failed", status=503)
         try:
-            st = os.fstat(fd)
+            try:
+                st = os.fstat(fd)
+            except OSError as exc:
+                raise WriteSafetyError("write_guard_lock_unavailable", status=503) from exc
             if (
                 not stat.S_ISREG(st.st_mode)
                 or (hasattr(os, "geteuid") and st.st_uid != os.geteuid())
@@ -182,26 +317,31 @@ class ProcessSharedCommitGuard:
             try:
                 fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError:
-                os.close(fd)
+                closed = self._close_fd(fd)
                 if fail_busy:
                     raise WriteSafetyError("write_in_progress", status=409) from None
+                if not closed:
+                    raise WriteSafetyError("write_guard_lock_cleanup_failed", status=503)
                 return None
+            except OSError as exc:
+                raise WriteSafetyError("write_guard_lock_unavailable", status=503) from exc
             return fd
-        except Exception:
-            try:
-                os.close(fd)
-            except OSError:
-                pass
+        except BaseException:
+            self._close_fd(fd)
             raise
 
     @staticmethod
-    def _close_lock(fd: int | None) -> None:
+    def _close_lock(fd: int | None) -> bool:
         if fd is None:
-            return
+            return True
+        ok = True
         try:
             fcntl.flock(fd, fcntl.LOCK_UN)
-        finally:
-            os.close(fd)
+        except OSError:
+            ok = False
+        if not ProcessSharedCommitGuard._close_fd(fd):
+            ok = False
+        return ok
 
     def _state_and_marker(self, con: sqlite3.Connection, key_hash: str) -> tuple[str | None, bool]:
         row = con.execute("SELECT state FROM idempotency WHERE key_hash=?", (key_hash,)).fetchone()
@@ -269,7 +409,7 @@ class ProcessSharedCommitGuard:
         try:
             self._arm(key_hash, now=now)
             try:
-                return self.store.commit(
+                result = self.store.commit(
                     preview_token,
                     expected_action=expected_action,
                     idempotency_key=idempotency_key,
@@ -278,8 +418,12 @@ class ProcessSharedCommitGuard:
                 )
             finally:
                 self._clear_terminal_marker(key_hash)
-        finally:
+        except BaseException:
             self._close_lock(fd)
+            raise
+        if not self._close_lock(fd):
+            raise WriteSafetyError("write_guard_lock_cleanup_failed", status=503)
+        return result
 
     def recover_orphaned_calling(self, *, now: int) -> RecoveryReport:
         if isinstance(now, bool) or int(now) < 0:
@@ -301,25 +445,28 @@ class ProcessSharedCommitGuard:
                         state, marker = self._state_and_marker(con, key_hash)
                         if not marker:
                             con.commit()
-                            continue
-                        if state == "CALLING":
-                            con.execute(
-                                "UPDATE idempotency SET state='AMBIGUOUS',updated_at=? WHERE key_hash=? AND state='CALLING'",
-                                (ts, key_hash),
-                            )
-                            recovered += 1
-                        elif state == "RESERVED":
-                            reserved += 1
                         else:
-                            cleared += 1
-                        con.execute("DELETE FROM runtime_commit_guard WHERE key_hash=?", (key_hash,))
-                        con.commit()
+                            if state == "CALLING":
+                                con.execute(
+                                    "UPDATE idempotency SET state='AMBIGUOUS',updated_at=? WHERE key_hash=? AND state='CALLING'",
+                                    (ts, key_hash),
+                                )
+                                recovered += 1
+                            elif state == "RESERVED":
+                                reserved += 1
+                            else:
+                                cleared += 1
+                            con.execute("DELETE FROM runtime_commit_guard WHERE key_hash=?", (key_hash,))
+                            con.commit()
                     except Exception:
                         if con.in_transaction:
                             con.rollback()
                         raise
-            finally:
+            except BaseException:
                 self._close_lock(fd)
+                raise
+            if not self._close_lock(fd):
+                raise WriteSafetyError("write_guard_lock_cleanup_failed", status=503)
         return RecoveryReport(len(rows), recovered, busy, cleared, reserved)
 
 

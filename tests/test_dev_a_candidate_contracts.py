@@ -20,6 +20,8 @@ from ops.candidate_contracts import (
     validate_integrated_api_inventory,
 )
 from ops.openapi_registry import OPERATIONS, OperationClass
+from ops.acceptance_policy import CRITERION_POLICIES
+from ops import acceptance_contracts
 
 
 class CandidateAcceptanceCoverageTests(unittest.TestCase):
@@ -41,7 +43,7 @@ class CandidateAcceptanceCoverageTests(unittest.TestCase):
         by_id = {row["criterion"]: row for row in candidate_acceptance_coverage()}
         for criterion in ("H1", "I1", "I4", "I6", "K1", "K2", "K3", "K4", "K5"):
             self.assertEqual("LIVE_EXTERNAL_REQUIRED", by_id[criterion]["evidence_class"])
-        for criterion in ("I1", "I4", "I6"):
+        for criterion in ("C1", "I1", "I4", "I6"):
             self.assertTrue(by_id[criterion]["human_verification_required"])
         self.assertTrue(by_id["K5"]["explicit_write_approval_required"])
         self.assertFalse(by_id["K4"]["explicit_write_approval_required"])
@@ -51,6 +53,13 @@ class CandidateAcceptanceCoverageTests(unittest.TestCase):
         rows[0]["product_pass"] = True
         with self.assertRaises(ValueError):
             validate_candidate_acceptance_coverage(rows)
+
+    def test_all_coverage_projections_use_the_canonical_policy_table(self):
+        candidate = {row["criterion"]: row["evidence_class"] for row in candidate_acceptance_coverage()}
+        contracts = {row["criterion"]: row["coverage"] for row in acceptance_contracts.coverage_report()}
+        policy = {criterion: row["evidence_class"] for criterion, row in CRITERION_POLICIES.items()}
+        self.assertEqual(policy, candidate)
+        self.assertEqual(policy, contracts)
 
 
 class CandidateApiInventoryTests(unittest.TestCase):

@@ -23,16 +23,22 @@ EXACT_PATHS = {
     "tests/test_dev04_migration_concurrency.py",
     "tests/test_dev04_private_serving.py",
 }
-# bridge/app.py was intentionally adapted later by the reviewed canonical
-# request-parser hardening commit. Preserve the original DEV04 source set while
-# proving the one later mutation by exact commit/blob identity instead of
-# silently treating all accepted paths as still byte-identical to DEV04.
+# Historical canonical adaptations already recorded by the DEV04 ledger.
 CANONICAL_ADAPTATIONS = {
     "bridge/app.py": "751a9cbf281f3421dcfae3787dbbae1b910bb80b",
     "bridge/file_access.py": "6963e8c046efbf42e18ebfd31e9fbd54343bfb8d",
     "bridge/storage.py": "6963e8c046efbf42e18ebfd31e9fbd54343bfb8d",
     "tests/test_dev04_migration_concurrency.py": "6963e8c046efbf42e18ebfd31e9fbd54343bfb8d",
     "tests/test_dev04_private_serving.py": "6963e8c046efbf42e18ebfd31e9fbd54343bfb8d",
+}
+# FINAL10 B5 accepted the historical DEV04 integration and requested only the
+# two launch-relevant PR #50 media residuals. These three exact blobs were
+# assembled together at this one canonical commit. Keep them separate from the
+# historical ledger so the old non-authorizing record remains immutable.
+FINAL10_MEDIA_ADAPTATIONS = {
+    "bridge/archive.py": "6878a21ebe46a3cdb1e84ef600587ec5cc99c90e",
+    "bridge/downloads.py": "6878a21ebe46a3cdb1e84ef600587ec5cc99c90e",
+    "tests/test_dev04_media_storage.py": "6878a21ebe46a3cdb1e84ef600587ec5cc99c90e",
 }
 EXCLUDED_WORKFLOW = ".github/workflows/dev04-media-storage-qa.yml"
 
@@ -93,8 +99,9 @@ class Dev01Dev04PeerProvenanceTests(unittest.TestCase):
 
     @requires_repository_git
     def test_all_accepted_paths_are_byte_exact_or_exactly_accounted_canonical_adaptations(self):
-        self.assertTrue(set(CANONICAL_ADAPTATIONS).issubset(EXACT_PATHS))
-        for path, commit in sorted(CANONICAL_ADAPTATIONS.items()):
+        adaptations = {**CANONICAL_ADAPTATIONS, **FINAL10_MEDIA_ADAPTATIONS}
+        self.assertTrue(set(adaptations).issubset(EXACT_PATHS))
+        for path, commit in sorted(adaptations.items()):
             with self.subTest(path=path, adaptation_commit=commit):
                 subprocess.run(
                     ["git", "merge-base", "--is-ancestor", commit, "HEAD"],
@@ -106,9 +113,16 @@ class Dev01Dev04PeerProvenanceTests(unittest.TestCase):
                 self.assertEqual(_blob("HEAD", path), _blob(commit, path))
                 self.assertNotEqual(_blob("HEAD", path), _blob(SOURCE_SHA, path))
 
-        for path in sorted(EXACT_PATHS - set(CANONICAL_ADAPTATIONS)):
+        for path in sorted(EXACT_PATHS - set(adaptations)):
             with self.subTest(path=path):
                 self.assertEqual(_blob("HEAD", path), _blob(SOURCE_SHA, path))
+
+    @requires_repository_git
+    def test_final10_media_adaptations_are_one_exact_reviewed_slice(self):
+        self.assertEqual(set(FINAL10_MEDIA_ADAPTATIONS.values()), {"6878a21ebe46a3cdb1e84ef600587ec5cc99c90e"})
+        for path in sorted(FINAL10_MEDIA_ADAPTATIONS):
+            with self.subTest(path=path):
+                self.assertEqual(_blob("HEAD", path), _blob("29a9d3bf30ac75999b86b51d694e6885b54b519a", path))
 
     @requires_repository_git
     def test_specialist_workflow_is_not_imported(self):

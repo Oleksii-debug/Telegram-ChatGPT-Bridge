@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import fcntl
+import os
 import sqlite3
 import tempfile
 import unicodedata
@@ -229,6 +231,70 @@ class Dev04ArchiveHardeningTests(unittest.TestCase):
                 self.builder.build([source.file_ref])
         after = {path.name for path in self.store.root.iterdir()}
         self.assertEqual(after, before)
+
+    def test_process_loss_marker_cleans_part_and_unregistered_final(self) -> None:
+        source = self.add("one.txt", b"abc")
+        token = "a" * 40
+        marker = self.builder._create_pending_marker(token)
+        target = self.builder.output_dir / f"archive_{token}.zip.part"
+        final = self.store.root / f".archive_{token}.zip"
+        target.write_bytes(b"partial")
+        final.write_bytes(b"orphan")
+
+        archive = self.builder.build([source.file_ref])
+
+        self.assertIsNotNone(self.store.get(archive.file_ref))
+        self.assertFalse(marker.exists())
+        self.assertFalse(target.exists())
+        self.assertFalse(final.exists())
+
+    def test_process_loss_marker_preserves_already_registered_final(self) -> None:
+        token = "b" * 40
+        marker = self.builder._create_pending_marker(token)
+        final = self.store.root / f".archive_{token}.zip"
+        final.write_bytes(b"registered")
+        previous = self.store.add(final, name="previous.zip", mime_type="application/zip")
+        source = self.add("one.txt", b"abc")
+
+        self.builder.build([source.file_ref])
+
+        self.assertFalse(marker.exists())
+        recovered = self.store.get(previous.file_ref)
+        self.assertIsNotNone(recovered)
+        assert recovered is not None
+        self.assertEqual(Path(recovered.path).read_bytes(), b"registered")
+
+    def test_unsafe_pending_marker_fails_closed_without_following_symlink(self) -> None:
+        token = "c" * 40
+        outside = Path(self.tmp.name) / "outside-marker-target"
+        outside.write_bytes(b"do-not-delete")
+        marker = self.builder.output_dir / f".archive_{token}.pending"
+        marker.symlink_to(outside)
+        source = self.add("one.txt", b"abc")
+
+        with self.assertRaises(BridgeError) as caught:
+            self.builder.build([source.file_ref])
+
+        self.assertEqual(caught.exception.code, "archive_recovery_unsafe")
+        self.assertTrue(outside.exists())
+        self.assertEqual(outside.read_bytes(), b"do-not-delete")
+        self.assertTrue(os.path.lexists(marker))
+
+    def test_archive_lock_contention_is_retryable_and_has_no_side_effect(self) -> None:
+        source = self.add("one.txt", b"abc")
+        flags = os.O_CREAT | os.O_RDWR
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        fd = os.open(self.builder.lock_path, flags, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            with self.assertRaises(BridgeError) as caught:
+                self.builder.build([source.file_ref])
+            self.assertEqual(caught.exception.code, "archive_busy")
+            self.assertTrue(caught.exception.details.get("retryable"))
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            os.close(fd)
 
     def test_unicode_equivalent_member_names_are_disambiguated(self) -> None:
         first = self.add("é.txt", b"a")

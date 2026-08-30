@@ -267,12 +267,9 @@ def analyze_accessibility(html:str)->dict[str,bool]:
         if cur-prev>1: heading=False;break
     return {"keyboard_operable":not p.mouse_only,"labels_present":labels,"accessible_names_present":names,"heading_order_valid":heading,"mouse_only_absent":not p.mouse_only}
 
-SYNTHETIC_EXECUTABLE={"B1","B2","B5","B7","C3","C4","C6","D1","D2","D3","D4","D5","D6","E1","E2","E3","E4","E5","E6","F1","F2","F3","F4","F5","F6","F7","F8","G1","G2","G3","G4","G5","H1","H3","H4","H5","I1","I2","I3","I4","I5","I6","I7","J2","J3","J5"}
-LIVE_EXTERNAL={"H2","J1","J4","J6","K1","K2","K3","K4","K5"}
 def coverage_report()->list[dict[str,str]]:
-    out=[]
-    for c in sorted(CRITERIA,key=lambda x:(x[0],int(x[1:]))):out.append({"criterion":c,"coverage":"SYNTHETIC_EXECUTABLE" if c in SYNTHETIC_EXECUTABLE else ("LIVE_EXTERNAL_REQUIRED" if c in LIVE_EXTERNAL else "REAL_SOURCE_REQUIRED")})
-    return out
+    from ops.acceptance_policy import CRITERION_POLICIES
+    return [{"criterion":c,"coverage":CRITERION_POLICIES[c]["evidence_class"]} for c in sorted(CRITERIA,key=lambda x:(x[0],int(x[1:])))]
 def final_scenario_definition(criterion:str)->dict[str,Any]:
     if criterion not in {"K1","K2","K3","K4","K5"}:raise ValueError("not a final user scenario")
     return {"criterion":criterion,"requires_live_telegram":True,"requires_audited_deployed_sha":True,"requires_explicit_write_approval":criterion=="K5","synthetic_pass_allowed":False}

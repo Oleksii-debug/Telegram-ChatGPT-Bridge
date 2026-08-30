@@ -194,6 +194,7 @@
     "tests/test_dev_a_provenance.py",
     "tests/test_final5_task2_preparse_b8_composition.py",
     "tests/test_final5_task2_sqlite_wal_bootstrap.py",
+    "tests/test_final5_task2_write_guard_parent_toctou.py",
     "tests/test_finalwave22_rate_limit_auth_failclosed.py",
     "tests/test_finalwave22_rate_limit_multiprocess.py",
     "tests/test_finalwave26_deploy_recovery_diagnostics.py",
@@ -376,6 +377,60 @@
         "tests/test_dev04_migration_concurrency.py",
         "tests/test_final5_task2_sqlite_wal_bootstrap.py"
       ],
+      "production_mutated": false,
+      "deployment_authorized": false
+    },
+    "SWARM10_SINGLE_FINISHER_HIGH_CONVERGENCE": {
+      "canonical_parent_sha": "e95c5bda689ee7b3d54a2f335d24a13b5ce5eed8",
+      "canonical_checkpoint_sha": "6af7b0a427e53a9f512b5239464bcfe95becacd3",
+      "sources": {
+        "PASSENGER_SERVING_EVIDENCE": {
+          "pr": 164,
+          "source_sha": "1bd34a7e57792ac6e48418aa9bb20369509ee679",
+          "disposition": "EXACT_BLOB_ADAPT",
+          "exact_blob_paths": [
+            "bridge/runtime_wsgi.py",
+            "tests/test_finalwave26_wsgi_guard_wiring.py"
+          ],
+          "excluded_specialist_paths": []
+        },
+        "ROLLBACK_SOURCE_BINDING": {
+          "pr": 157,
+          "source_sha": "ca89aaa48214409a42d15ac5a83d84778f732d5f",
+          "disposition": "ADAPTED_HIGH_CLOSED",
+          "adapted_paths": [
+            "ops/finalwave37_rollback_state_compat.py",
+            "tests/test_finalwave37_rollback_state_compat.py"
+          ],
+          "canonical_extension_paths": [
+            ".github/workflows/finalwave37-rollback-state.yml"
+          ],
+          "excluded_specialist_paths": []
+        },
+        "SHARED_COMMIT_GUARD": {
+          "pr": 162,
+          "source_sha": "e7d194a08a371df49103a90b487e53c75a91b000",
+          "disposition": "ADAPTED_HIGH_CLOSED",
+          "adapted_paths": [
+            "ops/runtime_write_reliability.py",
+            "tests/test_final5_task2_write_guard_parent_toctou.py"
+          ],
+          "excluded_specialist_paths": [
+            ".github/workflows/final5-task2-write-guard-toctou.yml",
+            "integration/provenance_v1.json"
+          ]
+        }
+      },
+      "candidate_git_blobs": {
+        ".github/workflows/finalwave37-rollback-state.yml": "37236711ba4914f1d1b3fa64a253c9c7dcf9358b",
+        "bridge/runtime_wsgi.py": "7e30cb08a2edbebaa483b178c83b396a6963b2f7",
+        "ops/finalwave37_rollback_state_compat.py": "34c5cfe4efda01b27d97439a2afe7e03b084d1fe",
+        "ops/runtime_write_reliability.py": "38fc7a83539026052f490f9889d17eed22987e73",
+        "tests/test_final5_task2_write_guard_parent_toctou.py": "6a20cc708d97617ae0f1e943bb35cb4dfd3304c4",
+        "tests/test_finalwave26_wsgi_guard_wiring.py": "9e73fbda857db992b24e2abc0b24010a497fe45b",
+        "tests/test_finalwave37_rollback_state_compat.py": "3a12a60d221ccbbf63c8f97c4fe703b9bd32e43c"
+      },
+      "private_values_recorded": false,
       "production_mutated": false,
       "deployment_authorized": false
     }
