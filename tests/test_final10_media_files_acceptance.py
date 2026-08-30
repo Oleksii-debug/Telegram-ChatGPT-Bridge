@@ -13,6 +13,7 @@ from bridge.archive import ArchiveBuilder
 from bridge.backend import TelethonReadBackend, TelethonReadConfig
 from bridge.downloads import DownloadManager
 from bridge.errors import BridgeError
+from bridge.file_access import open_verified_file
 from bridge.storage import CheckpointStore, DownloadItem, FileRecordStore
 from bridge.upload_snapshot import UploadFileIdentity, open_verified_upload_batch
 
@@ -236,6 +237,32 @@ class Final10MediaFilesAcceptanceTests(unittest.TestCase):
             self.assertIsNone(zf.testzip())
             for message in self.messages:
                 self.assertEqual(zf.read(message.file.name), message.payload)
+
+    def test_private_serving_snapshot_survives_registered_inode_mutation(self) -> None:
+        original = b"private-serving-original"
+        source = self.files.root / "private-serving.bin"
+        source.write_bytes(original)
+        record = self.files.add(source, name="private-serving.bin", mime_type="application/octet-stream")
+
+        verified = open_verified_file(self.files, record.file_ref)
+        self.assertIsNotNone(verified)
+        source.write_bytes(b"private-serving-mutated")
+        verified.handle.seek(0)
+        self.assertEqual(verified.handle.read(), original)
+        self.assertEqual(verified.record.file_ref, record.file_ref)
+        verified.close()
+        self.assertTrue(verified.handle.closed)
+
+    def test_private_serving_rejects_tampered_registered_bytes(self) -> None:
+        original = b"private-serving-tamper"
+        source = self.files.root / "private-serving-tamper.bin"
+        source.write_bytes(original)
+        record = self.files.add(source, name="private-serving-tamper.bin")
+
+        replacement = b"X" * len(original)
+        self.assertNotEqual(hashlib.sha256(replacement).hexdigest(), record.sha256)
+        source.write_bytes(replacement)
+        self.assertIsNone(open_verified_file(self.files, record.file_ref))
 
     def test_send_files_snapshot_is_immutable_pathless_and_identity_bound(self) -> None:
         original = b"approved-upload-bytes"
