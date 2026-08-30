@@ -12,7 +12,8 @@ from pathlib import Path
 from unittest import mock
 
 from bridge.action_request_guard import ActionRequestGuard
-from ops import passenger_evidence_hook, private_evidence
+from ops import passenger_bound_evidence, passenger_evidence_hook, private_evidence
+from ops.deployed_release_identity import PREPARED_RELEASE_NAME
 
 
 class _SentinelApplication:
@@ -102,6 +103,25 @@ class Finalwave26WsgiGuardWiringTests(unittest.TestCase):
         os.chmod(marker, 0o600)
         return control, marker
 
+    @classmethod
+    def _versioned_release(cls, base: Path) -> tuple[Path, Path, str]:
+        from bridge import runtime_wsgi
+
+        source_root = Path(runtime_wsgi.__file__).resolve().parents[1]
+        root = base / cls.CANDIDATE_SHA
+        bridge_dir = root / "bridge"
+        bridge_dir.mkdir(parents=True)
+        app_file = bridge_dir / "app.py"
+        runtime_file = bridge_dir / "runtime_wsgi.py"
+        app_file.write_text("# synthetic versioned app identity\n", encoding="utf-8")
+        runtime_file.write_text("# synthetic runtime path anchor\n", encoding="utf-8")
+        wsgi_bytes = (source_root / "passenger_wsgi.py").read_bytes()
+        (root / "passenger_wsgi.py").write_bytes(wsgi_bytes)
+        (root / PREPARED_RELEASE_NAME).write_text(
+            json.dumps({"sha": cls.CANDIDATE_SHA}, sort_keys=True), encoding="utf-8"
+        )
+        return root, runtime_file, hashlib.sha256(wsgi_bytes).hexdigest()
+
     def test_lazy_runtime_builder_is_wrapped_exactly_once(self):
         from bridge import runtime_wsgi
 
@@ -150,9 +170,6 @@ class Finalwave26WsgiGuardWiringTests(unittest.TestCase):
     def test_actual_runtime_wsgi_health_dispatch_materializes_strong_passenger_evidence(self):
         from bridge import runtime_wsgi
 
-        repo_root = Path(runtime_wsgi.__file__).resolve().parents[1]
-        wsgi_sha = hashlib.sha256((repo_root / "passenger_wsgi.py").read_bytes()).hexdigest()
-        candidate = self._candidate_evidence(wsgi_sha)
         captured = {}
 
         def start_response(status, headers):
@@ -160,11 +177,16 @@ class Finalwave26WsgiGuardWiringTests(unittest.TestCase):
             captured["headers"] = dict(headers)
 
         with tempfile.TemporaryDirectory() as td:
-            home = Path(td)
+            base = Path(td)
+            home = base / "home"
+            home.mkdir()
+            _root, synthetic_runtime_file, wsgi_sha = self._versioned_release(base)
+            candidate = self._candidate_evidence(wsgi_sha)
             control, _ = self._arm_real_hook(home, wsgi_sha)
             runtime_wsgi._default_application = _SentinelApplication()
-            with mock.patch.object(passenger_evidence_hook.Path, "home", return_value=home), \
-                 mock.patch.object(passenger_evidence_hook, "collect_runtime_evidence", return_value=candidate):
+            with mock.patch.object(runtime_wsgi, "__file__", str(synthetic_runtime_file)), \
+                 mock.patch.object(passenger_evidence_hook.Path, "home", return_value=home), \
+                 mock.patch.object(passenger_bound_evidence, "collect_runtime_evidence", return_value=candidate):
                 body = b"".join(runtime_wsgi.application(self._serving_environ(), start_response))
 
             self.assertEqual(b"", body)
@@ -189,9 +211,6 @@ class Finalwave26WsgiGuardWiringTests(unittest.TestCase):
     def test_wrong_challenge_http_or_wrong_path_do_not_materialize_strong_evidence(self):
         from bridge import runtime_wsgi
 
-        repo_root = Path(runtime_wsgi.__file__).resolve().parents[1]
-        wsgi_sha = hashlib.sha256((repo_root / "passenger_wsgi.py").read_bytes()).hexdigest()
-        candidate = self._candidate_evidence(wsgi_sha)
         cases = (
             self._serving_environ(challenge="2" * 64),
             self._serving_environ(scheme="http"),
@@ -200,6 +219,8 @@ class Finalwave26WsgiGuardWiringTests(unittest.TestCase):
         for environ in cases:
             with self.subTest(path=environ["PATH_INFO"], scheme=environ["wsgi.url_scheme"]), tempfile.TemporaryDirectory() as td:
                 home = Path(td)
+                source_root = Path(runtime_wsgi.__file__).resolve().parents[1]
+                wsgi_sha = hashlib.sha256((source_root / "passenger_wsgi.py").read_bytes()).hexdigest()
                 control, _ = self._arm_real_hook(home, wsgi_sha)
                 runtime_wsgi._default_application = _SentinelApplication()
                 captured = {}
@@ -208,8 +229,7 @@ class Finalwave26WsgiGuardWiringTests(unittest.TestCase):
                     captured["status"] = status
                     captured["headers"] = dict(headers)
 
-                with mock.patch.object(passenger_evidence_hook.Path, "home", return_value=home), \
-                     mock.patch.object(passenger_evidence_hook, "collect_runtime_evidence", return_value=candidate):
+                with mock.patch.object(passenger_evidence_hook.Path, "home", return_value=home):
                     body = b"".join(runtime_wsgi.application(environ, start_response))
                 self.assertEqual(b"", body)
                 self.assertEqual("204 No Content", captured["status"])
@@ -227,7 +247,7 @@ class Finalwave26WsgiGuardWiringTests(unittest.TestCase):
 
         runtime_wsgi._default_application = _SentinelApplication()
         with mock.patch(
-            "ops.passenger_evidence_hook.collect_if_armed_from_bridge_app",
+            "ops.passenger_bound_evidence.collect_bound_if_armed_from_bridge_app",
             side_effect=RuntimeError("synthetic private evidence failure"),
         ):
             body = b"".join(runtime_wsgi.application(self._serving_environ(), start_response))
@@ -236,7 +256,7 @@ class Finalwave26WsgiGuardWiringTests(unittest.TestCase):
 
         runtime_wsgi._default_application = _SentinelApplication()
         with mock.patch(
-            "ops.passenger_evidence_hook.collect_if_armed_from_bridge_app",
+            "ops.passenger_bound_evidence.collect_bound_if_armed_from_bridge_app",
             side_effect=KeyboardInterrupt(),
         ):
             with self.assertRaises(KeyboardInterrupt):
@@ -246,7 +266,7 @@ class Finalwave26WsgiGuardWiringTests(unittest.TestCase):
         from bridge import runtime_wsgi
 
         runtime_wsgi._default_application = _RaisingApplication()
-        with mock.patch("ops.passenger_evidence_hook.collect_if_armed_from_bridge_app") as observe:
+        with mock.patch("ops.passenger_bound_evidence.collect_bound_if_armed_from_bridge_app") as observe:
             with self.assertRaises(RuntimeError):
                 runtime_wsgi.application(self._serving_environ(), lambda *_args: None)
         observe.assert_not_called()

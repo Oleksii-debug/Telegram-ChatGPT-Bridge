@@ -16,11 +16,11 @@ _default_application: Any | None = None
 def _observe_passenger_serving_request(environ: dict[str, Any]) -> None:
     """Fail-isolated STRONG Passenger evidence observation for real health serving.
 
-    The actual challenge validation and private evidence writes remain owned by
-    ``ops.passenger_evidence_hook``.  This runtime boundary deliberately does not
-    inspect, copy or log the raw challenge.  Ordinary evidence failures can never
-    break the public health response; process-control BaseException subclasses
-    still propagate.
+    The challenged request still uses the existing Passenger evidence protocol,
+    but finalization is now gated by the descriptor-bound actual deployed release
+    identity before runtime collection or any report/binding/receipt write.
+    Ordinary evidence failures can never break the public health response;
+    process-control BaseException subclasses still propagate.
     """
 
     if str(environ.get("REQUEST_METHOD") or "GET").upper() != "GET":
@@ -30,9 +30,9 @@ def _observe_passenger_serving_request(environ: dict[str, Any]) -> None:
     try:
         from pathlib import Path
 
-        from ops.passenger_evidence_hook import collect_if_armed_from_bridge_app
+        from ops.passenger_bound_evidence import collect_bound_if_armed_from_bridge_app
 
-        collect_if_armed_from_bridge_app(
+        collect_bound_if_armed_from_bridge_app(
             Path(__file__).with_name("app.py"),
             environ=environ,
         )
