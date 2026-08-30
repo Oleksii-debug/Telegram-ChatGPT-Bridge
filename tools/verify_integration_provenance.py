@@ -73,9 +73,8 @@ def _validate_predeploy_overlay(payload: dict[str, Any]) -> tuple[set[str], str]
         raise ProvenanceError("canonical predeploy overlay SHA mismatch")
     if parent != "7714f923e96e7b8d04cd35aa5382a93a128d3f25":
         raise ProvenanceError("canonical predeploy overlay base mismatch")
-    # PR #170 contains multiple specialist commits.  The frozen #169 SHA is the
+    # PR #170 contains multiple specialist commits. The frozen #169 SHA is the
     # reviewed PR base/ancestor, not necessarily the direct parent of the head.
-    # Provenance therefore requires ancestry plus exact accepted-head blobs.
     _assert_ancestor(str(parent), str(sha))
     _assert_ancestor(str(sha), legacy._git("rev-parse", "HEAD"))
     paths = set(_safe_paths(overlay.get("exact_paths"), "canonical predeploy overlay"))
@@ -195,10 +194,12 @@ def _legacy_manifest_for_canonical(canonical: dict[str, Any], candidate_paths: s
         if entry["count"] == 0:
             entry["classification"] = "NO_DIRECT_OVERLAP"
 
-    runtime_blob = _blob(str(canonical["predeploy_overlay"]["sha"]), "bridge/runtime_wsgi.py")
-    manifest["swarm_integrations"]["SWARM10_SINGLE_FINISHER_HIGH_CONVERGENCE"]["candidate_git_blobs"][
-        "bridge/runtime_wsgi.py"
-    ] = runtime_blob
+    overlay_sha = str(canonical["predeploy_overlay"]["sha"])
+    convergence_blobs = manifest["swarm_integrations"]["SWARM10_SINGLE_FINISHER_HIGH_CONVERGENCE"]["candidate_git_blobs"]
+    convergence_blobs["bridge/runtime_wsgi.py"] = _blob(overlay_sha, "bridge/runtime_wsgi.py")
+    convergence_blobs["tests/test_finalwave26_wsgi_guard_wiring.py"] = _blob(
+        overlay_sha, "tests/test_finalwave26_wsgi_guard_wiring.py"
+    )
 
     changed = {
         line.strip()
@@ -218,7 +219,11 @@ def verify_repository() -> dict[str, Any]:
     candidate_paths = _validate_canonical_launch(canonical)
     patched_manifest = _legacy_manifest_for_canonical(canonical, candidate_paths)
     patched_blobs = dict(legacy.SINGLE_FINISHER_BLOBS)
-    patched_blobs["bridge/runtime_wsgi.py"] = _blob(str(canonical["predeploy_overlay"]["sha"]), "bridge/runtime_wsgi.py")
+    overlay_sha = str(canonical["predeploy_overlay"]["sha"])
+    patched_blobs["bridge/runtime_wsgi.py"] = _blob(overlay_sha, "bridge/runtime_wsgi.py")
+    patched_blobs["tests/test_finalwave26_wsgi_guard_wiring.py"] = _blob(
+        overlay_sha, "tests/test_finalwave26_wsgi_guard_wiring.py"
+    )
 
     original_load = legacy._load
     original_blobs = legacy.SINGLE_FINISHER_BLOBS
