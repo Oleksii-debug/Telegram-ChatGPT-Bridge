@@ -66,6 +66,7 @@
   ],
   "provenance_paths": [
     "integration/canonical_launch_v1.json",
+    "tests/test_dev01_dev04_peer_provenance.py",
     "tests/test_dev_a_provenance.py",
     "tests/test_final10_media_residuals.py",
     "tools/verify_integration_provenance.py",

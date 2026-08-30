@@ -126,6 +126,7 @@ def _validate_canonical_launch(payload: dict[str, Any]) -> set[str]:
     provenance_paths = set(_safe_paths(payload.get("provenance_paths"), "canonical provenance"))
     expected_provenance = {
         "integration/canonical_launch_v1.json",
+        "tests/test_dev01_dev04_peer_provenance.py",
         "tests/test_dev_a_provenance.py",
         "tests/test_final10_media_residuals.py",
         "tools/verify_integration_provenance.py",
