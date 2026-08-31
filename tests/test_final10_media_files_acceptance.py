@@ -195,6 +195,29 @@ class Final10MediaFilesAcceptanceTests(unittest.TestCase):
                 self.assertEqual(first.height, height)
                 self.assertEqual(first.duration_seconds, duration)
 
+    def test_non_downloadable_media_does_not_mint_file_ref(self) -> None:
+        message = SimpleNamespace(
+            id=77,
+            chat_id=self.CHAT_ID,
+            peer_id=SimpleNamespace(chat_id=self.CHAT_ID),
+            message="webpage fixture",
+            date=datetime(2026, 8, 30, 10, 17, tzinfo=timezone.utc),
+            sender_id=7,
+            out=False,
+            reply_to=None,
+            media=object(),
+            file=None,
+            voice=False,
+            video_note=False,
+            photo=None,
+            video=False,
+            audio=False,
+            sticker=None,
+            document=None,
+        )
+        self.assertEqual(self.backend._media_records(message), ())
+        self.assertEqual(self.client.download_calls, [])
+
     def test_bulk_dedupe_restart_resume_hash_size_and_zip(self) -> None:
         items = [self._item(message) for message in self.messages]
         self.client.fail_once_ids.add(3)
