@@ -57,16 +57,38 @@
       "sha": "4f2c162320c2cbd8e1b0fc2b91a62d2a50806653",
       "merge_commit": "1cd732480e634e2cd6b45be98977c6cb2b2833b9",
       "paths": [
-        "bridge/__init__.py", "bridge/app.py", "bridge/archive.py", "bridge/audit.py",
-        "bridge/backend.py", "bridge/downloads.py", "bridge/errors.py", "bridge/models.py",
-        "bridge/routes.py", "bridge/security.py", "bridge/storage.py", "bridge/validation.py",
-        "docs/APPLICATION_READ_MEDIA.md", "docs/DEV3_ROUND2_HARDENING.md",
-        "tests/test_archive_security.py", "tests/test_backend_read.py", "tests/test_dev3_round2.py",
-        "tests/test_read_app.py", "tests/test_storage_downloads.py", "tests/test_validation_security.py"
+        "bridge/__init__.py",
+        "bridge/app.py",
+        "bridge/archive.py",
+        "bridge/audit.py",
+        "bridge/backend.py",
+        "bridge/downloads.py",
+        "bridge/errors.py",
+        "bridge/models.py",
+        "bridge/routes.py",
+        "bridge/security.py",
+        "bridge/storage.py",
+        "bridge/validation.py",
+        "docs/APPLICATION_READ_MEDIA.md",
+        "docs/DEV3_ROUND2_HARDENING.md",
+        "tests/test_archive_security.py",
+        "tests/test_backend_read.py",
+        "tests/test_dev3_round2.py",
+        "tests/test_read_app.py",
+        "tests/test_storage_downloads.py",
+        "tests/test_validation_security.py"
       ],
       "dev_a_overrides": [
-        "bridge/__init__.py", "bridge/app.py", "bridge/archive.py", "bridge/audit.py", "bridge/backend.py",
-        "bridge/downloads.py", "bridge/errors.py", "bridge/models.py", "bridge/storage.py", "bridge/validation.py"
+        "bridge/__init__.py",
+        "bridge/app.py",
+        "bridge/archive.py",
+        "bridge/audit.py",
+        "bridge/backend.py",
+        "bridge/downloads.py",
+        "bridge/errors.py",
+        "bridge/models.py",
+        "bridge/storage.py",
+        "bridge/validation.py"
       ]
     },
     "DEV4": {
@@ -74,14 +96,25 @@
       "sha": "fc409c7e0bd782148df5cb1a00f9f624b7008548",
       "merge_commit": "10bcc583beaf6aa6f06b15958bf92351cb7f048b",
       "paths": [
-        "docs/DEV4_WRITE_TELEGRAM_OPENAPI.md", "ops/file_send_policy.py", "ops/openapi_registry.py",
-        "ops/telegram_session_lock.py", "ops/telegram_write_adapter.py", "ops/write_endpoint_policy.py",
-        "ops/write_safety.py", "tests/test_dev4_endpoint_policy.py", "tests/test_dev4_file_send_policy.py",
-        "tests/test_dev4_session_lock.py", "tests/test_dev4_write_core.py", "tools/build_action_openapi.py"
+        "docs/DEV4_WRITE_TELEGRAM_OPENAPI.md",
+        "ops/file_send_policy.py",
+        "ops/openapi_registry.py",
+        "ops/telegram_session_lock.py",
+        "ops/telegram_write_adapter.py",
+        "ops/write_endpoint_policy.py",
+        "ops/write_safety.py",
+        "tests/test_dev4_endpoint_policy.py",
+        "tests/test_dev4_file_send_policy.py",
+        "tests/test_dev4_session_lock.py",
+        "tests/test_dev4_write_core.py",
+        "tools/build_action_openapi.py"
       ],
       "dev_a_overrides": [
-        "ops/telegram_session_lock.py", "ops/write_endpoint_policy.py", "ops/write_safety.py",
-        "tests/test_dev4_endpoint_policy.py", "tools/build_action_openapi.py"
+        "ops/telegram_session_lock.py",
+        "ops/write_endpoint_policy.py",
+        "ops/write_safety.py",
+        "tests/test_dev4_endpoint_policy.py",
+        "tools/build_action_openapi.py"
       ]
     },
     "DEV2": {
@@ -89,16 +122,26 @@
       "sha": "19910ec89c85aec6d9ddd31abca0f4cab4dac6cb",
       "merge_commit": "9b7d10e8b3acda804d10d92850fc54b06270aef7",
       "paths": [
-        "docs/DEV2_SERVER_RUNTIME_INTEGRATION.md", "docs/HOSTIQ_EVIDENCE_DELTA_CHECKLIST.md",
-        "docs/REFERENCE_SNAPSHOT_V04_DEV2.md", "ops/baseline_reconcile.py", "ops/hostiq_lifecycle.py",
-        "ops/private_evidence.py", "ops/runtime_evidence.py", "ops/snapshot_candidate.py",
+        "docs/DEV2_SERVER_RUNTIME_INTEGRATION.md",
+        "docs/HOSTIQ_EVIDENCE_DELTA_CHECKLIST.md",
+        "docs/REFERENCE_SNAPSHOT_V04_DEV2.md",
+        "ops/baseline_reconcile.py",
+        "ops/hostiq_lifecycle.py",
+        "ops/private_evidence.py",
+        "ops/runtime_evidence.py",
+        "ops/snapshot_candidate.py",
         "reference_candidate/hostiq_v0_4/CANDIDATE_PROVENANCE.json",
-        "reference_candidate/hostiq_v0_4/README_REFERENCE_ONLY.md", "tests/test_dev2_baseline_runtime.py",
-        "tests/test_dev2_compile.py", "tests/test_dev2_lifecycle.py", "tests/test_runtime_evidence.py",
+        "reference_candidate/hostiq_v0_4/README_REFERENCE_ONLY.md",
+        "tests/test_dev2_baseline_runtime.py",
+        "tests/test_dev2_compile.py",
+        "tests/test_dev2_lifecycle.py",
+        "tests/test_runtime_evidence.py",
         "tools/collect_runtime_evidence.py"
       ],
       "semantic_overlap_reviewed": [
-        "ops/baseline_reconcile.py", "ops/runtime_evidence.py", "tests/test_runtime_evidence.py"
+        "ops/baseline_reconcile.py",
+        "ops/runtime_evidence.py",
+        "tests/test_runtime_evidence.py"
       ],
       "dev_a_overrides": []
     },
@@ -107,28 +150,67 @@
       "sha": "82643ade0f1b5157d311e06a700223a1501ae062",
       "merge_commit": "c7dbcdbb19968b80575c0a87eae8c3b12800fd86",
       "ported_paths": [
-        "docs/DEV5_QA_SECURITY_MATRIX.md", "docs/DEV5_ROUND2_QA.md", "ops/dev5_round2_oracles.py",
-        "tests/test_dev5_round2.py", "tests/test_dev5_round2_fuzz.py"
+        "docs/DEV5_QA_SECURITY_MATRIX.md",
+        "docs/DEV5_ROUND2_QA.md",
+        "ops/dev5_round2_oracles.py",
+        "tests/test_dev5_round2.py",
+        "tests/test_dev5_round2_fuzz.py"
       ],
-      "dev_a_overrides": ["tests/test_dev5_round2_fuzz.py"],
+      "dev_a_overrides": [
+        "tests/test_dev5_round2_fuzz.py"
+      ],
       "rejected_overlaps_preserve_base": [
-        "docs/ACCEPTANCE_CONTRACTS.md", "docs/ACCEPTANCE_HARNESS.md", "ops/acceptance_contracts.py",
-        "ops/acceptance_harness.py", "ops/evidence_privacy.py", "tests/test_acceptance_contracts.py",
+        "docs/ACCEPTANCE_CONTRACTS.md",
+        "docs/ACCEPTANCE_HARNESS.md",
+        "ops/acceptance_contracts.py",
+        "ops/acceptance_harness.py",
+        "ops/evidence_privacy.py",
+        "tests/test_acceptance_contracts.py",
         "tests/test_acceptance_harness.py"
       ]
     }
   },
   "overlap_matrix": {
-    "PR2_PR3": {"count": 7, "classification": "SEMANTIC_PRESERVE_DEV1"},
-    "PR2_PR4": {"count": 0, "classification": "NO_DIRECT_OVERLAP"},
-    "PR2_PR5": {"count": 3, "classification": "SEMANTIC_REVIEW_DEV2_SELECTED"},
-    "PR2_PR7": {"count": 0, "classification": "NO_DIRECT_OVERLAP"},
-    "PR3_PR4": {"count": 0, "classification": "NO_DIRECT_OVERLAP"},
-    "PR3_PR5": {"count": 0, "classification": "NO_DIRECT_OVERLAP"},
-    "PR3_PR7": {"count": 0, "classification": "NO_DIRECT_OVERLAP"},
-    "PR4_PR5": {"count": 0, "classification": "NO_DIRECT_OVERLAP"},
-    "PR4_PR7": {"count": 0, "classification": "NO_DIRECT_OVERLAP"},
-    "PR5_PR7": {"count": 0, "classification": "NO_DIRECT_OVERLAP"}
+    "PR2_PR3": {
+      "count": 7,
+      "classification": "SEMANTIC_PRESERVE_DEV1"
+    },
+    "PR2_PR4": {
+      "count": 0,
+      "classification": "NO_DIRECT_OVERLAP"
+    },
+    "PR2_PR5": {
+      "count": 3,
+      "classification": "SEMANTIC_REVIEW_DEV2_SELECTED"
+    },
+    "PR2_PR7": {
+      "count": 0,
+      "classification": "NO_DIRECT_OVERLAP"
+    },
+    "PR3_PR4": {
+      "count": 0,
+      "classification": "NO_DIRECT_OVERLAP"
+    },
+    "PR3_PR5": {
+      "count": 0,
+      "classification": "NO_DIRECT_OVERLAP"
+    },
+    "PR3_PR7": {
+      "count": 0,
+      "classification": "NO_DIRECT_OVERLAP"
+    },
+    "PR4_PR5": {
+      "count": 0,
+      "classification": "NO_DIRECT_OVERLAP"
+    },
+    "PR4_PR7": {
+      "count": 0,
+      "classification": "NO_DIRECT_OVERLAP"
+    },
+    "PR5_PR7": {
+      "count": 0,
+      "classification": "NO_DIRECT_OVERLAP"
+    }
   },
   "assembly_commits": {
     "application_integration": "d1a28da09d7c6d7d5a19a771ee6a2a342aad1324",
@@ -157,6 +239,7 @@
     "bridge/file_access.py",
     "bridge/filenames.py",
     "bridge/integrated_app.py",
+    "bridge/outreach.py",
     "bridge/phase_aware_write_app.py",
     "bridge/preparse_rate_guard.py",
     "bridge/runtime_composition.py",
@@ -170,6 +253,7 @@
     "docs/FINALWAVE26_OPENAPI_RUNTIME_PARITY.md",
     "docs/FINALWAVE37_ROLLBACK_STATE_COMPAT.md",
     "docs/FINALWAVE42_PUBLIC_ERROR_PRIVACY.md",
+    "docs/SCHEDULED_OUTREACH_V01.md",
     "integration/provenance_v1.json",
     "ops/candidate_contracts.py",
     "ops/deploy_release.py",
@@ -207,8 +291,10 @@
     "tests/test_finalwave46_request_parser_fuzz.py",
     "tests/test_finalwave46_request_parser_resilience.py",
     "tests/test_history_secret_adjudication.py",
+    "tests/test_outreach_scheduler.py",
     "tests/test_swarm10_global_search_integration.py",
     "tools/history_secret_adjudication.py",
+    "tools/outreach_cli.py",
     "tools/secret_scan.py",
     "tools/verify_integration_provenance.py"
   ],
@@ -229,8 +315,13 @@
       "canonical_adaptations": {
         "bridge/backend.py": "6963e8c046efbf42e18ebfd31e9fbd54343bfb8d"
       },
-      "excluded_specialist_paths": [".github/workflows/dev03-read.yml"],
-      "auditor_findings": ["A01-08", "A01-09"],
+      "excluded_specialist_paths": [
+        ".github/workflows/dev03-read.yml"
+      ],
+      "auditor_findings": [
+        "A01-08",
+        "A01-09"
+      ],
       "source_ci_run_id": 32642004555,
       "source_ci_job_id": 97200427195,
       "production_mutated": false,
@@ -260,7 +351,9 @@
         "tests/test_dev04_migration_concurrency.py": "6963e8c046efbf42e18ebfd31e9fbd54343bfb8d",
         "tests/test_dev04_private_serving.py": "6963e8c046efbf42e18ebfd31e9fbd54343bfb8d"
       },
-      "excluded_specialist_paths": [".github/workflows/dev04-media-storage-qa.yml"],
+      "excluded_specialist_paths": [
+        ".github/workflows/dev04-media-storage-qa.yml"
+      ],
       "auditor_finding": "A01-06",
       "source_ci_run_id": 32641698071,
       "source_ci_job_id": 97199658228,
