@@ -83,6 +83,27 @@
       "tests/test_final10_media_files_acceptance.py"
     ]
   },
+  "message_edit_overlay": {
+    "sha": "255effebcc50aedb451ff16669f49f232be17e6b",
+    "parent_sha": "4a351ee7d4f77ad34fadbd57aa9ed6dbc645356d",
+    "exact_paths": [
+      "bridge/integrated_app.py",
+      "ops/dev06_api_contracts.py",
+      "ops/dev06_runtime_conformance.py",
+      "ops/openapi_registry.py",
+      "ops/phase_aware_write_adapter.py",
+      "ops/structured_safe_write.py",
+      "ops/telegram_write_adapter.py",
+      "ops/write_endpoint_policy.py",
+      "ops/write_safety.py",
+      "tests/test_dev06_api_contracts.py",
+      "tests/test_dev06_runtime_conformance.py",
+      "tests/test_devc_release_e2e.py",
+      "tests/test_finalwave26_openapi_runtime_parity.py",
+      "tests/test_finalwave38_runtime_composition.py",
+      "tests/test_finalwave46_request_parser_fuzz.py"
+    ]
+  },
   "runtime_composition": {
     "path": "bridge/runtime_wsgi.py",
     "preserves_parent_passenger_observation": true,
@@ -101,8 +122,10 @@
     "integration/canonical_launch_v1.json",
     "tests/test_dev01_dev03_peer_provenance.py",
     "tests/test_dev01_dev04_peer_provenance.py",
+    "tests/test_dev01_dev06_peer_provenance.py",
     "tests/test_dev_a_provenance.py",
     "tests/test_final10_media_residuals.py",
+    "tests/test_finalwave37_rollback_state_compat.py",
     "tools/verify_integration_provenance.py",
     "tools/verify_integration_provenance_legacy.py"
   ],

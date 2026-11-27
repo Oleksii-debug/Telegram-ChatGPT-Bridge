@@ -381,6 +381,10 @@ class ExactPredecessorCompatibilityTests(unittest.TestCase):
         )
         self.assertEqual(
             _git_blob(WRITE_SCHEMA_BOOTSTRAP_ADAPT_SHA, "ops/write_safety.py"),
+            _git_blob("4a351ee7d4f77ad34fadbd57aa9ed6dbc645356d", "ops/write_safety.py"),
+        )
+        self.assertEqual(
+            _git_blob("255effebcc50aedb451ff16669f49f232be17e6b", "ops/write_safety.py"),
             _git_blob("HEAD", "ops/write_safety.py"),
         )
         for path in ("bridge/runtime.py", "ops/telegram_session_lock.py"):

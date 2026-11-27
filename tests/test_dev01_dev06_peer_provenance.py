@@ -10,6 +10,14 @@ from tools.verify_integration_provenance import RELEASE_OVERRIDE, ROOT, _assert_
 SOURCE_SHA = "bebf365af414e10f0f0a58f44a37c86134e44c5d"
 MERGE_SHA = "ed4820d2297a65870abb6c2cc2f3a5e63a569302"
 FIRST_PARENT = "00684e834a523f55ea3b61c1a12cb9dc54cfd947"
+EDIT_PARENT = "4a351ee7d4f77ad34fadbd57aa9ed6dbc645356d"
+EDIT_SUCCESSOR = "255effebcc50aedb451ff16669f49f232be17e6b"
+EDIT_CONTRACT_PATHS = {
+    "ops/dev06_api_contracts.py",
+    "ops/dev06_runtime_conformance.py",
+    "tests/test_dev06_api_contracts.py",
+    "tests/test_dev06_runtime_conformance.py",
+}
 EXACT_PATHS = {
     "docs/DEV06_API_CONTRACTS.md",
     "ops/dev06_api_contracts.py",
@@ -52,7 +60,11 @@ class Dev01Dev06PeerProvenanceTests(unittest.TestCase):
         _assert_ancestor(MERGE_SHA, "HEAD")
         for path in EXACT_PATHS:
             with self.subTest(path=path):
-                self.assertEqual(_blob("HEAD", path), _blob(SOURCE_SHA, path))
+                if path in EDIT_CONTRACT_PATHS:
+                    self.assertEqual(_blob(EDIT_PARENT, path), _blob(SOURCE_SHA, path))
+                    self.assertEqual(_blob("HEAD", path), _blob(EDIT_SUCCESSOR, path))
+                else:
+                    self.assertEqual(_blob("HEAD", path), _blob(SOURCE_SHA, path))
         for path in EXCLUDED_PATHS:
             with self.subTest(path=path):
                 self.assertTrue(_path_exists(SOURCE_SHA, path))

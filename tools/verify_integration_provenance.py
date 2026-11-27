@@ -123,25 +123,29 @@ def _validate_release_artifact_overlay(payload: dict[str, Any]) -> tuple[set[str
     return paths, str(sha)
 
 
-def _validate_media_integrity_overlay(payload: dict[str, Any]) -> set[str]:
-    overlay = payload.get("media_integrity_overlay")
+def _validate_successor(
+    payload: dict[str, Any],
+    key: str,
+    sha: str,
+    parent: str,
+    expected_paths: set[str],
+) -> set[str]:
+    overlay = payload.get(key)
     if not isinstance(overlay, dict):
-        raise ProvenanceError("media integrity overlay missing")
-    sha = overlay.get("sha")
-    parent = overlay.get("parent_sha")
-    if sha != "95ce65992c49dbfcdc04ae42630368154724c47d" or parent != "d536a1f390c8326b321e0f9ff870a28536f13474":
-        raise ProvenanceError("media integrity overlay identity mismatch")
+        raise ProvenanceError(f"{key} missing")
+    if overlay.get("sha") != sha or overlay.get("parent_sha") != parent:
+        raise ProvenanceError(f"{key} identity mismatch")
     if _parents(sha) != (parent,):
-        raise ProvenanceError("media integrity overlay parent mismatch")
+        raise ProvenanceError(f"{key} parent mismatch")
     _assert_ancestor(sha, legacy._git("rev-parse", "HEAD"))
-    paths = set(_safe_paths(overlay.get("exact_paths"), "media integrity overlay"))
-    if paths != {"bridge/backend.py", "bridge/downloads.py", "tests/test_final10_media_files_acceptance.py"}:
-        raise ProvenanceError("media integrity overlay path set mismatch")
+    paths = set(_safe_paths(overlay.get("exact_paths"), key))
+    if paths != expected_paths:
+        raise ProvenanceError(f"{key} path set mismatch")
     if set(legacy._git("diff", "--name-only", parent, sha).splitlines()) != paths:
-        raise ProvenanceError("media integrity overlay commit has different paths")
+        raise ProvenanceError(f"{key} commit has different paths")
     for path in paths:
         if _blob("HEAD", path) != _blob(sha, path):
-            raise ProvenanceError(f"media integrity overlay blob mismatch: {path}")
+            raise ProvenanceError(f"{key} blob mismatch: {path}")
     return paths
 
 
@@ -157,7 +161,32 @@ def _validate_canonical_launch(payload: dict[str, Any]) -> set[str]:
     _assert_ancestor(str(assembly), legacy._git("rev-parse", "HEAD"))
 
     release_paths, _release_sha = _validate_release_artifact_overlay(payload)
-    media_paths = _validate_media_integrity_overlay(payload)
+    media_paths = _validate_successor(
+        payload, "media_integrity_overlay",
+        "95ce65992c49dbfcdc04ae42630368154724c47d", "d536a1f390c8326b321e0f9ff870a28536f13474",
+        {"bridge/backend.py", "bridge/downloads.py", "tests/test_final10_media_files_acceptance.py"},
+    )
+    edit_paths = _validate_successor(
+        payload, "message_edit_overlay",
+        "255effebcc50aedb451ff16669f49f232be17e6b", "4a351ee7d4f77ad34fadbd57aa9ed6dbc645356d",
+        {
+            "bridge/integrated_app.py",
+            "ops/dev06_api_contracts.py",
+            "ops/dev06_runtime_conformance.py",
+            "ops/openapi_registry.py",
+            "ops/phase_aware_write_adapter.py",
+            "ops/structured_safe_write.py",
+            "ops/telegram_write_adapter.py",
+            "ops/write_endpoint_policy.py",
+            "ops/write_safety.py",
+            "tests/test_dev06_api_contracts.py",
+            "tests/test_dev06_runtime_conformance.py",
+            "tests/test_devc_release_e2e.py",
+            "tests/test_finalwave26_openapi_runtime_parity.py",
+            "tests/test_finalwave38_runtime_composition.py",
+            "tests/test_finalwave46_request_parser_fuzz.py",
+        },
+    )
 
     expected_sources = {
         "W09_ACCEPTANCE_ACTION": (166, "9d8b98057b1252736d1cb2fbdf5a93fc71ff4aa3"),
@@ -183,6 +212,7 @@ def _validate_canonical_launch(payload: dict[str, Any]) -> set[str]:
         candidate_paths.update(paths)
     candidate_paths.update(release_paths)
     candidate_paths.update(media_paths)
+    candidate_paths.update(edit_paths)
 
     overlay_paths, overlay_sha = _validate_predeploy_overlay(payload)
     candidate_paths.update(overlay_paths)
@@ -217,8 +247,10 @@ def _validate_canonical_launch(payload: dict[str, Any]) -> set[str]:
         "integration/canonical_launch_v1.json",
         "tests/test_dev01_dev03_peer_provenance.py",
         "tests/test_dev01_dev04_peer_provenance.py",
+        "tests/test_dev01_dev06_peer_provenance.py",
         "tests/test_dev_a_provenance.py",
         "tests/test_final10_media_residuals.py",
+        "tests/test_finalwave37_rollback_state_compat.py",
         "tools/verify_integration_provenance.py",
         "tools/verify_integration_provenance_legacy.py",
     }
@@ -244,6 +276,11 @@ def _legacy_manifest_for_canonical(canonical: dict[str, Any], candidate_paths: s
     manifest["predecessors"]["DEV5"]["rejected_overlaps_preserve_base"] = [
         path for path in rejected if path not in overrides
     ]
+    # These two DEV4 files were exact until the pinned edit successor changed them.
+    dev4 = manifest["predecessors"]["DEV4"]
+    dev4["dev_a_overrides"] = sorted(
+        set(dev4["dev_a_overrides"]) | {"ops/openapi_registry.py", "ops/telegram_write_adapter.py"}
+    )
 
     lanes = legacy._lane_changed_paths(manifest)
     for key, entry in manifest["overlap_matrix"].items():
