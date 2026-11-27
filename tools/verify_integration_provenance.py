@@ -123,6 +123,28 @@ def _validate_release_artifact_overlay(payload: dict[str, Any]) -> tuple[set[str
     return paths, str(sha)
 
 
+def _validate_media_integrity_overlay(payload: dict[str, Any]) -> set[str]:
+    overlay = payload.get("media_integrity_overlay")
+    if not isinstance(overlay, dict):
+        raise ProvenanceError("media integrity overlay missing")
+    sha = overlay.get("sha")
+    parent = overlay.get("parent_sha")
+    if sha != "95ce65992c49dbfcdc04ae42630368154724c47d" or parent != "d536a1f390c8326b321e0f9ff870a28536f13474":
+        raise ProvenanceError("media integrity overlay identity mismatch")
+    if _parents(sha) != (parent,):
+        raise ProvenanceError("media integrity overlay parent mismatch")
+    _assert_ancestor(sha, legacy._git("rev-parse", "HEAD"))
+    paths = set(_safe_paths(overlay.get("exact_paths"), "media integrity overlay"))
+    if paths != {"bridge/backend.py", "bridge/downloads.py", "tests/test_final10_media_files_acceptance.py"}:
+        raise ProvenanceError("media integrity overlay path set mismatch")
+    if set(legacy._git("diff", "--name-only", parent, sha).splitlines()) != paths:
+        raise ProvenanceError("media integrity overlay commit has different paths")
+    for path in paths:
+        if _blob("HEAD", path) != _blob(sha, path):
+            raise ProvenanceError(f"media integrity overlay blob mismatch: {path}")
+    return paths
+
+
 def _validate_canonical_launch(payload: dict[str, Any]) -> set[str]:
     assembly = payload.get("assembly_sha")
     parent = payload.get("parent_sha")
@@ -135,6 +157,7 @@ def _validate_canonical_launch(payload: dict[str, Any]) -> set[str]:
     _assert_ancestor(str(assembly), legacy._git("rev-parse", "HEAD"))
 
     release_paths, _release_sha = _validate_release_artifact_overlay(payload)
+    media_paths = _validate_media_integrity_overlay(payload)
 
     expected_sources = {
         "W09_ACCEPTANCE_ACTION": (166, "9d8b98057b1252736d1cb2fbdf5a93fc71ff4aa3"),
@@ -153,12 +176,13 @@ def _validate_canonical_launch(payload: dict[str, Any]) -> set[str]:
             raise ProvenanceError(f"canonical launch source identity mismatch: {name}")
         paths = _safe_paths(entry.get("exact_paths"), f"canonical {name}")
         for path in paths:
-            if path in release_paths:
+            if path in release_paths or path in media_paths:
                 continue
             if _blob("HEAD", path) != _blob(sha, path):
                 raise ProvenanceError(f"canonical source blob mismatch: {name}:{path}")
         candidate_paths.update(paths)
     candidate_paths.update(release_paths)
+    candidate_paths.update(media_paths)
 
     overlay_paths, overlay_sha = _validate_predeploy_overlay(payload)
     candidate_paths.update(overlay_paths)
@@ -191,6 +215,7 @@ def _validate_canonical_launch(payload: dict[str, Any]) -> set[str]:
     provenance_paths = set(_safe_paths(payload.get("provenance_paths"), "canonical provenance"))
     expected_provenance = {
         "integration/canonical_launch_v1.json",
+        "tests/test_dev01_dev03_peer_provenance.py",
         "tests/test_dev01_dev04_peer_provenance.py",
         "tests/test_dev_a_provenance.py",
         "tests/test_final10_media_residuals.py",

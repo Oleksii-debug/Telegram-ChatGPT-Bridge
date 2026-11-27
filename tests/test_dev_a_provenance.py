@@ -44,10 +44,11 @@ class DevAProvenanceTests(unittest.TestCase):
     def test_canonical_exact_sources_match_their_reviewed_blobs(self):
         payload = json.loads(CANONICAL_MANIFEST.read_text(encoding="utf-8"))
         release_overlay = payload["release_artifact_overlay"]
-        release_paths = set(release_overlay["exact_paths"])
+        media_overlay = payload["media_integrity_overlay"]
+        superseded_paths = set(release_overlay["exact_paths"]) | set(media_overlay["exact_paths"])
         for source in payload["sources"].values():
             for path in source["exact_paths"]:
-                if path in release_paths:
+                if path in superseded_paths:
                     continue
                 with self.subTest(path=path):
                     self.assertEqual(_blob("HEAD", path), _blob(source["sha"], path))
@@ -58,6 +59,9 @@ class DevAProvenanceTests(unittest.TestCase):
         for path in release_overlay["exact_paths"]:
             with self.subTest(release_artifact_path=path):
                 self.assertEqual(_blob("HEAD", path), _blob(release_overlay["sha"], path))
+        for path in media_overlay["exact_paths"]:
+            with self.subTest(media_integrity_path=path):
+                self.assertEqual(_blob("HEAD", path), _blob(media_overlay["sha"], path))
 
     @requires_repository_git
     def test_runtime_composition_is_frozen_at_accepted_predeploy_overlay(self):

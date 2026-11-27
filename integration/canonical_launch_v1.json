@@ -74,6 +74,15 @@
       "tools/build_release_artifact.py"
     ]
   },
+  "media_integrity_overlay": {
+    "sha": "95ce65992c49dbfcdc04ae42630368154724c47d",
+    "parent_sha": "d536a1f390c8326b321e0f9ff870a28536f13474",
+    "exact_paths": [
+      "bridge/backend.py",
+      "bridge/downloads.py",
+      "tests/test_final10_media_files_acceptance.py"
+    ]
+  },
   "runtime_composition": {
     "path": "bridge/runtime_wsgi.py",
     "preserves_parent_passenger_observation": true,
@@ -90,6 +99,7 @@
   ],
   "provenance_paths": [
     "integration/canonical_launch_v1.json",
+    "tests/test_dev01_dev03_peer_provenance.py",
     "tests/test_dev01_dev04_peer_provenance.py",
     "tests/test_dev_a_provenance.py",
     "tests/test_final10_media_residuals.py",
