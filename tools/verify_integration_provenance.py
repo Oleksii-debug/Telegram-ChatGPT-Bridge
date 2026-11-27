@@ -18,6 +18,8 @@ ROOT = legacy.ROOT
 MANIFEST = legacy.MANIFEST
 RELEASE_OVERRIDE = legacy.RELEASE_OVERRIDE
 CANONICAL_MANIFEST = ROOT / "integration" / "canonical_launch_v1.json"
+ROLLBACK_REGRESSION_PATH = "tests/test_finalwave37_rollback_state_compat.py"
+ROLLBACK_REGRESSION_BLOB = "69b38d3860a7b2a229535c0c640ffa78bb2a798a"
 
 TERMINAL_DEV_B_SHA = legacy.TERMINAL_DEV_B_SHA
 TERMINAL_DEV_B_MERGE = legacy.TERMINAL_DEV_B_MERGE
@@ -295,6 +297,7 @@ def _legacy_manifest_for_canonical(canonical: dict[str, Any], candidate_paths: s
     convergence_blobs["tests/test_finalwave26_wsgi_guard_wiring.py"] = _blob(
         overlay_sha, "tests/test_finalwave26_wsgi_guard_wiring.py"
     )
+    convergence_blobs[ROLLBACK_REGRESSION_PATH] = ROLLBACK_REGRESSION_BLOB
 
     changed = {
         line.strip()
@@ -319,6 +322,7 @@ def verify_repository() -> dict[str, Any]:
     patched_blobs["tests/test_finalwave26_wsgi_guard_wiring.py"] = _blob(
         overlay_sha, "tests/test_finalwave26_wsgi_guard_wiring.py"
     )
+    patched_blobs[ROLLBACK_REGRESSION_PATH] = ROLLBACK_REGRESSION_BLOB
 
     original_load = legacy._load
     original_blobs = legacy.SINGLE_FINISHER_BLOBS
