@@ -154,6 +154,7 @@ class RuntimeResponseConformanceTests(unittest.TestCase):
         for operation_id in (
             "previewTelegramSend",
             "previewTelegramReply",
+            "previewTelegramEdit",
             "previewTelegramForward",
             "previewTelegramFiles",
         ):

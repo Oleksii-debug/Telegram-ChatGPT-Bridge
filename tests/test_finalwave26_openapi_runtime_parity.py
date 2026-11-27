@@ -136,8 +136,8 @@ class Finalwave26OpenApiRuntimeParityTests(unittest.TestCase):
             )
         )
         self.assertEqual(expected_read_routes, validate_unified_registry())
-        self.assertEqual(19, len(CANONICAL_ROUTES))
-        self.assertEqual(17, len(OPERATIONS))
+        self.assertEqual(21, len(CANONICAL_ROUTES))
+        self.assertEqual(19, len(OPERATIONS))
         schema = build_chatgpt_action_openapi(BASE_URL)
         action_pairs = {
             (method.upper(), path)
@@ -158,7 +158,7 @@ class Finalwave26OpenApiRuntimeParityTests(unittest.TestCase):
             spec for spec in OPERATIONS
             if spec.operation_class in {OperationClass.WRITE_PREVIEW, OperationClass.WRITE_COMMIT}
         ]
-        self.assertEqual(8, len(write_specs))
+        self.assertEqual(10, len(write_specs))
         for spec in write_specs:
             with self.subTest(operation_id=spec.operation_id):
                 # Empty object must produce at least one required-field error for

@@ -18,6 +18,8 @@ ROOT = legacy.ROOT
 MANIFEST = legacy.MANIFEST
 RELEASE_OVERRIDE = legacy.RELEASE_OVERRIDE
 CANONICAL_MANIFEST = ROOT / "integration" / "canonical_launch_v1.json"
+ROLLBACK_REGRESSION_PATH = "tests/test_finalwave37_rollback_state_compat.py"
+ROLLBACK_REGRESSION_BLOB = "69b38d3860a7b2a229535c0c640ffa78bb2a798a"
 
 TERMINAL_DEV_B_SHA = legacy.TERMINAL_DEV_B_SHA
 TERMINAL_DEV_B_MERGE = legacy.TERMINAL_DEV_B_MERGE
@@ -93,7 +95,7 @@ def _validate_predeploy_overlay(payload: dict[str, Any]) -> tuple[set[str], str]
     return paths, str(sha)
 
 
-def _validate_release_artifact_overlay(payload: dict[str, Any]) -> tuple[set[str], str]:
+def _validate_release_artifact_overlay(payload: dict[str, Any], workflow_parent: str) -> tuple[set[str], str]:
     overlay = payload.get("release_artifact_overlay")
     if not isinstance(overlay, dict):
         raise ProvenanceError("canonical release artifact overlay missing")
@@ -118,9 +120,36 @@ def _validate_release_artifact_overlay(payload: dict[str, Any]) -> tuple[set[str
     if paths != expected:
         raise ProvenanceError("canonical release artifact overlay path set mismatch")
     for path in paths:
-        if _blob("HEAD", path) != _blob(str(sha), path):
+        candidate = workflow_parent if path == ".github/workflows/ci.yml" else "HEAD"
+        if _blob(candidate, path) != _blob(str(sha), path):
             raise ProvenanceError(f"canonical release artifact overlay blob mismatch: {path}")
     return paths, str(sha)
+
+
+def _validate_successor(
+    payload: dict[str, Any],
+    key: str,
+    sha: str,
+    parent: str,
+    expected_paths: set[str],
+) -> set[str]:
+    overlay = payload.get(key)
+    if not isinstance(overlay, dict):
+        raise ProvenanceError(f"{key} missing")
+    if overlay.get("sha") != sha or overlay.get("parent_sha") != parent:
+        raise ProvenanceError(f"{key} identity mismatch")
+    if _parents(sha) != (parent,):
+        raise ProvenanceError(f"{key} parent mismatch")
+    _assert_ancestor(sha, legacy._git("rev-parse", "HEAD"))
+    paths = set(_safe_paths(overlay.get("exact_paths"), key))
+    if paths != expected_paths:
+        raise ProvenanceError(f"{key} path set mismatch")
+    if set(legacy._git("diff", "--name-only", parent, sha).splitlines()) != paths:
+        raise ProvenanceError(f"{key} commit has different paths")
+    for path in paths:
+        if _blob("HEAD", path) != _blob(sha, path):
+            raise ProvenanceError(f"{key} blob mismatch: {path}")
+    return paths
 
 
 def _validate_canonical_launch(payload: dict[str, Any]) -> set[str]:
@@ -134,7 +163,43 @@ def _validate_canonical_launch(payload: dict[str, Any]) -> set[str]:
         raise ProvenanceError("canonical launch assembly parent mismatch")
     _assert_ancestor(str(assembly), legacy._git("rev-parse", "HEAD"))
 
-    release_paths, _release_sha = _validate_release_artifact_overlay(payload)
+    workflow_parent = "e96ba4dc658660ac0ca62b886b631848ddcf97e2"
+    workflow_paths = _validate_successor(
+        payload, "release_qualification_overlay",
+        "92bc5e7c85e72114d0635d036ad5dfc4ca06a2f8", workflow_parent, {".github/workflows/ci.yml"},
+    )
+    release_paths, _release_sha = _validate_release_artifact_overlay(payload, workflow_parent)
+    inventory_parent = "b4c158365f13c6393a714bd686643220b24df0ae"
+    inventory_paths = _validate_successor(
+        payload, "action_inventory_overlay",
+        "b99fe3debe35c7e8650a8b5d75eb495e6ba02307", inventory_parent, {"ops/candidate_contracts.py"},
+    )
+    media_paths = _validate_successor(
+        payload, "media_integrity_overlay",
+        "95ce65992c49dbfcdc04ae42630368154724c47d", "d536a1f390c8326b321e0f9ff870a28536f13474",
+        {"bridge/backend.py", "bridge/downloads.py", "tests/test_final10_media_files_acceptance.py"},
+    )
+    edit_paths = _validate_successor(
+        payload, "message_edit_overlay",
+        "255effebcc50aedb451ff16669f49f232be17e6b", "4a351ee7d4f77ad34fadbd57aa9ed6dbc645356d",
+        {
+            "bridge/integrated_app.py",
+            "ops/dev06_api_contracts.py",
+            "ops/dev06_runtime_conformance.py",
+            "ops/openapi_registry.py",
+            "ops/phase_aware_write_adapter.py",
+            "ops/structured_safe_write.py",
+            "ops/telegram_write_adapter.py",
+            "ops/write_endpoint_policy.py",
+            "ops/write_safety.py",
+            "tests/test_dev06_api_contracts.py",
+            "tests/test_dev06_runtime_conformance.py",
+            "tests/test_devc_release_e2e.py",
+            "tests/test_finalwave26_openapi_runtime_parity.py",
+            "tests/test_finalwave38_runtime_composition.py",
+            "tests/test_finalwave46_request_parser_fuzz.py",
+        },
+    )
 
     expected_sources = {
         "W09_ACCEPTANCE_ACTION": (166, "9d8b98057b1252736d1cb2fbdf5a93fc71ff4aa3"),
@@ -153,12 +218,17 @@ def _validate_canonical_launch(payload: dict[str, Any]) -> set[str]:
             raise ProvenanceError(f"canonical launch source identity mismatch: {name}")
         paths = _safe_paths(entry.get("exact_paths"), f"canonical {name}")
         for path in paths:
-            if path in release_paths:
+            if path in release_paths or path in media_paths:
                 continue
-            if _blob("HEAD", path) != _blob(sha, path):
+            candidate = inventory_parent if path in inventory_paths else "HEAD"
+            if _blob(candidate, path) != _blob(sha, path):
                 raise ProvenanceError(f"canonical source blob mismatch: {name}:{path}")
         candidate_paths.update(paths)
     candidate_paths.update(release_paths)
+    candidate_paths.update(workflow_paths)
+    candidate_paths.update(inventory_paths)
+    candidate_paths.update(media_paths)
+    candidate_paths.update(edit_paths)
 
     overlay_paths, overlay_sha = _validate_predeploy_overlay(payload)
     candidate_paths.update(overlay_paths)
@@ -191,9 +261,12 @@ def _validate_canonical_launch(payload: dict[str, Any]) -> set[str]:
     provenance_paths = set(_safe_paths(payload.get("provenance_paths"), "canonical provenance"))
     expected_provenance = {
         "integration/canonical_launch_v1.json",
+        "tests/test_dev01_dev03_peer_provenance.py",
         "tests/test_dev01_dev04_peer_provenance.py",
+        "tests/test_dev01_dev06_peer_provenance.py",
         "tests/test_dev_a_provenance.py",
         "tests/test_final10_media_residuals.py",
+        "tests/test_finalwave37_rollback_state_compat.py",
         "tools/verify_integration_provenance.py",
         "tools/verify_integration_provenance_legacy.py",
     }
@@ -219,6 +292,11 @@ def _legacy_manifest_for_canonical(canonical: dict[str, Any], candidate_paths: s
     manifest["predecessors"]["DEV5"]["rejected_overlaps_preserve_base"] = [
         path for path in rejected if path not in overrides
     ]
+    # These two DEV4 files were exact until the pinned edit successor changed them.
+    dev4 = manifest["predecessors"]["DEV4"]
+    dev4["dev_a_overrides"] = sorted(
+        set(dev4["dev_a_overrides"]) | {"ops/openapi_registry.py", "ops/telegram_write_adapter.py"}
+    )
 
     lanes = legacy._lane_changed_paths(manifest)
     for key, entry in manifest["overlap_matrix"].items():
@@ -233,6 +311,7 @@ def _legacy_manifest_for_canonical(canonical: dict[str, Any], candidate_paths: s
     convergence_blobs["tests/test_finalwave26_wsgi_guard_wiring.py"] = _blob(
         overlay_sha, "tests/test_finalwave26_wsgi_guard_wiring.py"
     )
+    convergence_blobs[ROLLBACK_REGRESSION_PATH] = ROLLBACK_REGRESSION_BLOB
 
     changed = {
         line.strip()
@@ -257,6 +336,7 @@ def verify_repository() -> dict[str, Any]:
     patched_blobs["tests/test_finalwave26_wsgi_guard_wiring.py"] = _blob(
         overlay_sha, "tests/test_finalwave26_wsgi_guard_wiring.py"
     )
+    patched_blobs[ROLLBACK_REGRESSION_PATH] = ROLLBACK_REGRESSION_BLOB
 
     original_load = legacy._load
     original_blobs = legacy.SINGLE_FINISHER_BLOBS

@@ -94,6 +94,8 @@ _PATH_CRITERIA: dict[str, tuple[str, ...]] = {
     "/api/v1/messages/send/commit": ("F5", "F6", "F7", "H4"),
     "/api/v1/messages/reply/preview": ("F2", "H4"),
     "/api/v1/messages/reply/commit": ("F5", "F6", "F7", "H4"),
+    "/api/v1/messages/edit/preview": ("H4",),
+    "/api/v1/messages/edit/commit": ("F5", "F6", "F7", "H4"),
     "/api/v1/messages/forward/preview": ("F3", "H4"),
     "/api/v1/messages/forward/commit": ("F5", "F6", "F7", "H4"),
     "/api/v1/files/send/preview": ("F4", "H4"),

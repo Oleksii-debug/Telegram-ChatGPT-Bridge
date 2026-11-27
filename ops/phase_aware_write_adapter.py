@@ -170,6 +170,12 @@ class PhaseAwareTelegramWriteAdapter(TelegramWriteAdapter):
 
         return await self._with_client_phase(operation)
 
+    async def edit_async(self, target: str, message_id: int, expected_text_sha256: str, text: str) -> WriteReceipt:
+        async def operation(client: TelegramClientProtocol, cross: Callable[[], None]) -> WriteReceipt:
+            return await self._edit_own_message(client, cross, target, message_id, expected_text_sha256, text)
+
+        return await self._with_client_phase(operation)
+
     async def forward_async(self, source: Any, destination: Any, message_ids: Sequence[Any]) -> WriteReceipt:
         if not isinstance(message_ids, Sequence) or isinstance(message_ids, (str, bytes)):
             raise self._preflight_failure("invalid_message_ids")

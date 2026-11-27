@@ -84,6 +84,8 @@ CANONICAL_ROUTES: tuple[RouteContract, ...] = (
     RouteContract("POST", f"{API_PREFIX}/messages/send/commit", "commitTelegramSend", ApiOperationClass.WRITE_COMMIT, AccessPolicy.BEARER, ApiExposure.ACTION, "commitTelegramSend", "SEND", "previewTelegramSend"),
     RouteContract("POST", f"{API_PREFIX}/messages/reply/preview", "previewTelegramReply", ApiOperationClass.WRITE_PREVIEW, AccessPolicy.BEARER, ApiExposure.ACTION, "previewTelegramReply", "REPLY", "commitTelegramReply"),
     RouteContract("POST", f"{API_PREFIX}/messages/reply/commit", "commitTelegramReply", ApiOperationClass.WRITE_COMMIT, AccessPolicy.BEARER, ApiExposure.ACTION, "commitTelegramReply", "REPLY", "previewTelegramReply"),
+    RouteContract("POST", f"{API_PREFIX}/messages/edit/preview", "previewTelegramEdit", ApiOperationClass.WRITE_PREVIEW, AccessPolicy.BEARER, ApiExposure.ACTION, "previewTelegramEdit", "EDIT", "commitTelegramEdit"),
+    RouteContract("POST", f"{API_PREFIX}/messages/edit/commit", "commitTelegramEdit", ApiOperationClass.WRITE_COMMIT, AccessPolicy.BEARER, ApiExposure.ACTION, "commitTelegramEdit", "EDIT", "previewTelegramEdit"),
     RouteContract("POST", f"{API_PREFIX}/messages/forward/preview", "previewTelegramForward", ApiOperationClass.WRITE_PREVIEW, AccessPolicy.BEARER, ApiExposure.ACTION, "previewTelegramForward", "FORWARD", "commitTelegramForward"),
     RouteContract("POST", f"{API_PREFIX}/messages/forward/commit", "commitTelegramForward", ApiOperationClass.WRITE_COMMIT, AccessPolicy.BEARER, ApiExposure.ACTION, "commitTelegramForward", "FORWARD", "previewTelegramForward"),
     RouteContract("POST", f"{API_PREFIX}/files/send/preview", "previewTelegramFiles", ApiOperationClass.WRITE_PREVIEW, AccessPolicy.BEARER, ApiExposure.ACTION, "previewTelegramFiles", "SEND_FILES", "commitTelegramFiles"),
@@ -157,9 +159,9 @@ def _array(schema: Mapping[str, Any], *, maximum: int = 200, minimum: int = 0, u
 
 def validate_canonical_registry() -> list[str]:
     errors: list[str] = []
-    if len(CANONICAL_ROUTES) != 19 or len(_BY_KEY) != 19 or len(_BY_RUNTIME) != 19:
+    if len(CANONICAL_ROUTES) != 21 or len(_BY_KEY) != 21 or len(_BY_RUNTIME) != 21:
         errors.append("CANONICAL_ROUTE_COUNT_OR_DUPLICATE")
-    if len(_BY_ACTION) != 17:
+    if len(_BY_ACTION) != 19:
         errors.append("ACTION_OPERATION_COUNT_OR_DUPLICATE")
 
     public = [route for route in CANONICAL_ROUTES if route.access is AccessPolicy.PUBLIC]
@@ -186,7 +188,7 @@ def validate_canonical_registry() -> list[str]:
             errors.append(f"RUNTIME_ONLY_ACTION_ID_PRESENT:{route.runtime_operation_id}")
 
         if route.operation_class in {ApiOperationClass.WRITE_PREVIEW, ApiOperationClass.WRITE_COMMIT}:
-            if route.write_action not in {"SEND", "REPLY", "FORWARD", "SEND_FILES"}:
+            if route.write_action not in {"SEND", "REPLY", "EDIT", "FORWARD", "SEND_FILES"}:
                 errors.append(f"WRITE_ACTION_INVALID:{route.runtime_operation_id}")
             pair = _BY_ACTION.get(route.pair_operation_id or "")
             if pair is None:
@@ -386,6 +388,12 @@ def _preview_data_schema(route: RouteContract) -> dict[str, Any]:
         preview = _obj({"chat": {"type": "string", "minLength": 1, "maxLength": 256}, "text": {"type": "string", "minLength": 1, "maxLength": 4096}}, ("chat", "text"))
     elif route.write_action == "REPLY":
         preview = _obj({"chat": {"type": "string", "minLength": 1, "maxLength": 256}, "reply_to_message_id": copy.deepcopy(_POSITIVE_ID), "text": {"type": "string", "minLength": 1, "maxLength": 4096}}, ("chat", "reply_to_message_id", "text"))
+    elif route.write_action == "EDIT":
+        preview = _obj({
+            "chat": {"type": "string", "pattern": "^-?[1-9][0-9]{0,18}$"},
+            "message_id": copy.deepcopy(_POSITIVE_ID),
+            "text": {"type": "string", "minLength": 1, "maxLength": 4096},
+        }, ("chat", "message_id", "text"))
     elif route.write_action == "FORWARD":
         preview = _obj({"from_chat": {"type": "string", "minLength": 1, "maxLength": 256}, "to_chat": {"type": "string", "minLength": 1, "maxLength": 256}, "message_ids": _array(_POSITIVE_ID, maximum=100, minimum=1, unique=True)}, ("from_chat", "to_chat", "message_ids"))
     elif route.write_action == "SEND_FILES":
@@ -415,7 +423,7 @@ def _commit_data_schema() -> dict[str, Any]:
         "idempotent_replay": {"type": "boolean"},
         "request_fingerprint": copy.deepcopy(_SHA256),
         "result": _obj({
-            "operation": {"type": "string", "enum": ["SEND", "REPLY", "FORWARD", "SEND_FILES"]},
+            "operation": {"type": "string", "enum": ["SEND", "REPLY", "EDIT", "FORWARD", "SEND_FILES"]},
             "message_ids": _array(_POSITIVE_ID, maximum=100, minimum=1),
             "chat_id": _nullable({"type": "integer"}),
             "count": {"type": "integer", "minimum": 1, "maximum": 100},
@@ -766,7 +774,7 @@ def validate_chatgpt_action_schema(schema: Mapping[str, Any]) -> list[str]:
         missing = set(expected) - set(observed)
         if missing:
             errors.append(f"ACTION_ROUTE_MISSING:{len(missing)}")
-    if len(observed) != 17:
+    if len(observed) != 19:
         errors.append("ACTION_ROUTE_COUNT_DRIFT")
     operation_ids = list(observed.values())
     if len(set(operation_ids)) != len(operation_ids):

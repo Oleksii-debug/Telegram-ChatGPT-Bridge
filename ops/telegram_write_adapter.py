@@ -8,6 +8,7 @@ credentials or a live account.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import inspect
 import ipaddress
 import re
@@ -90,6 +91,7 @@ class TelegramClientProtocol(Protocol):
     async def get_entity(self, ref: Any) -> Any: ...
     async def get_messages(self, entity: Any, ids: Any) -> Any: ...
     async def send_message(self, entity: Any, text: str, *, reply_to: int | None = None) -> Any: ...
+    async def edit_message(self, entity: Any, message: int, text: str, **kwargs: Any) -> Any: ...
     async def send_file(self, entity: Any, files: Sequence[str], **kwargs: Any) -> Any: ...
     async def forward_messages(self, entity: Any, ids: Sequence[int], *, from_peer: Any) -> Any: ...
 
@@ -339,6 +341,61 @@ class TelegramWriteAdapter:
 
         return await self._with_client(operation)
 
+    async def _edit_own_message(
+        self,
+        client: TelegramClientProtocol,
+        before_effect: Callable[[], None],
+        target: str,
+        message_id: int,
+        expected_text_sha256: str,
+        text: str,
+    ) -> WriteReceipt:
+        if not isinstance(target, str) or not _NUMERIC_RE.fullmatch(target):
+            raise TelegramContractError("invalid_edit_chat")
+        chat_id = int(target)
+        if abs(chat_id) > 2**63 - 1:
+            raise TelegramContractError("invalid_edit_chat")
+        if type(message_id) is not int or not 1 <= message_id <= 2**31 - 1:
+            raise TelegramContractError("invalid_edit_message_id")
+        if not isinstance(expected_text_sha256, str) or not re.fullmatch(r"[a-f0-9]{64}", expected_text_sha256):
+            raise TelegramContractError("invalid_expected_edit_text")
+        if not isinstance(text, str) or not text.strip():
+            raise TelegramContractError("text_required")
+        if len(text) > self.config.max_send_chars:
+            raise TelegramContractError("text_too_long", status=413)
+
+        entity = await self._resolve(client, target)
+        current = await client.get_messages(entity, ids=message_id)
+        if current is None:
+            raise TelegramContractError("edit_target_not_found", status=404)
+        if _message_chat_id(current) != chat_id or _message_id(current) != message_id:
+            raise TelegramContractError("edit_target_mismatch", status=409)
+        if getattr(current, "out", None) is not True:
+            raise TelegramContractError("edit_target_not_outgoing", status=409)
+        if getattr(current, "entities", None):
+            raise TelegramContractError("edit_target_has_formatting", status=409)
+        original = getattr(current, "message", None)
+        if not isinstance(original, str) or hashlib.sha256(original.encode("utf-8")).hexdigest() != expected_text_sha256:
+            raise TelegramContractError("edit_target_changed", status=409)
+
+        before_effect()
+        edited = await client.edit_message(
+            entity,
+            message_id,
+            text,
+            parse_mode=None,
+            link_preview=bool(getattr(current, "web_preview", None)),
+        )
+        if _message_chat_id(edited) != chat_id or _message_id(edited) != message_id:
+            raise TelegramContractError("telegram_invalid_receipt", status=502)
+        return WriteReceipt("EDIT", (message_id,), chat_id, 1)
+
+    async def edit_async(self, target: str, message_id: int, expected_text_sha256: str, text: str) -> WriteReceipt:
+        async def operation(client: TelegramClientProtocol) -> WriteReceipt:
+            return await self._edit_own_message(client, lambda: None, target, message_id, expected_text_sha256, text)
+
+        return await self._with_client(operation)
+
     async def forward_async(self, source: Any, destination: Any, message_ids: Sequence[Any]) -> WriteReceipt:
         if not isinstance(message_ids, Sequence) or isinstance(message_ids, (str, bytes)):
             raise TelegramContractError("invalid_message_ids")
@@ -416,6 +473,9 @@ class TelegramWriteAdapter:
 
     def reply(self, target: Any, reply_to_message_id: Any, text: Any) -> WriteReceipt:
         return asyncio.run(self.reply_async(target, reply_to_message_id, text))
+
+    def edit(self, target: str, message_id: int, expected_text_sha256: str, text: str) -> WriteReceipt:
+        return asyncio.run(self.edit_async(target, message_id, expected_text_sha256, text))
 
     def forward(self, source: Any, destination: Any, message_ids: Sequence[Any]) -> WriteReceipt:
         return asyncio.run(self.forward_async(source, destination, message_ids))

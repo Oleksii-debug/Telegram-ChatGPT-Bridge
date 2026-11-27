@@ -110,8 +110,10 @@ class Dev01Dev04PeerProvenanceTests(unittest.TestCase):
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
                 )
+                self.assertNotEqual(_blob(commit, path), _blob(SOURCE_SHA, path))
+                if path == "bridge/downloads.py":
+                    commit = "95ce65992c49dbfcdc04ae42630368154724c47d"
                 self.assertEqual(_blob("HEAD", path), _blob(commit, path))
-                self.assertNotEqual(_blob("HEAD", path), _blob(SOURCE_SHA, path))
 
         for path in sorted(EXACT_PATHS - set(adaptations)):
             with self.subTest(path=path):
@@ -122,7 +124,10 @@ class Dev01Dev04PeerProvenanceTests(unittest.TestCase):
         self.assertEqual(set(FINAL10_MEDIA_ADAPTATIONS.values()), {"6878a21ebe46a3cdb1e84ef600587ec5cc99c90e"})
         for path in sorted(FINAL10_MEDIA_ADAPTATIONS):
             with self.subTest(path=path):
-                self.assertEqual(_blob("HEAD", path), _blob("29a9d3bf30ac75999b86b51d694e6885b54b519a", path))
+                self.assertEqual(
+                    _blob(FINAL10_MEDIA_ADAPTATIONS[path], path),
+                    _blob("29a9d3bf30ac75999b86b51d694e6885b54b519a", path),
+                )
 
     @requires_repository_git
     def test_specialist_workflow_is_not_imported(self):

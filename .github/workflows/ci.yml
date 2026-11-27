@@ -99,12 +99,13 @@ jobs:
         run: |
           python - <<'PY'
           from ops.candidate_contracts import candidate_acceptance_coverage, integrated_api_inventory, validate_candidate_acceptance_coverage, validate_integrated_api_inventory
+          from ops.openapi_registry import OPERATIONS
           coverage = candidate_acceptance_coverage()
           counts = validate_candidate_acceptance_coverage(coverage)
           inventory = integrated_api_inventory()
           validate_integrated_api_inventory(inventory)
           assert counts == {'LIVE_EXTERNAL_REQUIRED': 17, 'REAL_SOURCE_REQUIRED': 13, 'SYNTHETIC_EXECUTABLE': 37}
-          assert len(inventory) == 19
+          assert len(inventory) == len(OPERATIONS) + 2
           print('DEV_A_CANDIDATE_CONTRACTS_PASS')
           PY
       - name: B4 focused exact-SHA release artifact tests

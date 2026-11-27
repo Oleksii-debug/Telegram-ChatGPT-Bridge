@@ -32,8 +32,8 @@ def operation(schema, operation_id):
 
 class CanonicalRegistryTests(unittest.TestCase):
     def test_exact_route_and_action_counts(self):
-        self.assertEqual(len(CANONICAL_ROUTES), 19)
-        self.assertEqual(sum(r.exposure is ApiExposure.ACTION for r in CANONICAL_ROUTES), 17)
+        self.assertEqual(len(CANONICAL_ROUTES), 21)
+        self.assertEqual(sum(r.exposure is ApiExposure.ACTION for r in CANONICAL_ROUTES), 19)
         self.assertEqual(validate_canonical_registry(), [])
 
     def test_only_health_is_public(self):
@@ -67,7 +67,7 @@ class CanonicalRegistryTests(unittest.TestCase):
 
     def test_write_pairs_are_reciprocal_and_only_commits_consequential(self):
         writes = [r for r in CANONICAL_ROUTES if r.write_action]
-        self.assertEqual(len(writes), 8)
+        self.assertEqual(len(writes), 10)
         for route in writes:
             pair = canonical_action(route.pair_operation_id)
             self.assertEqual(pair.pair_operation_id, route.action_operation_id)
@@ -88,14 +88,14 @@ class ActionSchemaPositiveTests(unittest.TestCase):
     def test_schema_is_clean(self):
         self.assertEqual(validate_chatgpt_action_schema(self.schema), [])
 
-    def test_exact_17_action_operations(self):
+    def test_exact_19_action_operations(self):
         ids = []
         for item in self.schema["paths"].values():
             for op in item.values():
                 if isinstance(op, dict) and "operationId" in op:
                     ids.append(op["operationId"])
-        self.assertEqual(len(ids), 17)
-        self.assertEqual(len(set(ids)), 17)
+        self.assertEqual(len(ids), 19)
+        self.assertEqual(len(set(ids)), 19)
 
     def test_health_and_raw_file_are_not_action_operations(self):
         self.assertNotIn("/health", self.schema["paths"])

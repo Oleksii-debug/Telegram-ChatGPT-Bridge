@@ -15,6 +15,7 @@ from typing import Any, Mapping
 from ops.dev06_api_contracts import (
     ApiContractError,
     ApiOperationClass,
+    CANONICAL_ROUTES,
     build_chatgpt_action_openapi as _build_registry_document,
     canonical_action,
     validate_chatgpt_action_schema,
@@ -24,6 +25,15 @@ from ops.dev06_api_contracts import (
 class ResponseContractError(ApiContractError):
     """Fail-closed response/schema conformance error."""
 
+
+_PREVIEW_OPERATIONS = tuple(
+    route.action_operation_id for route in CANONICAL_ROUTES
+    if route.operation_class is ApiOperationClass.WRITE_PREVIEW
+)
+_COMMIT_OPERATIONS = tuple(
+    route.action_operation_id for route in CANONICAL_ROUTES
+    if route.operation_class is ApiOperationClass.WRITE_COMMIT
+)
 
 def _operation(document: Mapping[str, Any], operation_id: str) -> Mapping[str, Any]:
     paths = document.get("paths")
@@ -79,12 +89,7 @@ def _remove_response_write_only(document: dict[str, Any]) -> None:
     to the exact preview.  Sensitivity is enforced operationally by no-store and
     logging rules, not by lying about response directionality.
     """
-    for operation_id in (
-        "previewTelegramSend",
-        "previewTelegramReply",
-        "previewTelegramForward",
-        "previewTelegramFiles",
-    ):
+    for operation_id in _PREVIEW_OPERATIONS:
         operation = _operation(document, operation_id)
         data = _success_data_schema(operation)
         props = data.get("properties")
@@ -100,12 +105,7 @@ def _remove_response_write_only(document: dict[str, Any]) -> None:
 
 def validate_action_compatibility(document: Mapping[str, Any]) -> list[str]:
     errors = list(validate_chatgpt_action_schema(document))
-    for operation_id in (
-        "previewTelegramSend",
-        "previewTelegramReply",
-        "previewTelegramForward",
-        "previewTelegramFiles",
-    ):
+    for operation_id in _PREVIEW_OPERATIONS:
         try:
             operation = _operation(document, operation_id)
             data = _success_data_schema(operation)
@@ -126,12 +126,7 @@ def validate_action_compatibility(document: Mapping[str, Any]) -> list[str]:
 
     # Consequential semantics remain registry-derived. Optional extension fields
     # are checked but are never treated as the security source of truth.
-    for operation_id in (
-        "commitTelegramSend",
-        "commitTelegramReply",
-        "commitTelegramForward",
-        "commitTelegramFiles",
-    ):
+    for operation_id in _COMMIT_OPERATIONS:
         try:
             operation = _operation(document, operation_id)
         except ResponseContractError as exc:

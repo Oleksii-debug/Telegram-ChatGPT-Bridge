@@ -90,6 +90,7 @@ class Dev01Dev03PeerProvenanceTests(unittest.TestCase):
             stderr=subprocess.DEVNULL,
         )
         for path, commit in sorted(CANONICAL_ADAPTATIONS.items()):
+            successor = "95ce65992c49dbfcdc04ae42630368154724c47d"
             with self.subTest(path=path, adaptation_commit=commit):
                 subprocess.run(
                     ["git", "merge-base", "--is-ancestor", commit, "HEAD"],
@@ -98,8 +99,8 @@ class Dev01Dev03PeerProvenanceTests(unittest.TestCase):
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
                 )
-                self.assertEqual(_blob("HEAD", path), _blob(commit, path))
-                self.assertNotEqual(_blob("HEAD", path), _blob(SOURCE_SHA, path))
+                self.assertNotEqual(_blob(commit, path), _blob(SOURCE_SHA, path))
+                self.assertEqual(_blob("HEAD", path), _blob(successor, path))
         for path in sorted(EXACT_PATHS - set(CANONICAL_ADAPTATIONS)):
             with self.subTest(path=path):
                 self.assertEqual(_blob("HEAD", path), _blob(SOURCE_SHA, path))

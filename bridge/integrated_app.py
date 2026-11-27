@@ -25,6 +25,7 @@ from .backend import UnavailableReadBackend
 from .errors import BridgeError, HiddenNotFound
 from .routes import READ_ROUTE_REGISTRY
 from .security import RejectingRateLimiter
+from .validation import bounded_text
 
 from ops.openapi_registry import API_PREFIX, OPERATIONS, OperationClass, OperationSpec, canonical_operation, validate_registry
 from ops.telegram_write_adapter import TelegramWriteAdapter
@@ -152,6 +153,16 @@ class UnifiedBridgeApplication:
                 "reply_to_message_id": body.get("reply_to_message_id"),
                 "text": body.get("text"),
             }
+        if action == "EDIT":
+            BridgeApplication._only(body, {"chat", "message_id", "expected_text", "text"})
+            expected = bounded_text(body.get("expected_text"), field="expected_text", maximum=4096, allow_empty=False)
+            text = bounded_text(body.get("text"), field="text", maximum=4096, allow_empty=False)
+            return {
+                "target": body.get("chat"),
+                "message_id": body.get("message_id"),
+                "expected_text_sha256": hashlib.sha256(expected.encode("utf-8")).hexdigest(),
+                "text": text,
+            }
         if action == "FORWARD":
             BridgeApplication._only(body, {"from_chat", "to_chat", "message_ids"})
             return {
@@ -193,6 +204,8 @@ class UnifiedBridgeApplication:
                 "reply_to_message_id": payload.get("reply_to_message_id"),
                 "text": payload.get("text"),
             }
+        if action == "EDIT":
+            return {"chat": payload.get("target"), "message_id": payload.get("message_id"), "text": payload.get("text")}
         if action == "FORWARD":
             return {
                 "from_chat": payload.get("source"),
@@ -264,6 +277,8 @@ class UnifiedBridgeApplication:
             receipt = adapter.send(payload["target"], payload["text"])
         elif action == "REPLY":
             receipt = adapter.reply(payload["target"], payload["reply_to_message_id"], payload["text"])
+        elif action == "EDIT":
+            receipt = adapter.edit(payload["target"], payload["message_id"], payload["expected_text_sha256"], payload["text"])
         elif action == "FORWARD":
             receipt = adapter.forward(payload["source"], payload["target"], payload["message_ids"])
         elif action == "SEND_FILES":
