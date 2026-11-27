@@ -169,6 +169,11 @@ def _validate_canonical_launch(payload: dict[str, Any]) -> set[str]:
         "92bc5e7c85e72114d0635d036ad5dfc4ca06a2f8", workflow_parent, {".github/workflows/ci.yml"},
     )
     release_paths, _release_sha = _validate_release_artifact_overlay(payload, workflow_parent)
+    inventory_parent = "b4c158365f13c6393a714bd686643220b24df0ae"
+    inventory_paths = _validate_successor(
+        payload, "action_inventory_overlay",
+        "b99fe3debe35c7e8650a8b5d75eb495e6ba02307", inventory_parent, {"ops/candidate_contracts.py"},
+    )
     media_paths = _validate_successor(
         payload, "media_integrity_overlay",
         "95ce65992c49dbfcdc04ae42630368154724c47d", "d536a1f390c8326b321e0f9ff870a28536f13474",
@@ -215,11 +220,13 @@ def _validate_canonical_launch(payload: dict[str, Any]) -> set[str]:
         for path in paths:
             if path in release_paths or path in media_paths:
                 continue
-            if _blob("HEAD", path) != _blob(sha, path):
+            candidate = inventory_parent if path in inventory_paths else "HEAD"
+            if _blob(candidate, path) != _blob(sha, path):
                 raise ProvenanceError(f"canonical source blob mismatch: {name}:{path}")
         candidate_paths.update(paths)
     candidate_paths.update(release_paths)
     candidate_paths.update(workflow_paths)
+    candidate_paths.update(inventory_paths)
     candidate_paths.update(media_paths)
     candidate_paths.update(edit_paths)
 

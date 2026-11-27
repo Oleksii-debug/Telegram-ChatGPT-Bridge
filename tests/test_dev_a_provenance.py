@@ -45,6 +45,7 @@ class DevAProvenanceTests(unittest.TestCase):
         payload = json.loads(CANONICAL_MANIFEST.read_text(encoding="utf-8"))
         release_overlay = payload["release_artifact_overlay"]
         qualification = payload["release_qualification_overlay"]
+        inventory = payload["action_inventory_overlay"]
         media_overlay = payload["media_integrity_overlay"]
         superseded_paths = set(release_overlay["exact_paths"]) | set(media_overlay["exact_paths"])
         for source in payload["sources"].values():
@@ -52,7 +53,8 @@ class DevAProvenanceTests(unittest.TestCase):
                 if path in superseded_paths:
                     continue
                 with self.subTest(path=path):
-                    self.assertEqual(_blob("HEAD", path), _blob(source["sha"], path))
+                    candidate = inventory["parent_sha"] if path in inventory["exact_paths"] else "HEAD"
+                    self.assertEqual(_blob(candidate, path), _blob(source["sha"], path))
         overlay = payload["predeploy_overlay"]
         for path in overlay["exact_paths"]:
             with self.subTest(predeploy_path=path):
@@ -64,6 +66,9 @@ class DevAProvenanceTests(unittest.TestCase):
         for path in qualification["exact_paths"]:
             with self.subTest(qualification_path=path):
                 self.assertEqual(_blob("HEAD", path), _blob(qualification["sha"], path))
+        for path in inventory["exact_paths"]:
+            with self.subTest(action_inventory_path=path):
+                self.assertEqual(_blob("HEAD", path), _blob(inventory["sha"], path))
         for path in media_overlay["exact_paths"]:
             with self.subTest(media_integrity_path=path):
                 self.assertEqual(_blob("HEAD", path), _blob(media_overlay["sha"], path))

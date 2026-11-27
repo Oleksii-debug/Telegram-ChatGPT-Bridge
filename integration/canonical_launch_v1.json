@@ -111,6 +111,13 @@
       ".github/workflows/ci.yml"
     ]
   },
+  "action_inventory_overlay": {
+    "sha": "b99fe3debe35c7e8650a8b5d75eb495e6ba02307",
+    "parent_sha": "b4c158365f13c6393a714bd686643220b24df0ae",
+    "exact_paths": [
+      "ops/candidate_contracts.py"
+    ]
+  },
   "runtime_composition": {
     "path": "bridge/runtime_wsgi.py",
     "preserves_parent_passenger_observation": true,
