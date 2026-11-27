@@ -248,7 +248,7 @@ class TelethonReadBackend:
         elif getattr(message, "document", None):
             kind = "document"
         else:
-            kind = "other"
+            return ()
 
         msg_id = int(getattr(message, "id", 0) or 0)
         media_id = (

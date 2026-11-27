@@ -125,7 +125,12 @@ class DownloadManager:
         total_expected = 0
         for item in items:
             key = (item.chat, int(item.message_id), item.source_file_ref)
-            dedup.setdefault(key, item)
+            previous = dedup.setdefault(key, item)
+            if (previous.expected_size, previous.expected_sha256) != (item.expected_size, item.expected_sha256):
+                raise BridgeError(
+                    "Duplicate source has conflicting expected size or checksum",
+                    code="conflicting_download_expectations",
+                )
         selected = list(dedup.values())
         if not selected:
             raise BridgeError("No files selected", code="empty_download")
