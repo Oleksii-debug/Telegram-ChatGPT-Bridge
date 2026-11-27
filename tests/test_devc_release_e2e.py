@@ -51,14 +51,14 @@ def make_app(root,backend,fake,audit=None):
     return UnifiedBridgeApplication(read_app=read,write_adapter=adapter,write_limiter=FixedWindowEndpointLimiter(limit=1000,window_seconds=60,clock=lambda:300.0))
 
 class RouteAndSchemaTests(unittest.TestCase):
-    def test_17_action_operations_resolve_and_schema_is_strict(self):
+    def test_19_action_operations_resolve_and_schema_is_strict(self):
         with tempfile.TemporaryDirectory() as t:
             app=make_app(Path(t),Backend(),DeterministicFakeTelegramClient())
             unresolved=[]
             for s in openapi_registry.OPERATIONS:
                 r=app._operation_for_request(str(s.method).upper(),str(s.path))
                 if r is None or r.operation_id!=s.operation_id: unresolved.append(s.operation_id)
-            self.assertEqual([],unresolved); self.assertEqual(17,len(openapi_registry.OPERATIONS))
+            self.assertEqual([],unresolved); self.assertEqual(19,len(openapi_registry.OPERATIONS))
             self.assertEqual({(str(s.method).upper(),str(s.path)) for s in openapi_registry.OPERATIONS if s.operation_class is OperationClass.READ},set(validate_unified_registry()))
             first=openapi_registry.build_action_openapi("https://bridge.example.invalid"); self.assertEqual(first,openapi_registry.build_action_openapi("https://bridge.example.invalid")); self.assertNotIn("setup"," ".join(first["paths"]).casefold())
             for s in openapi_registry.OPERATIONS:

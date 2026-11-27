@@ -57,6 +57,8 @@ OPERATIONS: tuple[OperationSpec, ...] = (
     OperationSpec(f"{API_PREFIX}/messages/send/commit", "post", "commitTelegramSend", OperationClass.WRITE_COMMIT, True, "SEND", "previewTelegramSend", True, True),
     OperationSpec(f"{API_PREFIX}/messages/reply/preview", "post", "previewTelegramReply", OperationClass.WRITE_PREVIEW, True, "REPLY", "commitTelegramReply"),
     OperationSpec(f"{API_PREFIX}/messages/reply/commit", "post", "commitTelegramReply", OperationClass.WRITE_COMMIT, True, "REPLY", "previewTelegramReply", True, True),
+    OperationSpec(f"{API_PREFIX}/messages/edit/preview", "post", "previewTelegramEdit", OperationClass.WRITE_PREVIEW, True, "EDIT", "commitTelegramEdit"),
+    OperationSpec(f"{API_PREFIX}/messages/edit/commit", "post", "commitTelegramEdit", OperationClass.WRITE_COMMIT, True, "EDIT", "previewTelegramEdit", True, True),
     OperationSpec(f"{API_PREFIX}/messages/forward/preview", "post", "previewTelegramForward", OperationClass.WRITE_PREVIEW, True, "FORWARD", "commitTelegramForward"),
     OperationSpec(f"{API_PREFIX}/messages/forward/commit", "post", "commitTelegramForward", OperationClass.WRITE_COMMIT, True, "FORWARD", "previewTelegramForward", True, True),
     OperationSpec(f"{API_PREFIX}/files/send/preview", "post", "previewTelegramFiles", OperationClass.WRITE_PREVIEW, True, "SEND_FILES", "commitTelegramFiles"),
@@ -99,7 +101,7 @@ def validate_registry() -> list[str]:
         if not spec.protected:
             errors.append(f"PRIVATE_BRIDGE_OPERATION_MUST_BE_PROTECTED:{spec.operation_id}")
         if spec.operation_class in {OperationClass.WRITE_PREVIEW, OperationClass.WRITE_COMMIT}:
-            if spec.action not in {"SEND", "REPLY", "FORWARD", "SEND_FILES"}:
+            if spec.action not in {"SEND", "REPLY", "EDIT", "FORWARD", "SEND_FILES"}:
                 errors.append(f"WRITE_ACTION_MISSING:{spec.operation_id}")
             pair = _BY_ID.get(spec.pair_operation_id or "")
             if pair is None or pair.action != spec.action or pair.operation_class == spec.operation_class:
@@ -172,6 +174,13 @@ def _request_schema(spec: OperationSpec) -> dict[str, Any]:
         return _obj({"chat": target, "text": {"type": "string", "minLength": 1, "maxLength": 4096}}, ("chat", "text"))
     if spec.action == "REPLY":
         return _obj({"chat": target, "reply_to_message_id": positive_id, "text": {"type": "string", "minLength": 1, "maxLength": 4096}}, ("chat", "reply_to_message_id", "text"))
+    if spec.action == "EDIT":
+        return _obj({
+            "chat": {"type": "string", "pattern": "^-?[1-9][0-9]{0,18}$", "description": "The exact signed dialog ID returned by Telegram. Preserve a leading minus sign."},
+            "message_id": {**positive_id, "maximum": 2**31 - 1},
+            "expected_text": {"type": "string", "minLength": 1, "maxLength": 4096, "description": "Copy the current message text exactly from a Telegram read result without correcting it."},
+            "text": {"type": "string", "minLength": 1, "maxLength": 4096, "description": "The complete proposed replacement text."},
+        }, ("chat", "message_id", "expected_text", "text"))
     if spec.action == "FORWARD":
         return _obj({"from_chat": target, "to_chat": target, "message_ids": {"type": "array", "minItems": 1, "maxItems": 100, "uniqueItems": True, "items": positive_id}}, ("from_chat", "to_chat", "message_ids"))
     if spec.action == "SEND_FILES":
@@ -194,6 +203,8 @@ _SUMMARIES = {
     "commitTelegramSend": "Commit an explicitly approved Telegram send",
     "previewTelegramReply": "Preview a Telegram reply",
     "commitTelegramReply": "Commit an explicitly approved Telegram reply",
+    "previewTelegramEdit": "Preview a text edit to an existing outgoing Telegram message",
+    "commitTelegramEdit": "Commit an explicitly approved edit to an existing outgoing Telegram message",
     "previewTelegramForward": "Preview a Telegram forward",
     "commitTelegramForward": "Commit an explicitly approved Telegram forward",
     "previewTelegramFiles": "Preview sending files to Telegram",

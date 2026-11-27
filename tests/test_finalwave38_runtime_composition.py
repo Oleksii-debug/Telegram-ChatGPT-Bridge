@@ -16,8 +16,10 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
+from bridge.action_request_guard import ActionRequestGuard
 from bridge.app import ReadAppConfig
 from bridge.backend import TelethonReadBackend, UnavailableReadBackend
 from bridge.phase_aware_write_app import PhaseAwareUnifiedBridgeApplication
@@ -97,6 +99,43 @@ class _SyntheticMessage:
 
 class _SyntheticRpcError(Exception):
     pass
+
+
+class _EditClient:
+    chat_id = -1000000012345
+    message_id = 101
+    original = "Привіт, як справи"
+    replacement = "Привіт! Як справи?"
+
+    def __init__(self):
+        self.current = SimpleNamespace(
+            id=self.message_id, chat_id=self.chat_id, out=True, message=self.original, entities=[]
+        )
+        self.reads = 0
+        self.edits = []
+
+    async def connect(self):
+        pass
+
+    async def disconnect(self):
+        pass
+
+    async def is_user_authorized(self):
+        return True
+
+    async def get_entity(self, ref):
+        return ref
+
+    async def get_messages(self, peer, *, ids):
+        self.reads += 1
+        if peer == self.chat_id and ids == self.message_id:
+            return self.current
+        return None
+
+    async def edit_message(self, peer, message_id, text, **kwargs):
+        self.edits.append((peer, message_id, text, kwargs))
+        self.current.message = text
+        return self.current
 
 
 class _PreEffectFailureClient:
@@ -201,6 +240,69 @@ class RuntimeCompositionTests(unittest.TestCase):
         self.assertIs(app_module.application, runtime_wsgi.application)
         after = {name for name in sys.modules if name == "telethon" or name.startswith("telethon.")}
         self.assertEqual(before, after)
+
+    def _edit_app(self, root: Path, client: _EditClient):
+        with mock.patch.object(ReadAppConfig, "from_env", return_value=self._private_config(root)), \
+             mock.patch("bridge.runtime_composition.load_private_telegram_references", return_value=self._synthetic_refs()), \
+             mock.patch("bridge.runtime_composition._raw_telethon_factory", return_value=lambda: client):
+            return ActionRequestGuard(build_production_application_from_env())
+
+    def _preview_edit(self, app, client: _EditClient):
+        status, body = self._call(app, "/api/v1/messages/edit/preview", {
+            "chat": str(client.chat_id),
+            "message_id": client.message_id,
+            "expected_text": client.original,
+            "text": client.replacement,
+        }, token=self.AUTH)
+        self.assertTrue(status.startswith("200 "), body)
+        payload = json.loads(body)["data"]
+        self.assertEqual(payload["preview"], {
+            "chat": str(client.chat_id), "message_id": client.message_id, "text": client.replacement,
+        })
+        self.assertEqual(client.reads, 0)
+        self.assertEqual(client.edits, [])
+        return {"preview_token": payload["preview_token"], "idempotency_key": "synthetic-edit-001"}
+
+    def test_edit_requires_confirmation_and_changes_the_exact_message_only_once(self):
+        client = _EditClient()
+        with tempfile.TemporaryDirectory() as td:
+            app = self._edit_app(Path(td) / "private", client)
+            request = self._preview_edit(app, client)
+            route = "/api/v1/messages/edit/commit"
+            status, _ = self._call(app, route, {**request, "explicit_user_command": False}, token=self.AUTH)
+            self.assertTrue(status.startswith("400 "), status)
+            self.assertEqual(client.edits, [])
+            request["explicit_user_command"] = True
+            for replay in (False, True):
+                status, body = self._call(app, route, request, token=self.AUTH)
+                self.assertTrue(status.startswith("200 "), body)
+                data = json.loads(body)["data"]
+                self.assertIs(data["idempotent_replay"], replay)
+                self.assertEqual(data["result"]["operation"], "EDIT")
+                self.assertEqual(data["result"]["message_ids"], [client.message_id])
+            self.assertEqual(client.reads, 1)
+            self.assertEqual(client.edits, [
+                (client.chat_id, client.message_id, client.replacement, {"parse_mode": None, "link_preview": False})
+            ])
+
+    def test_edit_refuses_a_changed_wrong_chat_incoming_or_formatted_message(self):
+        for field, value, code in (
+            ("message", "Already edited on another client", "edit_target_changed"),
+            ("chat_id", 12345, "edit_target_mismatch"),
+            ("out", False, "edit_target_not_outgoing"),
+            ("entities", [object()], "edit_target_has_formatting"),
+        ):
+            with self.subTest(field=field), tempfile.TemporaryDirectory() as td:
+                client = _EditClient()
+                app = self._edit_app(Path(td) / "private", client)
+                request = self._preview_edit(app, client)
+                setattr(client.current, field, value)
+                status, body = self._call(app, "/api/v1/messages/edit/commit", {
+                    **request, "explicit_user_command": True,
+                }, token=self.AUTH)
+                self.assertTrue(status.startswith("409 "), body)
+                self.assertEqual(json.loads(body)["error"]["code"], code)
+                self.assertEqual(client.edits, [])
 
     def test_private_runtime_without_telegram_refs_wires_persistent_helpers_but_is_not_ready(self):
         with tempfile.TemporaryDirectory() as td:

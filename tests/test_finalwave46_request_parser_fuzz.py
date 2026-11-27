@@ -156,7 +156,7 @@ class Finalwave46ParserFuzzTests(unittest.TestCase):
         self.assertNotIn("AssertionError", serialized)
 
     def test_authentication_precedes_body_read_for_every_action_operation(self):
-        self.assertEqual(17, len(OPERATIONS))
+        self.assertEqual(19, len(OPERATIONS))
         for spec in OPERATIONS:
             for token in (None, "wrong-test-bearer-value-000000000046"):
                 poison = _PoisonStream()

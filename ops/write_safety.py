@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import re
 import secrets
 import sqlite3
 import threading
@@ -44,6 +45,7 @@ class SafeNoSideEffectFailure(RuntimeError):
 class WriteAction(str, Enum):
     SEND = "SEND"
     REPLY = "REPLY"
+    EDIT = "EDIT"
     FORWARD = "FORWARD"
     SEND_FILES = "SEND_FILES"
 
@@ -122,7 +124,7 @@ def normalize_write_payload(action: WriteAction | str, payload: Mapping[str, Any
     if not isinstance(payload, Mapping):
         raise WriteSafetyError("invalid_write_payload", status=400)
 
-    if action_e in {WriteAction.SEND, WriteAction.REPLY}:
+    if action_e in {WriteAction.SEND, WriteAction.REPLY, WriteAction.EDIT}:
         target = _safe_id(payload.get("target"), "target_required", max_len=256)
         text = payload.get("text")
         if not isinstance(text, str) or not text.strip():
@@ -130,6 +132,16 @@ def normalize_write_payload(action: WriteAction | str, payload: Mapping[str, Any
         if len(text) > 4096:
             raise WriteSafetyError("text_too_long", status=413)
         normalized: dict[str, Any] = {"target": target, "text": text}
+        if action_e is WriteAction.EDIT:
+            if not re.fullmatch(r"-?[1-9][0-9]{0,18}", target) or abs(int(target)) > 2**63 - 1:
+                raise WriteSafetyError("invalid_edit_chat", status=400)
+            message_id = payload.get("message_id")
+            if type(message_id) is not int or not 1 <= message_id <= 2**31 - 1:
+                raise WriteSafetyError("invalid_edit_message_id", status=400)
+            expected_hash = _require_hash(payload.get("expected_text_sha256"), "invalid_expected_edit_text")
+            if _sha256_text(text) == expected_hash:
+                raise WriteSafetyError("edit_text_unchanged", status=400)
+            return {**normalized, "message_id": message_id, "expected_text_sha256": expected_hash}
         if action_e is WriteAction.REPLY:
             normalized["reply_to_message_id"] = _positive_int(payload.get("reply_to_message_id"), "reply_target_required")
         elif payload.get("reply_to_message_id") not in (None, ""):
