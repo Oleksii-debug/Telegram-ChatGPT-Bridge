@@ -95,7 +95,7 @@ def _validate_predeploy_overlay(payload: dict[str, Any]) -> tuple[set[str], str]
     return paths, str(sha)
 
 
-def _validate_release_artifact_overlay(payload: dict[str, Any]) -> tuple[set[str], str]:
+def _validate_release_artifact_overlay(payload: dict[str, Any], workflow_parent: str) -> tuple[set[str], str]:
     overlay = payload.get("release_artifact_overlay")
     if not isinstance(overlay, dict):
         raise ProvenanceError("canonical release artifact overlay missing")
@@ -120,7 +120,8 @@ def _validate_release_artifact_overlay(payload: dict[str, Any]) -> tuple[set[str
     if paths != expected:
         raise ProvenanceError("canonical release artifact overlay path set mismatch")
     for path in paths:
-        if _blob("HEAD", path) != _blob(str(sha), path):
+        candidate = workflow_parent if path == ".github/workflows/ci.yml" else "HEAD"
+        if _blob(candidate, path) != _blob(str(sha), path):
             raise ProvenanceError(f"canonical release artifact overlay blob mismatch: {path}")
     return paths, str(sha)
 
@@ -162,7 +163,12 @@ def _validate_canonical_launch(payload: dict[str, Any]) -> set[str]:
         raise ProvenanceError("canonical launch assembly parent mismatch")
     _assert_ancestor(str(assembly), legacy._git("rev-parse", "HEAD"))
 
-    release_paths, _release_sha = _validate_release_artifact_overlay(payload)
+    workflow_parent = "e96ba4dc658660ac0ca62b886b631848ddcf97e2"
+    workflow_paths = _validate_successor(
+        payload, "release_qualification_overlay",
+        "92bc5e7c85e72114d0635d036ad5dfc4ca06a2f8", workflow_parent, {".github/workflows/ci.yml"},
+    )
+    release_paths, _release_sha = _validate_release_artifact_overlay(payload, workflow_parent)
     media_paths = _validate_successor(
         payload, "media_integrity_overlay",
         "95ce65992c49dbfcdc04ae42630368154724c47d", "d536a1f390c8326b321e0f9ff870a28536f13474",
@@ -213,6 +219,7 @@ def _validate_canonical_launch(payload: dict[str, Any]) -> set[str]:
                 raise ProvenanceError(f"canonical source blob mismatch: {name}:{path}")
         candidate_paths.update(paths)
     candidate_paths.update(release_paths)
+    candidate_paths.update(workflow_paths)
     candidate_paths.update(media_paths)
     candidate_paths.update(edit_paths)
 

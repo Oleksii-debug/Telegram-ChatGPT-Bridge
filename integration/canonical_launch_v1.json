@@ -104,6 +104,13 @@
       "tests/test_finalwave46_request_parser_fuzz.py"
     ]
   },
+  "release_qualification_overlay": {
+    "sha": "92bc5e7c85e72114d0635d036ad5dfc4ca06a2f8",
+    "parent_sha": "e96ba4dc658660ac0ca62b886b631848ddcf97e2",
+    "exact_paths": [
+      ".github/workflows/ci.yml"
+    ]
+  },
   "runtime_composition": {
     "path": "bridge/runtime_wsgi.py",
     "preserves_parent_passenger_observation": true,

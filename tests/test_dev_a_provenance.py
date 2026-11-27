@@ -44,6 +44,7 @@ class DevAProvenanceTests(unittest.TestCase):
     def test_canonical_exact_sources_match_their_reviewed_blobs(self):
         payload = json.loads(CANONICAL_MANIFEST.read_text(encoding="utf-8"))
         release_overlay = payload["release_artifact_overlay"]
+        qualification = payload["release_qualification_overlay"]
         media_overlay = payload["media_integrity_overlay"]
         superseded_paths = set(release_overlay["exact_paths"]) | set(media_overlay["exact_paths"])
         for source in payload["sources"].values():
@@ -58,7 +59,11 @@ class DevAProvenanceTests(unittest.TestCase):
                 self.assertEqual(_blob("HEAD", path), _blob(overlay["sha"], path))
         for path in release_overlay["exact_paths"]:
             with self.subTest(release_artifact_path=path):
-                self.assertEqual(_blob("HEAD", path), _blob(release_overlay["sha"], path))
+                candidate = qualification["parent_sha"] if path in qualification["exact_paths"] else "HEAD"
+                self.assertEqual(_blob(candidate, path), _blob(release_overlay["sha"], path))
+        for path in qualification["exact_paths"]:
+            with self.subTest(qualification_path=path):
+                self.assertEqual(_blob("HEAD", path), _blob(qualification["sha"], path))
         for path in media_overlay["exact_paths"]:
             with self.subTest(media_integrity_path=path):
                 self.assertEqual(_blob("HEAD", path), _blob(media_overlay["sha"], path))
